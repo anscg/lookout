@@ -1,0 +1,151 @@
+import { sql, eq, and, lt, inArray } from "drizzle-orm";
+import { db, schema } from "../db/index.js";
+import {
+  boss,
+  COMPILE_JOB,
+  CHECK_TIMEOUTS_JOB,
+  CLEANUP_UNCONFIRMED_JOB,
+} from "./queue.js";
+import { cleanupRateLimits } from "./timing.js";
+import {
+  AUTO_PAUSE_AFTER_MINUTES,
+  AUTO_STOP_AFTER_MINUTES,
+  UNCONFIRMED_CLEANUP_AFTER_MINUTES,
+  STUCK_COMPILING_TIMEOUT_MINUTES,
+} from "@collapse/shared";
+
+/**
+ * Register periodic jobs with pgBoss.
+ */
+export async function registerTimeoutJobs() {
+  // Create queues first (pgBoss requires queues to exist before scheduling)
+  await boss.createQueue(COMPILE_JOB);
+  await boss.createQueue(CHECK_TIMEOUTS_JOB);
+  await boss.createQueue(CLEANUP_UNCONFIRMED_JOB);
+
+  // Check timeouts every minute
+  await boss.schedule(CHECK_TIMEOUTS_JOB, "* * * * *");
+  await boss.work(CHECK_TIMEOUTS_JOB, async () => {
+    await checkTimeouts();
+    cleanupRateLimits();
+  });
+
+  // Cleanup unconfirmed screenshots every 5 minutes
+  await boss.schedule(CLEANUP_UNCONFIRMED_JOB, "*/5 * * * *");
+  await boss.work(CLEANUP_UNCONFIRMED_JOB, async () => {
+    await cleanupUnconfirmed();
+  });
+}
+
+async function checkTimeouts() {
+  const now = new Date();
+
+  // Auto-pause: active sessions with no screenshots for AUTO_PAUSE_AFTER_MINUTES
+  const autoPauseThreshold = new Date(
+    now.getTime() - AUTO_PAUSE_AFTER_MINUTES * 60_000,
+  );
+
+  const toPause = await db
+    .select({ id: schema.sessions.id, startedAt: schema.sessions.startedAt, resumedAt: schema.sessions.resumedAt, totalActiveSeconds: schema.sessions.totalActiveSeconds })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.status, "active"),
+        lt(schema.sessions.lastScreenshotAt, autoPauseThreshold),
+      ),
+    );
+
+  for (const session of toPause) {
+    const activeFrom = session.resumedAt || session.startedAt!;
+    const additionalSeconds = Math.floor(
+      (now.getTime() - activeFrom.getTime()) / 1000,
+    );
+
+    await db
+      .update(schema.sessions)
+      .set({
+        status: "paused",
+        pausedAt: now,
+        totalActiveSeconds: session.totalActiveSeconds + additionalSeconds,
+        updatedAt: now,
+      })
+      .where(eq(schema.sessions.id, session.id));
+  }
+
+  // Auto-stop: any active/paused session with no screenshots for AUTO_STOP_AFTER_MINUTES
+  const autoStopThreshold = new Date(
+    now.getTime() - AUTO_STOP_AFTER_MINUTES * 60_000,
+  );
+
+  const toStop = await db
+    .select({ id: schema.sessions.id, status: schema.sessions.status, startedAt: schema.sessions.startedAt, resumedAt: schema.sessions.resumedAt, totalActiveSeconds: schema.sessions.totalActiveSeconds })
+    .from(schema.sessions)
+    .where(
+      and(
+        inArray(schema.sessions.status, ["active", "paused"]),
+        lt(schema.sessions.lastScreenshotAt, autoStopThreshold),
+      ),
+    );
+
+  for (const session of toStop) {
+    let totalActiveSeconds = session.totalActiveSeconds;
+    if (session.status === "active" && session.startedAt) {
+      const activeFrom = session.resumedAt || session.startedAt;
+      totalActiveSeconds += Math.floor(
+        (now.getTime() - activeFrom.getTime()) / 1000,
+      );
+    }
+
+    await db
+      .update(schema.sessions)
+      .set({
+        status: "stopped",
+        stoppedAt: now,
+        totalActiveSeconds,
+        updatedAt: now,
+      })
+      .where(eq(schema.sessions.id, session.id));
+
+    // Enqueue compilation
+    await boss.send(COMPILE_JOB, { sessionId: session.id });
+  }
+
+  // Detect stuck compiling sessions (>1 hour)
+  const stuckThreshold = new Date(now.getTime() - STUCK_COMPILING_TIMEOUT_MINUTES * 60_000);
+  const stuck = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.status, "compiling"),
+        lt(schema.sessions.updatedAt, stuckThreshold),
+      ),
+    );
+
+  for (const session of stuck) {
+    await db
+      .update(schema.sessions)
+      .set({ status: "stopped", updatedAt: now })
+      .where(eq(schema.sessions.id, session.id));
+    await boss.send(COMPILE_JOB, { sessionId: session.id });
+  }
+}
+
+async function cleanupUnconfirmed() {
+  const threshold = new Date(
+    Date.now() - UNCONFIRMED_CLEANUP_AFTER_MINUTES * 60_000,
+  );
+
+  // Delete unconfirmed screenshot records older than threshold
+  await db
+    .delete(schema.screenshots)
+    .where(
+      and(
+        eq(schema.screenshots.confirmed, false),
+        lt(schema.screenshots.createdAt, threshold),
+      ),
+    );
+  // Note: orphaned R2 objects from unconfirmed uploads will naturally
+  // be cleaned up as they were never confirmed. The presigned URLs
+  // have expired so no new uploads can happen to those keys.
+}

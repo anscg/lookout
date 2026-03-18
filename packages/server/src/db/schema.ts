@@ -1,0 +1,91 @@
+import {
+  pgTable,
+  pgEnum,
+  uuid,
+  text,
+  timestamp,
+  integer,
+  boolean,
+  jsonb,
+  index,
+} from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
+
+function randomHex(bytes: number): string {
+  return randomBytes(bytes).toString("hex");
+}
+
+export const sessionStatusEnum = pgEnum("session_status", [
+  "pending",
+  "active",
+  "paused",
+  "stopped",
+  "compiling",
+  "complete",
+  "failed",
+]);
+
+export const sessions = pgTable(
+  "sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    token: text("token")
+      .notNull()
+      .unique()
+      .$defaultFn(() => randomHex(32)),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
+    status: sessionStatusEnum("status").notNull().default("pending"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    lastScreenshotAt: timestamp("last_screenshot_at", { withTimezone: true }),
+    resumedAt: timestamp("resumed_at", { withTimezone: true }),
+    totalActiveSeconds: integer("total_active_seconds").notNull().default(0),
+    videoUrl: text("video_url"),
+    videoR2Key: text("video_r2_key"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_sessions_status").on(table.status),
+    index("idx_sessions_active_last_screenshot")
+      .on(table.lastScreenshotAt)
+      .where(sql`status IN ('active', 'paused')`),
+  ],
+);
+
+export const screenshots = pgTable(
+  "screenshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    r2Key: text("r2_key").notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull(),
+    minuteBucket: integer("minute_bucket").notNull(),
+    confirmed: boolean("confirmed").notNull().default(false),
+    width: integer("width"),
+    height: integer("height"),
+    fileSizeBytes: integer("file_size_bytes"),
+    sampled: boolean("sampled").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_screenshots_session_id").on(table.sessionId),
+    index("idx_screenshots_session_bucket").on(
+      table.sessionId,
+      table.minuteBucket,
+    ),
+    index("idx_screenshots_unconfirmed")
+      .on(table.sessionId)
+      .where(sql`confirmed = false`),
+  ],
+);
