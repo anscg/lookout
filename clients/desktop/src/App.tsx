@@ -10,6 +10,8 @@ import {
   ResultView,
 } from "@collapse/react";
 import { useNativeCapture } from "./hooks/useNativeCapture.js";
+import type { CaptureSource } from "./hooks/useNativeCapture.js";
+import { SourcePicker } from "./components/SourcePicker.js";
 
 const API_BASE = "http://localhost:3001"; // TODO: make configurable
 
@@ -175,9 +177,13 @@ function WaitingForToken({ onToken }: { onToken: (t: string) => void }) {
   );
 }
 
-function DesktopRecorder({ token }: { token: string }) {
+function DesktopRecorder({ token, source, onChangeSource }: {
+  token: string;
+  source: CaptureSource;
+  onChangeSource: () => void;
+}) {
   const session = useSession();
-  const capture = useNativeCapture(token, API_BASE);
+  const capture = useNativeCapture(token, API_BASE, source);
   const displaySeconds = useSessionTimer(
     capture.trackedSeconds || session.trackedSeconds,
     capture.isCapturing,
@@ -249,7 +255,10 @@ function DesktopRecorder({ token }: { token: string }) {
 
       <div style={styles.controls}>
         {!capture.isCapturing && isActive && (
-          <button style={styles.startBtn} onClick={handleStart}>Start Recording</button>
+          <>
+            <button style={styles.startBtn} onClick={handleStart}>Start Recording</button>
+            <button style={styles.changeSrcBtn} onClick={onChangeSource}>Change Source</button>
+          </>
         )}
         {!capture.isCapturing && isPaused && (
           <>
@@ -273,6 +282,7 @@ function DesktopRecorder({ token }: { token: string }) {
 export function App() {
   const [token, setToken] = useState(getInitialToken);
   const [permissionGranted, setPermissionGranted] = useState(false);
+  const [captureSource, setCaptureSource] = useState<CaptureSource | null>(null);
 
   // Listen for deep links — both the plugin event (warm start) and
   // the Rust-emitted event (cold start, where the app was launched by the URL)
@@ -312,10 +322,19 @@ export function App() {
     return <WaitingForToken onToken={setToken} />;
   }
 
-  // Step 3: Record
+  // Step 3: Pick capture source
+  if (!captureSource) {
+    return <SourcePicker onSelect={setCaptureSource} />;
+  }
+
+  // Step 4: Record
   return (
     <CollapseProvider token={token} apiBaseUrl={API_BASE}>
-      <DesktopRecorder token={token} />
+      <DesktopRecorder
+        token={token}
+        source={captureSource}
+        onChangeSource={() => setCaptureSource(null)}
+      />
     </CollapseProvider>
   );
 }
@@ -366,6 +385,11 @@ const styles: Record<string, React.CSSProperties> = {
     animation: "pulse 1.5s ease-in-out infinite",
   },
   recordingText: { fontSize: 13, fontWeight: 600, color: "#ef4444", marginRight: 6 },
+  changeSrcBtn: {
+    padding: "8px 16px", fontSize: 12, fontWeight: 500,
+    background: "transparent", color: "#888", border: "1px solid #444",
+    borderRadius: 8, cursor: "pointer",
+  },
   permissionCard: {
     maxWidth: 360, padding: 32, background: "#1a1a1a", borderRadius: 16,
     border: "1px solid #333", textAlign: "center" as const,
