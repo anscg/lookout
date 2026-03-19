@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../logger.js";
 import {
   Button,
   ErrorDisplay,
@@ -58,8 +58,10 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
   const { previewUrl } = useScreenPreview(selected, 1500);
 
   const refresh = useCallback(async () => {
+    console.log("[sources] listing capture sources...");
     try {
       const result = await invoke<CaptureSourceList>("list_capture_sources");
+      console.log(`[sources] found ${result.monitors.length} monitors, ${result.windows.length} windows`);
       setSources(result);
       setError(null);
 
@@ -67,11 +69,14 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
       if (!selected) {
         const primary = result.monitors.find((m) => m.isPrimary) ?? result.monitors[0];
         if (primary) {
+          console.log(`[sources] auto-selected: monitor id=${primary.id} (${primary.name})`);
           setSelected({ type: "monitor", id: primary.id });
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[sources] failed to list sources: ${msg}`);
+      setError(msg);
     }
   }, [selected]);
 

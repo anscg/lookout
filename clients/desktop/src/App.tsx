@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./logger.js";
 import {
   Gallery,
   SessionDetail,
@@ -28,10 +28,12 @@ export function App() {
   const lastDeepLink = React.useRef<string | null>(null);
   const handleDeepLinkUrls = useCallback(
     (urls: string[]) => {
+      console.log("[app] deep link received:", urls);
       for (const url of urls) {
         if (url === lastDeepLink.current) return; // already handled
         const token = extractToken(url);
         if (token) {
+          console.log(`[app] extracted token: ${token.slice(0, 8)}...`);
           lastDeepLink.current = url;
           tokenStore.addToken(token);
           navigate({ page: "record", token });
@@ -58,14 +60,18 @@ export function App() {
     const check = async () => {
       for (let i = 0; i < 10 && !cancelled; i++) {
         try {
+          console.debug(`[app] cold-start poll attempt ${i + 1}/10`);
           const urls = await invoke<string[]>("get_cold_start_urls");
           if (urls.length > 0) {
             handleDeepLinkUrls(urls);
             return;
           }
-        } catch {}
+        } catch (e) {
+          console.debug("[app] cold-start poll miss:", e);
+        }
         await new Promise((r) => setTimeout(r, 500));
       }
+      console.debug("[app] cold-start poll finished, no urls found");
     };
     check();
     return () => { cancelled = true; };

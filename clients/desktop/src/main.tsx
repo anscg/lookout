@@ -1,6 +1,7 @@
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { createRoot } from "react-dom/client";
 import React from "react";
+import { getReport } from "./logger.js"; // side-effect: captures console, renders debug panel
 import { App } from "./App.js";
 
 // Wrap fetch so only cross-origin requests go through Tauri's HTTP plugin.
@@ -8,10 +9,23 @@ import { App } from "./App.js";
 const originalFetch = window.fetch;
 window.fetch = function (input, init) {
   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
-  if (url.startsWith("http://") || url.startsWith("https://")) {
-    return tauriFetch(input as any, init) as any;
-  }
-  return originalFetch.call(window, input, init);
+  const method = init?.method || "GET";
+  console.log(`[net] ${method} ${url}`);
+
+  const doFetch = (url.startsWith("http://") || url.startsWith("https://"))
+    ? tauriFetch(input as any, init) as any
+    : originalFetch.call(window, input, init);
+
+  return (doFetch as Promise<Response>).then(
+    (res) => {
+      console.log(`[net] ${method} ${url} → ${res.status}`);
+      return res;
+    },
+    (err: Error) => {
+      console.error(`[net] ${method} ${url} → FAILED: ${err.message}`);
+      throw err;
+    },
+  );
 };
 
 // Clear any bad stored tokens from previous testing
@@ -24,18 +38,50 @@ try {
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
-  { error: string | null }
+  { error: string | null; copied: boolean }
 > {
-  state = { error: null as string | null };
+  state = { error: null as string | null, copied: false };
   static getDerivedStateFromError(err: Error) {
-    return { error: err.stack || err.message };
+    return { error: err.stack || err.message, copied: false };
   }
+  componentDidCatch(error: Error) {
+    console.error("[react] render crash:", error.message, error.stack);
+  }
+  handleCopy = () => {
+    const report = `REACT CRASH:\n${this.state.error}\n\n--- LOG ---\n${getReport()}`;
+    navigator.clipboard.writeText(report).then(() => {
+      this.setState({ copied: true });
+      setTimeout(() => this.setState({ copied: false }), 2000);
+    });
+  };
   render() {
     if (this.state.error) {
       return (
-        <pre style={{ color: "red", padding: 20, fontSize: 12, whiteSpace: "pre-wrap" }}>
-          {this.state.error}
-        </pre>
+        <div style={{ padding: 24, fontFamily: "monospace", background: "#0a0a0a", color: "#e5e5e5", minHeight: "100vh" }}>
+          <div style={{ maxWidth: 500, margin: "0 auto", border: "1px solid #f44", borderRadius: 8, padding: 20 }}>
+            <h2 style={{ color: "#f44", margin: "0 0 12px 0", fontSize: 18 }}>Something went wrong</h2>
+            <pre style={{ color: "#faa", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 300, overflowY: "auto", marginBottom: 16 }}>
+              {this.state.error}
+            </pre>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={this.handleCopy}
+                style={{ padding: "8px 16px", background: "#333", color: "#0f0", border: "1px solid #555", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+              >
+                {this.state.copied ? "Copied!" : "Copy Error Report"}
+              </button>
+              <button
+                onClick={() => this.setState({ error: null, copied: false })}
+                style={{ padding: "8px 16px", background: "#333", color: "#ff0", border: "1px solid #555", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+              >
+                Try Again
+              </button>
+            </div>
+            <p style={{ color: "#888", fontSize: 11, marginTop: 12 }}>
+              Press ` to open the debug log. Copy and send to the developer.
+            </p>
+          </div>
+        </div>
       );
     }
     return this.props.children;

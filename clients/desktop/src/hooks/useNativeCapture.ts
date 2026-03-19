@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../logger.js";
 import { SCREENSHOT_INTERVAL_MS, MAX_WIDTH, MAX_HEIGHT, JPEG_QUALITY } from "@collapse/shared";
 
 export interface CaptureSource {
@@ -42,15 +42,21 @@ export function useNativeCapture(
   const blobUrlRef = useRef<string | null>(null);
 
   const captureOnce = useCallback(async () => {
+    const s = sourceRef.current;
+    console.log(`[capture] starting capture for ${s.type} id=${s.id}`);
     try {
       const result = await invoke<CaptureUploadResult>("capture_and_upload", {
-        source: sourceRef.current,
+        source: s,
         maxWidth: MAX_WIDTH,
         maxHeight: MAX_HEIGHT,
         jpegQuality: Math.round(JPEG_QUALITY * 100),
       });
       setTrackedSeconds(result.trackedSeconds);
-      setScreenshotCount((c) => c + 1);
+      setScreenshotCount((c) => {
+        const n = c + 1;
+        console.log(`[capture] screenshot #${n} done, tracked: ${result.trackedSeconds}s, next at: ${result.nextExpectedAt}`);
+        return n;
+      });
       setError(null);
 
       // Convert preview base64 to blob URL for display
@@ -62,10 +68,12 @@ export function useNativeCapture(
         blobUrlRef.current = url;
         setLastScreenshotUrl(url);
       }
+      console.log(`[capture] next capture in ${SCREENSHOT_INTERVAL_MS / 1000}s`);
     } catch (err) {
       const msg = err instanceof Error
         ? err.message + (err.stack ? "\n" + err.stack : "")
         : String(err);
+      console.error(`[capture] capture failed: ${msg}`);
       setError(msg);
     }
   }, []);
@@ -79,9 +87,13 @@ export function useNativeCapture(
   useEffect(() => {
     if (!isCapturing) return;
 
+    console.log(`[capture] capture loop started, interval: ${SCREENSHOT_INTERVAL_MS}ms`);
     captureRef.current();
     const id = setInterval(() => captureRef.current(), SCREENSHOT_INTERVAL_MS);
-    return () => clearInterval(id);
+    return () => {
+      console.log("[capture] capture loop stopped");
+      clearInterval(id);
+    };
   }, [isCapturing]);
 
   // Clean up blob URL on unmount
@@ -96,14 +108,17 @@ export function useNativeCapture(
 
   const startCapturing = useCallback(async () => {
     if (!configuredRef.current) {
+      console.log(`[capture] configuring with token: ${token.slice(0, 8)}...`);
       await invoke("configure", { token, apiBaseUrl });
       configuredRef.current = true;
     }
+    console.log("[capture] starting capture");
     setIsCapturing(true);
     setError(null);
   }, [token, apiBaseUrl]);
 
   const stopCapturing = useCallback(() => {
+    console.log("[capture] stopping capture");
     setIsCapturing(false);
   }, []);
 

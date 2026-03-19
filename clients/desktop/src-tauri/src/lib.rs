@@ -2,7 +2,7 @@ mod capture;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 
@@ -189,6 +189,7 @@ async fn capture_and_upload(
     max_height: u32,
     jpeg_quality: u8,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<CaptureUploadResult, String> {
     let config = {
         let guard = state.config.lock().map_err(|e| e.to_string())?;
@@ -196,10 +197,21 @@ async fn capture_and_upload(
     };
 
     // Step 1: Native screenshot
+    let _ = app.emit("capture-progress", "capturing screen...");
     let screenshot = capture::take_screenshot(source, max_width, max_height, jpeg_quality)?;
     let jpeg_bytes = base64_decode(&screenshot.base64)?;
+    let _ = app.emit(
+        "capture-progress",
+        format!(
+            "captured {}x{} ({}KB jpeg)",
+            screenshot.width,
+            screenshot.height,
+            jpeg_bytes.len() / 1024
+        ),
+    );
 
     // Step 2: Get presigned URL from server
+    let _ = app.emit("capture-progress", "getting upload url from server...");
     let client = reqwest::Client::new();
     let upload_url_resp: UploadUrlResponse = client
         .get(format!(
@@ -212,8 +224,16 @@ async fn capture_and_upload(
         .json()
         .await
         .map_err(|e| format!("Failed to parse upload URL response: {e}"))?;
+    let _ = app.emit(
+        "capture-progress",
+        format!("got upload url, screenshot id: {}", upload_url_resp.screenshot_id),
+    );
 
     // Step 3: Upload JPEG to R2
+    let _ = app.emit(
+        "capture-progress",
+        format!("uploading {}KB to R2...", jpeg_bytes.len() / 1024),
+    );
     client
         .put(&upload_url_resp.upload_url)
         .header("Content-Type", "image/jpeg")
@@ -223,8 +243,10 @@ async fn capture_and_upload(
         .map_err(|e| format!("R2 upload failed: {e}"))?
         .error_for_status()
         .map_err(|e| format!("R2 upload rejected: {e}"))?;
+    let _ = app.emit("capture-progress", "uploaded to R2 successfully");
 
     // Step 4: Confirm upload with server
+    let _ = app.emit("capture-progress", "confirming upload with server...");
     let confirm_resp: ConfirmResponse = client
         .post(format!(
             "{}/api/sessions/{}/screenshots",
@@ -242,6 +264,13 @@ async fn capture_and_upload(
         .json()
         .await
         .map_err(|e| format!("Failed to parse confirmation: {e}"))?;
+    let _ = app.emit(
+        "capture-progress",
+        format!(
+            "confirmed! tracked {}s, next expected at {}",
+            confirm_resp.tracked_seconds, confirm_resp.next_expected_at
+        ),
+    );
 
     Ok(CaptureUploadResult {
         confirmed: confirm_resp.confirmed,

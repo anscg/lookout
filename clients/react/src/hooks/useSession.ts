@@ -82,8 +82,8 @@ export function useSession() {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
         }
-      } catch {
-        // Ignore poll errors
+      } catch (e) {
+        console.warn("[session] poll error:", e);
       }
     }, pollIntervalMs);
   }, [client, pollIntervalMs]);
@@ -107,8 +107,8 @@ export function useSession() {
     if (name) {
       try {
         await client.rename(name);
-      } catch {
-        // Non-fatal — server defaults to "untitled-YYYY-MM-DD"
+      } catch (e) {
+        console.warn("[session] rename failed (non-fatal):", e);
       }
     }
     const data = await client.stop();

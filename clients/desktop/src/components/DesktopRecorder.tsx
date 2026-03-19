@@ -15,6 +15,7 @@ import {
   fontWeight,
   radii,
 } from "@collapse/react";
+import { getReport } from "../logger.js";
 import { useNativeCapture } from "../hooks/useNativeCapture.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
@@ -62,9 +63,11 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack }: Deskt
     const isTransitioning = pauseLoading || resumeLoading || stopLoading;
     if (!autoStarted.current && !capture.isCapturing && !isTransitioning) {
       if (session.status === "active" || session.status === "pending") {
+        console.log(`[session] auto-starting capture, status: ${session.status}`);
         autoStarted.current = true;
         capture.startCapturing();
       } else if (session.status === "paused") {
+        console.log("[session] auto-resuming paused session");
         autoStarted.current = true;
         session.resume().then(() => capture.startCapturing());
       }
@@ -83,21 +86,26 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack }: Deskt
   }, [capture.startCapturing]);
 
   const handlePause = useCallback(async () => {
+    console.log("[session] pausing...");
     setPauseLoading(true);
     capture.stopCapturing();
     await session.pause();
+    console.log("[session] paused");
     setPauseLoading(false);
   }, [capture, session]);
 
   const handleResume = useCallback(async () => {
+    console.log("[session] resuming...");
     setResumeLoading(true);
     await session.resume();
     await capture.startCapturing();
+    console.log("[session] resumed");
     setResumeLoading(false);
   }, [capture, session]);
 
   // Stop button opens the naming prompt instead of immediately stopping
   const handleStopClick = useCallback(() => {
+    console.log("[session] stop clicked, showing naming prompt");
     capture.stopCapturing();
     setShowNamingPrompt(true);
   }, [capture]);
@@ -105,6 +113,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack }: Deskt
   // Finalize stop: optionally name, then stop the session.
   // Keep the naming prompt visible during the stop to prevent control flash.
   const handleConfirmStop = useCallback(async (name: string | null) => {
+    console.log(`[session] stopping, name: ${name?.trim() || "(none)"}`);
     setStopLoading(true);
     if (name && name.trim()) {
       try {
@@ -113,11 +122,12 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack }: Deskt
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: name.trim() }),
         });
-      } catch {
-        // Non-fatal — the server will default to "untitled-YYYY-MM-DD"
+      } catch (e) {
+        console.warn("[session] rename failed (non-fatal):", e);
       }
     }
     await session.stop();
+    console.log("[session] stopped, transitioning to terminal state");
     // After stop, session.status transitions to "stopped" and the terminal branch renders
   }, [token, session]);
 
@@ -239,7 +249,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack }: Deskt
       )}
 
       {capture.error && (
-        <ErrorDisplay variant="banner" error={capture.error} />
+        <ErrorDisplay variant="banner" error={capture.error} onCopy={() => navigator.clipboard.writeText(getReport())} />
       )}
 
       {showNamingPrompt ? (

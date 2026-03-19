@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../logger.js";
 import type { CaptureSource } from "./useNativeCapture.js";
 
 interface PreviewResult {
@@ -34,6 +34,7 @@ export function useScreenPreview(
     }
 
     let cancelled = false;
+    console.debug(`[preview] starting preview for ${source.type} id=${source.id} every ${intervalMs}ms`);
 
     const capture = async () => {
       const s = sourceRef.current;
@@ -53,9 +54,12 @@ export function useScreenPreview(
         urlRef.current = url;
         setPreviewUrl(url);
         setError(null);
+        console.debug(`[preview] got preview ${result.width}x${result.height} (${result.size_bytes} bytes)`);
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err));
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[preview] preview failed: ${msg}`);
+          setError(msg);
         }
       }
     };
@@ -65,6 +69,7 @@ export function useScreenPreview(
 
     return () => {
       cancelled = true;
+      console.debug("[preview] stopping preview");
       clearInterval(id);
       if (urlRef.current) {
         URL.revokeObjectURL(urlRef.current);

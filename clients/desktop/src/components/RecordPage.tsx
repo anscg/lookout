@@ -32,14 +32,18 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
   // Check if the session is still recordable before showing source picker
   useEffect(() => {
     (async () => {
+      console.log(`[record] checking session status for token: ${token.slice(0, 8)}...`);
       try {
         const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
         if (!res.ok) {
-          setCheckError(`HTTP ${res.status} ${await res.text().catch(() => "")}`);
+          const errText = `HTTP ${res.status} ${await res.text().catch(() => "")}`;
+          console.error(`[record] session check failed: ${errText}`);
+          setCheckError(errText);
           setSessionCheck("error");
           return;
         }
         const data = await res.json();
+        console.log(`[record] session status: ${data.status}`);
         setSessionStatus(data.status);
         if (["stopped", "compiling", "complete", "failed"].includes(data.status)) {
           setSessionCheck("finished");
@@ -47,6 +51,7 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
           setSessionCheck("ok");
         }
       } catch (err: any) {
+        console.error("[record] session check error:", err);
         setCheckError(err.message || String(err));
         setSessionCheck("error");
       }
@@ -54,10 +59,14 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
   }, [token]);
 
   const handleStop = useCallback(async () => {
+    console.log("[record] stopping session from source picker...");
     setStopping(true);
     try {
       await fetch(`${API_BASE}/api/sessions/${token}/stop`, { method: "POST" });
-    } catch {}
+      console.log("[record] session stopped");
+    } catch (e) {
+      console.error("[record] stop failed:", e);
+    }
     onBack();
   }, [token, onBack]);
 
