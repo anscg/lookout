@@ -53,7 +53,8 @@ jobs:
             libxdo-dev \
             libx11-dev \
             libxcb-randr0-dev \
-            libxcb-shm0-dev
+            libxcb-shm0-dev \
+            libpipewire-0.3-dev
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
