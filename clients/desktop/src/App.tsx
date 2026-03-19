@@ -52,10 +52,14 @@ export function App() {
     return () => { unlistenPlugin.then((fn) => fn()); };
   }, [handleDeepLinkUrls]);
 
-  // Poll for cold-start deep link URLs. The Rust side stashes URLs from both
-  // get_current() (immediate) and on_open_url (delayed Apple Event). We poll
-  // a few times to catch URLs that arrive after the app finishes launching.
+  // Poll for cold-start deep link URLs exactly once. The Rust side stashes
+  // URLs from both get_current() (immediate) and on_open_url (delayed Apple
+  // Event). We poll a few times to catch URLs that arrive after launch.
+  const coldStartRan = React.useRef(false);
   useEffect(() => {
+    if (coldStartRan.current) return;
+    coldStartRan.current = true;
+
     let cancelled = false;
     const check = async () => {
       for (let i = 0; i < 10 && !cancelled; i++) {
