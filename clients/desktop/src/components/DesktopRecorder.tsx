@@ -31,8 +31,12 @@ const API_BASE = "https://collapse.b.selfhosted.hackclub.com";
 export function DesktopRecorder({ token, source, onChangeSource, onBack }: DesktopRecorderProps) {
   const session = useSession();
   const capture = useNativeCapture(token, API_BASE, source);
-  // Live preview always runs (local-only, no upload)
-  const { previewUrl: livePreviewUrl } = useScreenPreview(source, 2000);
+  // Live preview runs until first capture arrives, then the captured frame takes over
+  const { previewUrl: livePreviewUrl } = useScreenPreview(
+    capture.lastScreenshotUrl ? null : source,
+    2000,
+  );
+  const previewUrl = capture.lastScreenshotUrl || livePreviewUrl;
   const displaySeconds = useSessionTimer(
     capture.trackedSeconds || session.trackedSeconds,
     capture.isCapturing,
@@ -150,7 +154,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack }: Deskt
         <StatusBar
           displaySeconds={displaySeconds}
           screenshotCount={capture.screenshotCount}
-          uploads={{ pending: 0, completed: capture.screenshotCount, failed: 0 }}
+          uploads={{ pending: 0, completed: 0, failed: 0 }}
         />
         <div style={{ marginTop: spacing.lg }}>
           <ResultView status={session.status} trackedSeconds={session.trackedSeconds} />
@@ -209,20 +213,27 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack }: Deskt
       <StatusBar
         displaySeconds={displaySeconds}
         screenshotCount={capture.screenshotCount}
-        uploads={{ pending: 0, completed: capture.screenshotCount, failed: 0 }}
+        uploads={{ pending: 0, completed: 0, failed: 0 }}
       />
 
-      {/* Screen preview */}
-      {livePreviewUrl && (
+      {/* Screen preview — shows captured frame after first capture, live preview before */}
+      {previewUrl && (
         <div style={{
           position: "relative", marginBottom: spacing.md, borderRadius: radii.md,
           overflow: "hidden", background: colors.bg.sunken, border: `1px solid ${colors.border.default}`,
         }}>
           <img
-            src={livePreviewUrl}
+            src={previewUrl}
             alt="Screen preview"
             style={{ width: "100%", display: "block" }}
           />
+          <span style={{
+            position: "absolute", bottom: 6, right: 6, fontSize: fontSize.xs,
+            color: colors.text.tertiary, background: "rgba(0,0,0,0.7)",
+            padding: "2px 6px", borderRadius: radii.sm,
+          }}>
+            {capture.lastScreenshotUrl ? "Latest capture" : "Live preview"}
+          </span>
         </div>
       )}
 

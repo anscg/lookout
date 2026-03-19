@@ -90,6 +90,20 @@ pub struct ConfirmResponse {
     pub next_expected_at: String,
 }
 
+/// Result returned to the frontend from capture_and_upload.
+/// Includes the server confirm data AND the screenshot preview.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureUploadResult {
+    pub confirmed: bool,
+    pub tracked_seconds: i64,
+    pub next_expected_at: String,
+    /// Base64-encoded JPEG of the captured frame (same image that was uploaded)
+    pub preview_base64: String,
+    pub preview_width: u32,
+    pub preview_height: u32,
+}
+
 /// Return the deep link URLs from cold start (if any), then clear them.
 #[tauri::command]
 fn get_cold_start_urls(state: State<'_, AppState>) -> Vec<String> {
@@ -166,6 +180,8 @@ fn take_screenshot(
 }
 
 /// Full capture-upload-confirm pipeline in Rust (no browser CORS issues).
+/// Returns the confirm data AND the screenshot preview (base64) so the
+/// frontend can display the captured frame without a separate IPC call.
 #[tauri::command]
 async fn capture_and_upload(
     source: CaptureSource,
@@ -173,7 +189,7 @@ async fn capture_and_upload(
     max_height: u32,
     jpeg_quality: u8,
     state: State<'_, AppState>,
-) -> Result<ConfirmResponse, String> {
+) -> Result<CaptureUploadResult, String> {
     let config = {
         let guard = state.config.lock().map_err(|e| e.to_string())?;
         guard.clone().ok_or("Not configured — call configure() first")?
@@ -227,7 +243,15 @@ async fn capture_and_upload(
         .await
         .map_err(|e| format!("Failed to parse confirmation: {e}"))?;
 
-    Ok(confirm_resp)
+    Ok(CaptureUploadResult {
+        confirmed: confirm_resp.confirmed,
+        tracked_seconds: confirm_resp.tracked_seconds,
+        next_expected_at: confirm_resp.next_expected_at,
+        // Return the same base64 we already have — no extra work
+        preview_base64: screenshot.base64,
+        preview_width: screenshot.width,
+        preview_height: screenshot.height,
+    })
 }
 
 fn base64_decode(b64: &str) -> Result<Vec<u8>, String> {

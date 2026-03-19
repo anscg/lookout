@@ -1,27 +1,22 @@
 import { useState, useEffect, useRef } from "react";
-import { SCREENSHOT_INTERVAL_MS } from "@collapse/shared";
-
-const INTERVAL_S = SCREENSHOT_INTERVAL_MS / 1000;
 
 /**
  * Client-side interpolated timer. Uses server-provided trackedSeconds
  * as ground truth, interpolates between updates for smooth display.
  *
- * Subtracts one capture interval because the first screenshot fires at t=0
- * (before any real time has elapsed), so the server's trackedSeconds is
- * always one interval ahead of wall-clock time. Capped at 0.
+ * The server already accounts for the first screenshot at t=0 by using
+ * (count(distinct minute_buckets) - 1) * 60, so no client-side offset
+ * is needed.
  */
 export function useSessionTimer(
   serverTrackedSeconds: number,
   isActive: boolean,
 ): number {
-  const [displaySeconds, setDisplaySeconds] = useState(
-    Math.max(0, serverTrackedSeconds - INTERVAL_S),
-  );
+  const [displaySeconds, setDisplaySeconds] = useState(serverTrackedSeconds);
   const lastSyncRef = useRef(Date.now());
 
   useEffect(() => {
-    setDisplaySeconds(Math.max(0, serverTrackedSeconds - INTERVAL_S));
+    setDisplaySeconds(serverTrackedSeconds);
     lastSyncRef.current = Date.now();
   }, [serverTrackedSeconds]);
 
@@ -33,7 +28,7 @@ export function useSessionTimer(
       const elapsed = Math.floor((Date.now() - lastSyncRef.current) / 1000);
       if (elapsed !== lastRenderedSecond) {
         lastRenderedSecond = elapsed;
-        setDisplaySeconds(Math.max(0, serverTrackedSeconds - INTERVAL_S + elapsed));
+        setDisplaySeconds(serverTrackedSeconds + elapsed);
       }
       raf = requestAnimationFrame(tick);
     };
