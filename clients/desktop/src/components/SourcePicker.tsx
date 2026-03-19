@@ -30,6 +30,7 @@ interface CaptureSourceList {
 
 interface SourcePickerProps {
   onSelect: (source: CaptureSource) => void;
+  submitLabel?: string;
 }
 
 function sourcesEqual(a: CaptureSource | null, b: CaptureSource | null): boolean {
@@ -37,7 +38,7 @@ function sourcesEqual(a: CaptureSource | null, b: CaptureSource | null): boolean
   return a.type === b.type && a.id === b.id;
 }
 
-export function SourcePicker({ onSelect }: SourcePickerProps) {
+export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: SourcePickerProps) {
   const [sources, setSources] = useState<CaptureSourceList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"screens" | "windows">("screens");
@@ -200,7 +201,7 @@ export function SourcePicker({ onSelect }: SourcePickerProps) {
           style={styles.startBtn}
           onClick={() => onSelect(selected)}
         >
-          Start Capture
+          {submitLabel}
         </button>
       )}
     </div>

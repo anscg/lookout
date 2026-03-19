@@ -136,36 +136,48 @@ function DesktopRecorder({ token, source, onChangeSource, onBack }: {
     capture.isCapturing,
   );
 
+  const [isTransitioning, setIsTransitioning] = useState(false);
+
   useEffect(() => {
     if (capture.trackedSeconds > 0) {
       session.updateTrackedSeconds(capture.trackedSeconds);
     }
   }, [capture.trackedSeconds, session.updateTrackedSeconds]);
 
-  // Auto-start capturing once session is ready
+  // Auto-start/resume capturing once session is ready
   const autoStarted = React.useRef(false);
   useEffect(() => {
-    if (!autoStarted.current && !capture.isCapturing && (session.status === "active" || session.status === "pending")) {
-      autoStarted.current = true;
-      capture.startCapturing();
+    if (!autoStarted.current && !capture.isCapturing && !isTransitioning) {
+      if (session.status === "active" || session.status === "pending") {
+        autoStarted.current = true;
+        capture.startCapturing();
+      } else if (session.status === "paused") {
+        autoStarted.current = true;
+        session.resume().then(() => capture.startCapturing());
+      }
     }
-  }, [session.status, capture.isCapturing, capture.startCapturing]);
+  }, [session.status, capture.isCapturing, capture.startCapturing, isTransitioning, session]);
 
   const handleStart = useCallback(async () => {
     await capture.startCapturing();
   }, [capture.startCapturing]);
 
   const handlePause = useCallback(async () => {
+    setIsTransitioning(true);
     capture.stopCapturing();
     await session.pause();
+    setIsTransitioning(false);
   }, [capture, session]);
 
   const handleResume = useCallback(async () => {
+    setIsTransitioning(true);
     await session.resume();
     await capture.startCapturing();
+    setIsTransitioning(false);
   }, [capture, session]);
 
   const handleStop = useCallback(async () => {
+    setIsTransitioning(true);
     capture.stopCapturing();
     await session.stop();
   }, [capture, session]);
@@ -228,13 +240,13 @@ function DesktopRecorder({ token, source, onChangeSource, onBack }: {
       )}
 
       <div style={styles.controls}>
-        {!capture.isCapturing && isActive && (
+        {!capture.isCapturing && isActive && !isTransitioning && (
           <>
             <button style={styles.startBtn} onClick={handleStart}>Start Recording</button>
             <button style={styles.changeSrcBtn} onClick={onChangeSource}>Change Source</button>
           </>
         )}
-        {!capture.isCapturing && isPaused && (
+        {!capture.isCapturing && isPaused && !isTransitioning && (
           <>
             <button style={styles.resumeBtn} onClick={handleResume}>Resume</button>
             <button style={styles.stopBtn} onClick={handleStop}>Stop Session</button>
@@ -341,7 +353,10 @@ function RecordPage({ token, onBack, onViewSession }: {
             {stopping ? "Stopping..." : "Stop Session"}
           </button>
         </div>
-        <SourcePicker onSelect={setCaptureSource} />
+        <SourcePicker
+          onSelect={setCaptureSource}
+          submitLabel={sessionStatus === "active" || sessionStatus === "paused" ? "Resume Session" : "Start Capture"}
+        />
       </div>
     );
   }
