@@ -34,6 +34,12 @@ export const sessions = pgTable(
       .notNull()
       .unique()
       .$defaultFn(() => randomHex(32)),
+    name: text("name")
+      .notNull()
+      .$defaultFn(
+        () =>
+          `untitled-${new Date().toISOString().slice(0, 10)}`,
+      ),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
     status: sessionStatusEnum("status").notNull().default("pending"),
     startedAt: timestamp("started_at", { withTimezone: true }),

@@ -19,7 +19,7 @@ export async function internalRoutes(app: FastifyInstance) {
 
   // Create a new session
   app.post<{
-    Body: { metadata?: Record<string, unknown> };
+    Body: { name?: string; metadata?: Record<string, unknown> };
   }>(
     "/api/internal/sessions",
     {
@@ -27,6 +27,7 @@ export async function internalRoutes(app: FastifyInstance) {
         body: {
           type: "object" as const,
           properties: {
+            name: { type: "string" as const, minLength: 1, maxLength: 255 },
             metadata: { type: "object" as const },
           },
           additionalProperties: false,
@@ -34,11 +35,14 @@ export async function internalRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const { metadata } = request.body || {};
+      const { name, metadata } = request.body || {};
 
       const [session] = await db
         .insert(schema.sessions)
-        .values({ metadata: metadata ?? {} })
+        .values({
+          ...(name ? { name } : {}),
+          metadata: metadata ?? {},
+        })
         .returning();
 
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
@@ -84,7 +88,7 @@ export async function internalRoutes(app: FastifyInstance) {
 
       return {
         session,
-        trackedSeconds: Number(count) * 60,
+        trackedSeconds: Math.max(0, (Number(count) - 1) * 60),
         screenshotCount: Number(count),
       };
     },

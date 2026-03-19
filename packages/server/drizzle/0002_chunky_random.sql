@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" ADD COLUMN "name" text NOT NULL DEFAULT 'untitled-' || to_char(now(), 'YYYY-MM-DD');

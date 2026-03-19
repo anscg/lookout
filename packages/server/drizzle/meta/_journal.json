@@ -15,6 +15,13 @@
       "when": 1773874322352,
       "tag": "0001_fine_black_panther",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1773886316714,
+      "tag": "0002_chunky_random",
+      "breakpoints": true
     }
   ]
 }

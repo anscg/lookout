@@ -3,6 +3,7 @@ import type { SessionStatus } from "./constants.js";
 export interface Session {
   id: string;
   token: string;
+  name: string;
   metadata: Record<string, unknown>;
   status: SessionStatus;
   startedAt: string | null;
@@ -36,6 +37,7 @@ export interface Screenshot {
 // -- API request/response types --
 
 export interface CreateSessionRequest {
+  name?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -46,6 +48,7 @@ export interface CreateSessionResponse {
 }
 
 export interface SessionResponse {
+  name: string;
   status: SessionStatus;
   trackedSeconds: number;
   screenshotCount: number;
@@ -111,6 +114,7 @@ export interface ThumbnailResponse {
 
 export interface SessionSummary {
   token: string;
+  name: string;
   status: SessionStatus;
   trackedSeconds: number;
   screenshotCount: number;
@@ -120,6 +124,14 @@ export interface SessionSummary {
   thumbnailUrl: string | null;
   videoUrl: string | null;
   metadata: Record<string, unknown>;
+}
+
+export interface RenameSessionRequest {
+  name: string;
+}
+
+export interface RenameSessionResponse {
+  name: string;
 }
 
 export interface BatchSessionsRequest {

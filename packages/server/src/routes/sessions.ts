@@ -45,7 +45,7 @@ async function getTrackedSeconds(sessionId: string): Promise<number> {
         eq(schema.screenshots.confirmed, true),
       ),
     );
-  return Number(count) * 60;
+  return Math.max(0, (Number(count) - 1) * 60);
 }
 
 /** Count total confirmed screenshots */
@@ -96,6 +96,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       const screenshotCount = await getScreenshotCount(session.id);
 
       return {
+        name: session.name,
         status: session.status,
         trackedSeconds,
         screenshotCount,
@@ -106,6 +107,47 @@ export async function sessionRoutes(app: FastifyInstance) {
         videoUrl: session.videoUrl ?? null,
         metadata: session.metadata ?? {},
       };
+    },
+  );
+
+  // Rename session
+  app.patch<{
+    Params: { token: string };
+    Body: { name: string };
+  }>(
+    "/api/sessions/:token/name",
+    {
+      schema: {
+        params: tokenParamSchema,
+        body: {
+          type: "object" as const,
+          required: ["name"] as const,
+          properties: {
+            name: { type: "string" as const, minLength: 1, maxLength: 255 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-rename", request.params.token, 20);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      await db
+        .update(schema.sessions)
+        .set({ name: request.body.name, updatedAt: new Date() })
+        .where(eq(schema.sessions.id, session.id));
+
+      return { name: request.body.name };
     },
   );
 
@@ -656,7 +698,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         counts.map((c) => [
           c.sessionId,
           {
-            trackedSeconds: Number(c.trackedSeconds) * 60,
+            trackedSeconds: Math.max(0, (Number(c.trackedSeconds) - 1) * 60),
             screenshotCount: Number(c.screenshotCount),
           },
         ]),
@@ -677,6 +719,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           }
           return {
             token: s.token,
+            name: s.name,
             status: s.status,
             trackedSeconds: c.trackedSeconds,
             screenshotCount: c.screenshotCount,
