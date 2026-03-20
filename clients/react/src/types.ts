@@ -8,6 +8,20 @@ export type TokenProvider =
   | (() => string)
   | (() => Promise<string>);
 
+// ─── Capture Mode ────────────────────────────────────────
+
+/** Capture source: screen sharing or webcam camera. */
+export type CaptureMode = "screen" | "camera";
+
+// ─── Camera Settings ─────────────────────────────────────
+
+export interface CameraSettings {
+  /** Preferred camera device ID (from enumerateDevices). Omit for default camera. */
+  deviceId?: string;
+  /** Additional getUserMedia video constraints (merged with defaults). */
+  userMediaConstraints?: MediaTrackConstraints;
+}
+
 // ─── Capture Settings ────────────────────────────────────
 
 export interface CaptureSettings {
@@ -21,6 +35,10 @@ export interface CaptureSettings {
   maxHeight?: number;
   /** Override getDisplayMedia constraints (merged with defaults). */
   displayMediaConstraints?: DisplayMediaStreamOptions;
+  /** Capture mode: "screen" (default) or "camera". */
+  mode?: CaptureMode;
+  /** Camera-specific settings. Only used when mode is "camera". */
+  camera?: CameraSettings;
 }
 
 // ─── Retry Settings ──────────────────────────────────────
@@ -118,8 +136,9 @@ export interface CollapseConfig {
 export interface ResolvedConfig {
   token: TokenProvider;
   apiBaseUrl: string;
-  capture: Required<Omit<CaptureSettings, "displayMediaConstraints">> & {
+  capture: Required<Omit<CaptureSettings, "displayMediaConstraints" | "camera">> & {
     displayMediaConstraints?: DisplayMediaStreamOptions;
+    camera: CameraSettings;
   };
   retry: Required<RetrySettings>;
   callbacks: CollapseCallbacks;
@@ -150,14 +169,20 @@ export interface CollapseState {
   videoUrl: string | null;
   /** Error message when status is "error". */
   error: string | null;
+  /** Active capture mode. */
+  captureMode: CaptureMode;
+  /** Available camera devices (populated when mode is "camera"). */
+  availableCameras: MediaDeviceInfo[];
+  /** Currently selected camera device ID. */
+  selectedCameraId: string | null;
 }
 
 // ─── Collapse Actions ────────────────────────────────────
 
 export interface CollapseActions {
-  /** Start screen sharing and begin capturing. */
+  /** Start screen sharing (or camera) and begin capturing. */
   startSharing: () => Promise<void>;
-  /** Stop screen share without stopping session (auto-pauses). */
+  /** Stop screen share (or camera) without stopping session (auto-pauses). */
   stopSharing: () => void;
   /** Pause the session. */
   pause: () => Promise<void>;
@@ -165,4 +190,6 @@ export interface CollapseActions {
   resume: () => Promise<void>;
   /** Stop the session (triggers compilation). Optionally name the timelapse before stopping. */
   stop: (options?: { name?: string }) => Promise<void>;
+  /** Select a camera device by ID. Only effective when captureMode is "camera". */
+  selectCamera: (deviceId: string) => void;
 }

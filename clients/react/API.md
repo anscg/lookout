@@ -1,6 +1,6 @@
 # @collapse/react — React SDK Documentation
 
-**Package:** `@collapse/react` v0.0.14
+**Package:** `@collapse/react` v0.0.15
 **Peer Dependencies:** React 18+ or 19+
 **Exports:** ESM + CJS with TypeScript declarations
 
@@ -43,6 +43,24 @@ function App() {
   return (
     <CollapseProvider token="..." apiBaseUrl="https://api.example.com">
       <MyRecorder />
+    </CollapseProvider>
+  );
+}
+```
+
+For camera (webcam) capture:
+
+```tsx
+import { CollapseProvider, CollapseRecorder } from "@collapse/react";
+
+function App() {
+  return (
+    <CollapseProvider
+      token="your-64-char-hex-token"
+      apiBaseUrl="https://api.example.com"
+      capture={{ mode: "camera" }}
+    >
+      <CollapseRecorder />
     </CollapseProvider>
   );
 }
@@ -98,6 +116,21 @@ type TokenProvider =
 | `maxWidth` | `number` | `1920` | Max capture width in px |
 | `maxHeight` | `number` | `1080` | Max capture height in px |
 | `displayMediaConstraints` | `DisplayMediaStreamOptions` | — | Override `getDisplayMedia` constraints |
+| `mode` | `CaptureMode` | `"screen"` | Capture source: `"screen"` or `"camera"` |
+| `camera` | `CameraSettings` | `{}` | Camera-specific settings (only used when `mode` is `"camera"`) |
+
+#### `CaptureMode`
+
+```ts
+type CaptureMode = "screen" | "camera";
+```
+
+#### `CameraSettings`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `deviceId` | `string` | — | Preferred camera device ID (from `enumerateDevices`). Omit for default camera |
+| `userMediaConstraints` | `MediaTrackConstraints` | — | Additional `getUserMedia` video constraints (merged with defaults) |
 
 #### `RetrySettings`
 
@@ -135,6 +168,9 @@ const { state, actions } = useCollapse();
 | `lastScreenshotUrl` | `string \| null` | Object URL of last captured screenshot |
 | `videoUrl` | `string \| null` | Video URL when complete. Auto-fetched from server when status reaches `"complete"`. |
 | `error` | `string \| null` | Error message when status is `"error"` |
+| `captureMode` | `CaptureMode` | Active capture mode (`"screen"` or `"camera"`) |
+| `availableCameras` | `MediaDeviceInfo[]` | Available camera devices (populated when mode is `"camera"`) |
+| `selectedCameraId` | `string \| null` | Currently selected camera device ID |
 
 #### `actions: CollapseActions`
 
@@ -145,6 +181,7 @@ const { state, actions } = useCollapse();
 | `pause` | `() => Promise<void>` | Pause the session |
 | `resume` | `() => Promise<void>` | Resume a paused session |
 | `stop` | `(options?: { name?: string }) => Promise<void>` | Stop the session and trigger compilation. Optionally name the timelapse before stopping. |
+| `selectCamera` | `(deviceId: string) => void` | Select a camera device by ID. Only effective when `captureMode` is `"camera"`. |
 
 #### `RecorderStatus`
 
@@ -198,6 +235,42 @@ interface CaptureResult {
   height: number; // Pixel height
 }
 ```
+
+---
+
+### `useCameraCapture(overrides?)`
+
+Handles `getUserMedia` (webcam), device enumeration, canvas snapshots, and stream lifecycle. Can be used standalone (without provider) by passing explicit settings. Mirrors the return shape of `useScreenCapture` for interchangeability.
+
+```ts
+const {
+  isSharing, startSharing, takeScreenshot, stopSharing,
+  devices, selectedDeviceId, selectDevice,
+} = useCameraCapture();
+```
+
+**Parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `overrides` | `CaptureSettings` | Optional overrides (merged with provider config) |
+
+**Returns:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `isSharing` | `boolean` | Whether camera is active |
+| `startSharing` | `() => Promise<void>` | Request camera permission and start stream |
+| `takeScreenshot` | `() => Promise<CaptureResult \| null>` | Capture current frame as JPEG blob |
+| `stopSharing` | `() => void` | Stop all camera tracks |
+| `devices` | `MediaDeviceInfo[]` | Available camera devices (auto-updated on connect/disconnect) |
+| `selectedDeviceId` | `string \| null` | Currently selected camera device ID |
+| `selectDevice` | `(deviceId: string) => void` | Switch to a different camera (restarts stream if active) |
+
+**Notes:**
+- Enumerates devices on mount and on the `devicechange` event.
+- Safari may return devices with empty labels before first `getUserMedia` call — labels are populated after the first stream is acquired.
+- `selectDevice` while streaming will stop the current stream and restart with the new device.
 
 ---
 
@@ -444,6 +517,30 @@ Displays the last captured screenshot. Renders nothing if no image.
 | Prop | Type | Description |
 |------|------|-------------|
 | `imageUrl` | `string \| null` | Object URL of the screenshot |
+
+---
+
+### `<CameraSelector>`
+
+Camera device picker dropdown. Renders nothing if no devices are available.
+
+```tsx
+<CameraSelector
+  devices={state.availableCameras}
+  selectedDeviceId={state.selectedCameraId}
+  onSelect={actions.selectCamera}
+  disabled={state.isSharing}
+/>
+```
+
+**Props (`CameraSelectorProps`):**
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `devices` | `MediaDeviceInfo[]` | Available camera devices |
+| `selectedDeviceId` | `string \| null` | Currently selected device ID |
+| `onSelect` | `(deviceId: string) => void` | Device selection callback |
+| `disabled` | `boolean?` | Disable selection (e.g., while recording) |
 
 ---
 

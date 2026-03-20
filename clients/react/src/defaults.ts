@@ -19,6 +19,11 @@ export function resolveConfig(config: CollapseConfig): ResolvedConfig {
       maxWidth: config.capture?.maxWidth ?? MAX_WIDTH,
       maxHeight: config.capture?.maxHeight ?? MAX_HEIGHT,
       displayMediaConstraints: config.capture?.displayMediaConstraints,
+      mode: config.capture?.mode ?? "screen",
+      camera: {
+        deviceId: config.capture?.camera?.deviceId,
+        userMediaConstraints: config.capture?.camera?.userMediaConstraints,
+      },
     },
     retry: {
       maxRetries: config.retry?.maxRetries ?? MAX_UPLOAD_RETRIES,

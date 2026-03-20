@@ -1,5 +1,5 @@
 import React from "react";
-import type { RecorderStatus } from "../types.js";
+import type { RecorderStatus, CaptureMode } from "../types.js";
 import { Button } from "../ui/Button.js";
 import { colors, spacing, fontSize, fontWeight } from "../ui/theme.js";
 
@@ -11,6 +11,8 @@ export interface RecordingControlsProps {
   onResume: () => void;
   onStop: () => void;
   loading?: boolean;
+  /** Capture mode — adjusts button labels. Defaults to "screen". */
+  captureMode?: CaptureMode;
 }
 
 export function RecordingControls({
@@ -21,6 +23,7 @@ export function RecordingControls({
   onResume,
   onStop,
   loading,
+  captureMode = "screen",
 }: RecordingControlsProps) {
   const isActive = status === "active" || status === "pending";
   const isPaused = status === "paused";
@@ -35,14 +38,14 @@ export function RecordingControls({
     }}>
       {!isSharing && isActive && (
         <Button variant="success" size="lg" onClick={onStartSharing} loading={loading}>
-          Share Screen &amp; Start Recording
+          {captureMode === "camera" ? "Start Camera & Record" : "Share Screen & Start Recording"}
         </Button>
       )}
 
       {!isSharing && isPaused && (
         <>
           <Button variant="primary" size="lg" onClick={onStartSharing} loading={loading}>
-            Share Screen &amp; Resume
+            {captureMode === "camera" ? "Start Camera & Resume" : "Share Screen & Resume"}
           </Button>
           <Button variant="danger" size="md" onClick={onStop}>
             Stop Session

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useCollapseContext } from "../CollapseProvider.js";
 import { useScreenCapture } from "./useScreenCapture.js";
+import { useCameraCapture } from "./useCameraCapture.js";
 import { useUploader } from "./useUploader.js";
 import { useSession } from "./useSession.js";
 import { useSessionTimer } from "./useSessionTimer.js";
@@ -15,8 +16,14 @@ export function useCollapse(): { state: CollapseState; actions: CollapseActions 
   const callbacksRef = useRef(config.callbacks);
   callbacksRef.current = config.callbacks;
 
+  const captureMode = config.capture.mode;
+
   const session = useSession();
-  const capture = useScreenCapture();
+  const screenCapture = useScreenCapture();
+  const cameraCapture = useCameraCapture();
+  // Delegate to the active capture source — both hooks are always called
+  // (React rules of hooks) but only the active one's methods are invoked.
+  const capture = captureMode === "camera" ? cameraCapture : screenCapture;
   const uploader = useUploader();
 
   // Estimate local tracked seconds from upload count when server hasn't caught up.
@@ -230,6 +237,9 @@ export function useCollapse(): { state: CollapseState; actions: CollapseActions 
     lastScreenshotUrl: uploader.lastScreenshotUrl,
     videoUrl,
     error: session.error,
+    captureMode,
+    availableCameras: cameraCapture.devices,
+    selectedCameraId: cameraCapture.selectedDeviceId,
   };
 
   const actions: CollapseActions = {
@@ -238,6 +248,7 @@ export function useCollapse(): { state: CollapseState; actions: CollapseActions 
     pause,
     resume,
     stop,
+    selectCamera: cameraCapture.selectDevice,
   };
 
   return { state, actions };

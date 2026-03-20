@@ -2,6 +2,7 @@ import React from "react";
 import { useCollapse } from "../hooks/useCollapse.js";
 import { StatusBar } from "./StatusBar.js";
 import { ScreenPreview } from "./ScreenPreview.js";
+import { CameraSelector } from "./CameraSelector.js";
 import { RecordingControls } from "./RecordingControls.js";
 import { ProcessingState } from "./ProcessingState.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -73,6 +74,14 @@ export function CollapseRecorder() {
         screenshotCount={state.screenshotCount}
         uploads={state.uploads}
       />
+      {state.captureMode === "camera" && state.availableCameras.length > 1 && (
+        <CameraSelector
+          devices={state.availableCameras}
+          selectedDeviceId={state.selectedCameraId}
+          onSelect={actions.selectCamera}
+          disabled={state.isSharing}
+        />
+      )}
       <ScreenPreview imageUrl={state.lastScreenshotUrl} />
       <RecordingControls
         status={state.status}
@@ -81,6 +90,7 @@ export function CollapseRecorder() {
         onPause={actions.pause}
         onResume={actions.resume}
         onStop={actions.stop}
+        captureMode={state.captureMode}
       />
     </PageContainer>
   );
