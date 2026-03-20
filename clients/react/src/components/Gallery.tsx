@@ -79,20 +79,18 @@ export function Gallery({
         display: "flex",
         justifyContent: "space-between",
         alignItems: "flex-start",
-        // The frosted glass and background gradient
-        backdropFilter: "blur(12px)",
-        WebkitBackdropFilter: "blur(12px)",
-        background: "linear-gradient(to bottom, var(--color-bg-surface) 40%, transparent 100%)",
-        // This mask smoothly fades out the bottom edge of the sticky header
-        maskImage: "linear-gradient(to bottom, black 60%, transparent 100%)",
-        WebkitMaskImage: "linear-gradient(to bottom, black 60%, transparent 100%)",
+        // Just purely the system window vibrancy behind it, but we smoothly fade the background color
+        background: "linear-gradient(to bottom, var(--color-bg-body) 30%, transparent 100%)",
+        pointerEvents: "none", // Let clicks pass through the invisible gradient part
       }}>
-        <h2 style={{ fontSize: fontSize.heading, fontWeight: fontWeight.bold, color: colors.text.primary, margin: 0, marginTop: 4 }}>Your Timelapses</h2>
-        {onRefresh && (
-          <Button variant="ghost" size="sm" onClick={onRefresh} title="Refresh" style={{ fontSize: fontSize.xxl }}>
-            &#x21bb;
-          </Button>
-        )}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", pointerEvents: "auto" }}>
+          <h2 style={{ fontSize: fontSize.heading, fontWeight: fontWeight.bold, color: colors.text.primary, margin: 0 }}>Your Timelapses</h2>
+          {onRefresh && (
+            <Button variant="ghost" size="sm" onClick={onRefresh} title="Refresh" style={{ fontSize: fontSize.xxl }}>
+              &#x21bb;
+            </Button>
+          )}
+        </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: spacing.md }}>
         {sessions.map((s) => (
