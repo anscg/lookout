@@ -144,38 +144,6 @@ export function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Enable vibrancy globally for the app
-  useEffect(() => {
-    const html = document.documentElement;
-    const body = document.body;
-    const root = document.getElementById("root");
-    const prevHtmlBg = html.style.background;
-    const prevBodyBg = body.style.background;
-    const prevRootBg = root?.style.background ?? "";
-
-    let effectsApplied = false;
-    
-    invoke("enable_vibrancy")
-      .then(() => {
-        effectsApplied = true;
-        html.style.background = "transparent";
-        body.style.background = "transparent";
-        if (root) root.style.background = "transparent";
-      })
-      .catch((err) => {
-        console.warn("Failed to enable vibrancy", err);
-      });
-
-    return () => {
-      if (effectsApplied) {
-        invoke("disable_vibrancy").catch(() => {});
-      }
-      html.style.background = prevHtmlBg;
-      body.style.background = prevBodyBg;
-      if (root) root.style.background = prevRootBg;
-    };
-  }, []);
-
   // Step 2: Route
   const content = (() => {
     switch (route.page) {

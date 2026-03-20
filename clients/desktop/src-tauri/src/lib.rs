@@ -197,42 +197,6 @@ fn list_capture_sources() -> Result<CaptureSourceList, String> {
     Ok(CaptureSourceList { monitors, windows })
 }
 
-#[tauri::command]
-fn enable_vibrancy(window: tauri::Window) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-        apply_vibrancy(
-            &window,
-            NSVisualEffectMaterial::Sidebar,
-            Some(NSVisualEffectState::Active),
-            Some(16.0),
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use window_vibrancy::apply_mica;
-        apply_mica(&window, None).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn disable_vibrancy(window: tauri::Window) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        use window_vibrancy::clear_vibrancy;
-        clear_vibrancy(&window).map_err(|e| e.to_string())?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use window_vibrancy::clear_mica;
-        clear_mica(&window).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
 /// Initialize the session config so Rust knows where the server is.
 #[tauri::command]
 fn configure(
@@ -417,8 +381,6 @@ pub fn run() {
             take_screenshot,
             capture_and_upload,
             get_cold_start_urls,
-            enable_vibrancy,
-            disable_vibrancy,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

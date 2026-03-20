@@ -69,7 +69,7 @@ export function PermissionScreen({ onGranted }: { onGranted: () => void }) {
 
   return (
     <PageContainer centered>
-      <div style={{ width: "100%", maxWidth: 520, textAlign: "center", padding: 24, background: "transparent" }}>
+      <div style={{ width: "100%", maxWidth: 520, textAlign: "center", padding: 24 }}>
         <h2 style={{ fontSize: fontSize.xxl, fontWeight: fontWeight.bold, color: colors.text.primary, marginBottom: spacing.md }}>
           Screen Recording Permission
         </h2>
