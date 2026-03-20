@@ -16,7 +16,7 @@ There are currently two 2 official clients for this service:
 
 Collapse is a [Lapse](https://lapse.hackclub.com) alternative with differing goals.
 
-Lapse is a standalone, general purpose, time-lapse creation tool for [Hackatime](https://hackatime.hackclub.com), to produce smooth time-lapse videos that can be shared.
+Lapse is a standalone, general purpose, time-lapse creation tool with [Hackatime](https://hackatime.hackclub.com) integration, to produce smooth time-lapse videos that is Hackatime compatible and can be shared.
 
 Collapse is a service that captures screenshots for proof of time spent on a project. At it's core, Collapse accepts screenshots from clients (similar to Hackatime's heartbeats). Collapse needs to be integrated into other Hack Club programs to function.
 
