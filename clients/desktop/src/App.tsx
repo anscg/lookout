@@ -195,12 +195,14 @@ export function App() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-      {/* Draggable Titlebar Area that dodges the traffic lights */}
-      <div 
-        data-tauri-drag-region 
-        className="titlebar"
-        style={{ height: 32, flexShrink: 0, width: "100%", zIndex: 9999, background: "transparent", cursor: "default" }} 
-      />
+      {/* Draggable Titlebar Area that dodges the traffic lights (macOS only) */}
+      {isMacOS && (
+        <div
+          data-tauri-drag-region
+          className="titlebar"
+          style={{ height: 32, flexShrink: 0, width: "100%", zIndex: 9999, background: "transparent", cursor: "default" }}
+        />
+      )}
       <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
         {mainView}
       </div>

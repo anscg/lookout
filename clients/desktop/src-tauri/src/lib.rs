@@ -183,8 +183,8 @@ fn enable_vibrancy(window: tauri::Window) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        use window_vibrancy::apply_blur;
-        apply_blur(&window, Some((18, 18, 18, 125))).map_err(|e| e.to_string())?;
+        use window_vibrancy::apply_mica;
+        apply_mica(&window, None).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -198,8 +198,8 @@ fn disable_vibrancy(window: tauri::Window) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        use window_vibrancy::clear_blur;
-        clear_blur(&window).map_err(|e| e.to_string())?;
+        use window_vibrancy::clear_mica;
+        clear_mica(&window).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -504,6 +504,12 @@ pub fn run() {
                     *state = Some(url_strings);
                 }
             });
+
+            // Disable maximize/fullscreen controls on all platforms.
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_maximizable(false)?;
+                window.set_fullscreen(false)?;
+            }
 
             Ok(())
         })
