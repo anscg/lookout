@@ -22,7 +22,7 @@ if (isBrowser) {
       --color-border-selected: rgba(255, 255, 255, 0.3);
       --color-icon-selected: rgba(255, 255, 255, 0.8);
       
-      --color-status-neutral: rgba(255, 255, 255, 0.5);
+      --color-status-neutral: rgba(255, 255, 255, 0.2);
     }
     
     @media (prefers-color-scheme: light) {
