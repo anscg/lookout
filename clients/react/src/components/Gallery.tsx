@@ -79,8 +79,10 @@ export function Gallery({
         display: "flex",
         justifyContent: "space-between",
         alignItems: "flex-start",
-        // Just purely the system window vibrancy behind it, but we smoothly fade the background color
-        background: "linear-gradient(to bottom, var(--color-bg-body) 30%, transparent 100%)",
+        // Create an opaque background matching the system using surface colors,
+        // and fade it out so items scrolling under it smoothly disappear.
+        background: "linear-gradient(to bottom, var(--color-bg-body, #000) 40%, transparent 100%)",
+        backdropFilter: "blur(2px)", // Slight blur to hide sharp edges underneath
         pointerEvents: "none", // Let clicks pass through the invisible gradient part
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", pointerEvents: "auto" }}>
