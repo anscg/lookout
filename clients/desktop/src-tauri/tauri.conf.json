@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/refs/tags/tauri-v2.3.1/crates/tauri-utils/schema.json",
   "productName": "Collapse",
   "identifier": "com.hackclub.collapse",
-  "version": "0.0.8",
+  "version": "0.0.10",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -17,9 +17,9 @@
         "title": "Collapse",
         "width": 480,
         "height": 640,
-        "resizable": true,
-        "minWidth": 400,
-        "minHeight": 500,
+        "resizable": false,
+        "fullscreen": false,
+        "maximizable": false,
         "transparent": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true

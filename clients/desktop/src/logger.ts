@@ -10,6 +10,7 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +28,8 @@ interface LogEntry {
 
 const MAX_ENTRIES = 200;
 const entries: LogEntry[] = [];
+let appVersion = "unknown";
+getVersion().then((v) => { appVersion = v; }).catch(() => {});
 
 function push(level: LogEntry["level"], message: string) {
   entries.push({ time: Date.now(), level, message });
@@ -184,7 +187,7 @@ export function getReport(): string {
   const platform = navigator.platform || "unknown";
   const ua = navigator.userAgent || "";
 
-  const lines = [`Collapse Desktop | ${platform} | ${now}`, `UA: ${ua}`, "---"];
+  const lines = [`Collapse Desktop v${appVersion} | ${platform} | ${now}`, `UA: ${ua}`, "---"];
 
   // Last 100 entries
   const recent = entries.slice(-100);

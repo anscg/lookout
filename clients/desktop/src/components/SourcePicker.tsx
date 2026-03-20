@@ -115,7 +115,7 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
   const hasWindows = sources.windows.length > 0;
 
   return (
-    <div style={{ maxWidth: 480, margin: "0 auto", padding: spacing.lg }}>
+    <div style={{ maxWidth: 480, margin: "0 auto", padding: spacing.lg, display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <h2 style={{ fontSize: fontSize.xl, fontWeight: fontWeight.bold, color: colors.text.primary, marginBottom: spacing.md, textAlign: "center" }}>
         What should Collapse capture?
       </h2>
@@ -171,7 +171,7 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
       )}
 
       {/* Source list */}
-      <div style={{ display: "flex", flexDirection: "column", gap: spacing.xs, maxHeight: 280, overflowY: "auto" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: spacing.xs, flex: 1, minHeight: 0, overflowY: "auto" }}>
         {(tab === "screens" || !hasWindows) &&
           sources.monitors.map((m) => {
             const src: CaptureSource = { type: "monitor", id: m.id };

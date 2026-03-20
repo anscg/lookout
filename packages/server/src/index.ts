@@ -16,7 +16,8 @@ const app = Fastify({ logger: true });
 await app.register(cors, {
   origin: (origin, cb) => {
     // Allow: no origin (server-to-server), *.hackclub.com, localhost dev, tauri app
-    if (!origin || origin.startsWith("tauri://")) {
+    // Tauri uses tauri:// on macOS/Linux but http://tauri.localhost on Windows
+    if (!origin || origin.startsWith("tauri://") || origin === "http://tauri.localhost") {
       cb(null, true);
       return;
     }
@@ -28,10 +29,12 @@ await app.register(cors, {
       ) {
         cb(null, true);
       } else {
-        cb(new Error("Not allowed by CORS"), false);
+        app.log.warn(`CORS rejected origin: ${origin}`);
+        cb(new Error(`Not allowed by CORS (origin: ${origin})`), false);
       }
     } catch {
-      cb(new Error("Not allowed by CORS"), false);
+      app.log.warn(`CORS rejected origin (malformed): ${origin}`);
+      cb(new Error(`Not allowed by CORS (origin: ${origin})`), false);
     }
   },
 });

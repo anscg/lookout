@@ -111,8 +111,8 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
 
   if (!captureSource) {
     return (
-      <div>
-        <PageContainer maxWidth={480} style={{ paddingBottom: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
+        <PageContainer maxWidth={480} style={{ paddingBottom: 0, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
           <Button variant="secondary" size="sm" onClick={onBack}>
             &larr; Gallery
           </Button>

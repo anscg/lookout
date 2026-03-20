@@ -63,7 +63,7 @@ export function useGallery({ apiBaseUrl, tokens }: UseGalleryOptions): UseGaller
       })
       .catch((err) => {
         if (!cancelled) {
-          console.warn("Gallery fetch error:", err);
+          console.warn("Gallery fetch error:", err instanceof Error ? err.message : err);
           setError(err.message);
           // Keep showing whatever sessions we had
         }

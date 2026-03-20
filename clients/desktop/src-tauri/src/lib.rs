@@ -410,7 +410,7 @@ pub fn run() {
                             Some("About Collapse"),
                             Some(AboutMetadata {
                                 name: Some("Collapse".to_string()),
-                                version: Some("0.0.8".to_string()),
+                                version: app.config().version.clone(),
                                 authors: Some(vec!["Hack Club".to_string()]),
                                 copyright: Some("© 2026 Hack Club, A 501(c)(3) nonprofit project for student makers.".to_string()),
                                 license: Some("MIT".to_string()),
