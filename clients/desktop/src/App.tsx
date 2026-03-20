@@ -171,6 +171,7 @@ export function App() {
       case "record":
         return (
           <RecordPage
+            key={route.token}
             token={route.token}
             onBack={() => {
               gallery.refresh();
@@ -185,6 +186,7 @@ export function App() {
       case "session":
         return (
           <SessionDetail
+            key={route.token}
             token={route.token}
             apiBaseUrl={API_BASE}
             onBack={() => navigate({ page: "gallery" })}

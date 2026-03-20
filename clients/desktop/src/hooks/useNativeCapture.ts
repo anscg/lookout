@@ -84,17 +84,55 @@ export function useNativeCapture(
 
   // The capture loop: one effect manages the entire interval lifecycle.
   // Starts when isCapturing becomes true, stops when it becomes false.
+  // Detects sleep by comparing elapsed time between ticks — if the gap is
+  // much longer than the interval, the machine slept and we auto-resume.
   useEffect(() => {
     if (!isCapturing) return;
 
+    let lastTick = Date.now();
+    const SLEEP_THRESHOLD = SCREENSHOT_INTERVAL_MS * 2.5;
+
+    const tick = async () => {
+      const now = Date.now();
+      const elapsed = now - lastTick;
+      lastTick = now;
+
+      if (elapsed > SLEEP_THRESHOLD) {
+        console.warn(`[capture] detected sleep (gap: ${Math.round(elapsed / 1000)}s), checking session status...`);
+        try {
+          const res = await fetch(`${apiBaseUrl}/api/sessions/${token}/status`);
+          if (res.ok) {
+            const data = await res.json();
+            console.log(`[capture] session status after sleep: ${data.status}`);
+            // Reset timer to server value so it doesn't interpolate the sleep gap
+            if (typeof data.trackedSeconds === "number") {
+              setTrackedSeconds(data.trackedSeconds);
+            }
+            if (data.status === "paused") {
+              await fetch(`${apiBaseUrl}/api/sessions/${token}/resume`, { method: "POST" });
+              console.log("[capture] session resumed after sleep");
+            } else if (data.status !== "active" && data.status !== "pending") {
+              console.warn(`[capture] session is ${data.status}, stopping capture`);
+              setIsCapturing(false);
+              return;
+            }
+          }
+        } catch (e) {
+          console.error("[capture] sleep recovery failed:", e);
+        }
+      }
+
+      captureRef.current();
+    };
+
     console.log(`[capture] capture loop started, interval: ${SCREENSHOT_INTERVAL_MS}ms`);
     captureRef.current();
-    const id = setInterval(() => captureRef.current(), SCREENSHOT_INTERVAL_MS);
+    const id = setInterval(tick, SCREENSHOT_INTERVAL_MS);
     return () => {
       console.log("[capture] capture loop stopped");
       clearInterval(id);
     };
-  }, [isCapturing]);
+  }, [isCapturing, apiBaseUrl, token]);
 
   // Clean up blob URL on unmount
   useEffect(() => {
