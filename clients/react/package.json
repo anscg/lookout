@@ -20,7 +20,12 @@
   "files": [
     "dist"
   ],
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/ui/theme.js",
+    "./dist/ui/theme.mjs",
+    "./dist/ui/theme.cjs",
+    "./src/ui/theme.ts"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
