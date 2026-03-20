@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "collapse-desktop"
-version = "0.0.10"
+version = "0.0.12"
 dependencies = [
  "base64 0.22.1",
  "image",
