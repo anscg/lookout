@@ -26,8 +26,8 @@ Collapse is designed to be simple, resilient, and easy to integrate. Here's how 
 
 1. A Hack Club program generates a session and shares it with the client.
 2. The client begins capturing screenshots once per minute, uploading them as they are taken.
-3. The server tracks the number and timing of screenshots received to track time.
-4. When the session finishes, Collapse stitches the screenshots into a timelapse video.
+3. The server tracks the number and timing of screenshots received to validate time.
+4. When the session finishes, Collapse stitches the screenshots into a time-lapse video.
 5. The Hack Club program can retrieve the session results.
 
 Sessions auto-pause after 5 minutes of inactivity and auto-stop after 30 minutes of being paused.
