@@ -95,6 +95,31 @@ pub struct CaptureSourceList {
     pub windows: Vec<WindowInfo>,
 }
 
+fn should_exclude_window(app_name: &str, title: &str) -> bool {
+    let app_name_lower = app_name.to_ascii_lowercase();
+    let title_lower = title.to_ascii_lowercase();
+
+    const EXCLUDED_APP_NAMES: &[&str] = &[
+        "dock",
+        "control centre",
+        "control center",
+        "notification center",
+        "window server",
+        "systemuiserver",
+        "spotlight",
+        "loginwindow",
+    ];
+
+    const EXCLUDED_TITLES: &[&str] = &["statusindicator", "item-0", "item-1"];
+
+    EXCLUDED_APP_NAMES
+        .iter()
+        .any(|excluded| app_name_lower == *excluded)
+        || EXCLUDED_TITLES
+            .iter()
+            .any(|excluded| title_lower == *excluded)
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct UploadUrlResponse {
     #[serde(rename = "uploadUrl")]
@@ -172,6 +197,11 @@ fn list_capture_sources() -> Result<CaptureSourceList, String> {
             let app_name = w.app_name().ok().unwrap_or_default();
             let width = w.width().ok()?;
             let height = w.height().ok()?;
+
+            if should_exclude_window(&app_name, &title) {
+                return None;
+            }
+
             // Filter out tiny/invisible windows and our own app
             if width < 50 || height < 50 {
                 return None;
