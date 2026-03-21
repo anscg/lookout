@@ -151,6 +151,39 @@ export function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Listen to Tauri theme changes (for Linux where prefers-color-scheme might fail)
+  useEffect(() => {
+    const updateTheme = (theme: "light" | "dark" | null) => {
+      if (theme) {
+        document.documentElement.setAttribute("data-theme", theme);
+      } else {
+        document.documentElement.removeAttribute("data-theme");
+      }
+    };
+
+    getCurrentWindow().theme().then(updateTheme).catch(() => {});
+
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow().onThemeChanged((event) => {
+      updateTheme(event.payload);
+    }).then((fn) => { unlisten = fn; }).catch(() => {});
+
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
+  // Listen for native menu navigation events
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<string>("collapse-navigate", (event) => {
+      if (event.payload === "/add") {
+        navigate({ page: "add" });
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => { if (unlisten) unlisten(); };
+  }, [navigate]);
+
   // Set window title with version
   useEffect(() => {
     getVersion().then((v) => {

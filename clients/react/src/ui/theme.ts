@@ -42,7 +42,7 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-colla
       --color-archive-hover-border: rgba(255, 255, 255, 0.2);
     }
     @media (prefers-color-scheme: light) {
-      :root {
+      :root:not([data-theme="dark"]) {
         --color-bg-body: #ffffff;
         --color-bg-panel: #ffffff;
         --color-modal-backdrop: rgba(255, 255, 255, 0.8);
@@ -74,6 +74,38 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-colla
         --color-archive-hover-bg: rgba(255, 255, 255, 1);
         --color-archive-hover-border: rgba(0, 0, 0, 0.2);
       }
+    }
+    :root[data-theme="light"] {
+      --color-bg-body: #ffffff;
+      --color-bg-panel: #ffffff;
+      --color-modal-backdrop: rgba(255, 255, 255, 0.8);
+      --color-bg-surface: rgba(0, 0, 0, 0.05);
+      --color-bg-sunken: rgba(0, 0, 0, 0.02);
+      --color-text-primary: #000000;
+      --color-text-inverse: #ffffff;
+      --color-text-secondary: rgba(0, 0, 0, 0.6);
+      --color-text-tertiary: rgba(0, 0, 0, 0.4);
+      --color-text-quaternary: rgba(0, 0, 0, 0.2);
+      --color-text-error: #ef4444;
+      --color-border-default: rgba(0, 0, 0, 0.1);
+      --color-border-hover: rgba(0, 0, 0, 0.2);
+      --color-bg-selected: rgba(0, 0, 0, 0.08);
+      --color-border-selected: rgba(0, 0, 0, 0.3);
+      --color-icon-selected: rgba(0, 0, 0, 0.8);
+      --color-status-neutral: #000000;
+      --color-spinner-base: rgba(0, 0, 0, 0.1);
+      --color-spinner-track: rgba(0, 0, 0, 0.8);
+      --color-skeleton-bg: rgba(0, 0, 0, 0.05);
+      --color-skeleton-shimmer: rgba(0, 0, 0, 0.08);
+      --color-badge-primary-bg: #22c55e;
+      --color-badge-primary-text: #ffffff;
+      --color-badge-overlay-bg: #000000;
+      --color-badge-overlay-text: #ffffff;
+      --color-archive-bg: rgba(255, 255, 255, 0.9);
+      --color-archive-icon: #000000;
+      --color-archive-border: rgba(0, 0, 0, 0.1);
+      --color-archive-hover-bg: rgba(255, 255, 255, 1);
+      --color-archive-hover-border: rgba(0, 0, 0, 0.2);
     }`;
   document.head.appendChild(style);
 }
