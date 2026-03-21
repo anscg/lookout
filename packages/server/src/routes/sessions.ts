@@ -620,10 +620,18 @@ export async function sessionRoutes(app: FastifyInstance) {
   );
 
   // Get video presigned URL
-  app.get<{ Params: { token: string } }>(
+  app.get<{ Params: { token: string }; Querystring: { format?: string } }>(
     "/api/sessions/:token/video",
     {
-      schema: { params: tokenParamSchema },
+      schema: {
+        params: tokenParamSchema,
+        querystring: {
+          type: "object" as const,
+          properties: {
+            format: { type: "string" as const, enum: ["mp4", "webm"] as const },
+          },
+        },
+      },
     },
     async (request, reply) => {
       // Rate limit: 30 req/min per token
@@ -643,16 +651,26 @@ export async function sessionRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Video not available" });
       }
 
-      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-      const command = new GetObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: session.videoR2Key,
-      });
-      const videoUrl = await getSignedUrl(r2Client, command, {
-        expiresIn: 3600,
-      });
+      const format = request.query.format === "webm" ? "webm" : "mp4";
+      let key = session.videoR2Key;
+      if (format === "webm") {
+        key = key.replace(".mp4", ".webm");
+      }
 
-      return { videoUrl };
+      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+      try {
+        const command = new GetObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: key,
+        });
+        const videoUrl = await getSignedUrl(r2Client, command, {
+          expiresIn: 3600,
+        });
+
+        return { videoUrl };
+      } catch (err) {
+        return reply.code(404).send({ error: "Requested video format not available" });
+      }
     },
   );
 

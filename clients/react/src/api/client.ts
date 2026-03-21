@@ -23,7 +23,7 @@ export interface CollapseClient {
   stop(): Promise<StopResponse>;
   rename(name: string): Promise<RenameSessionResponse>;
   getStatus(): Promise<StatusResponse>;
-  getVideo(): Promise<VideoResponse>;
+  getVideo(options?: { format?: "mp4" | "webm" }): Promise<VideoResponse>;
 }
 
 export interface CreateClientOptions {
@@ -151,8 +151,9 @@ export function createCollapseClient(options: CreateClientOptions): CollapseClie
       return fetchJson<StatusResponse>(await sessionUrl("/status"));
     },
 
-    async getVideo() {
-      return fetchJson<VideoResponse>(await sessionUrl("/video"));
+    async getVideo(options?: { format?: "mp4" | "webm" }) {
+      const q = options?.format ? `?format=${options.format}` : "";
+      return fetchJson<VideoResponse>(await sessionUrl(`/video${q}`));
     },
   };
 }

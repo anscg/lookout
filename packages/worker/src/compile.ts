@@ -125,7 +125,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
       await fs.writeFile(filePath, body);
     }
 
-    // Step 3: Run ffmpeg
+    // Step 3: Run ffmpeg for MP4
     const outputPath = path.join(tmpDir, "timelapse.mp4");
     await execFileAsync("ffmpeg", [
       "-framerate", "1",
@@ -139,6 +139,20 @@ export async function compileTimelapse(sessionId: string): Promise<{
       "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
       "-y",
       outputPath,
+    ], { timeout: 600_000 });
+
+    // Step 3.5: Run ffmpeg for WebM
+    const webmOutputPath = path.join(tmpDir, "timelapse.webm");
+    await execFileAsync("ffmpeg", [
+      "-framerate", "1",
+      "-i", path.join(tmpDir, "%05d.jpg"),
+      "-c:v", "libvpx-vp9",
+      "-crf", "30",
+      "-b:v", "0",
+      "-r", "30",
+      "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+      "-y",
+      webmOutputPath,
     ], { timeout: 600_000 });
 
     // Step 4: Verify output
@@ -195,7 +209,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
       ? `https://${R2_PUBLIC_DOMAIN}/${thumbnailR2Key}`
       : thumbnailR2Key;
 
-    // Step 5: Upload video to R2
+    // Step 5: Upload videos to R2
     const videoR2Key = `timelapses/${sessionId}/timelapse.mp4`;
     const videoBytes = await fs.readFile(outputPath);
 
@@ -205,6 +219,18 @@ export async function compileTimelapse(sessionId: string): Promise<{
         Key: videoR2Key,
         Body: videoBytes,
         ContentType: "video/mp4",
+      }),
+    );
+
+    const webmR2Key = `timelapses/${sessionId}/timelapse.webm`;
+    const webmBytes = await fs.readFile(webmOutputPath);
+
+    await r2Client.send(
+      new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: webmR2Key,
+        Body: webmBytes,
+        ContentType: "video/webm",
       }),
     );
 

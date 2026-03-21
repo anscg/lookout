@@ -55,7 +55,15 @@ export function SessionDetail({
       // Fetch video URL when complete
       if (data.status === "complete" && !videoUrl) {
         try {
-          const vRes = await fetch(`${apiBaseUrl}/api/sessions/${token}/video`);
+          let format = "mp4";
+          if (
+            typeof navigator !== "undefined" &&
+            navigator.userAgent.toLowerCase().includes("linux") &&
+            !navigator.userAgent.toLowerCase().includes("android")
+          ) {
+            format = "webm";
+          }
+          const vRes = await fetch(`${apiBaseUrl}/api/sessions/${token}/video?format=${format}`);
           if (vRes.ok) {
             const v: VideoResponse = await vRes.json();
             setVideoUrl(v.videoUrl);

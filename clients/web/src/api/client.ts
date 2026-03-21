@@ -111,7 +111,8 @@ export const api = {
     return fetchJson(`${API_BASE}/sessions/${getToken()}/status`);
   },
 
-  getVideo(): Promise<VideoResponse> {
-    return fetchJson(`${API_BASE}/sessions/${getToken()}/video`);
+  getVideo(options?: { format?: "mp4" | "webm" }): Promise<VideoResponse> {
+    const q = options?.format ? `?format=${options.format}` : "";
+    return fetchJson(`${API_BASE}/sessions/${getToken()}/video${q}`);
   },
 };
