@@ -49,15 +49,15 @@ function sourcesEqual(a: CaptureSource | null, b: CaptureSource | null): boolean
   return a.type === b.type && a.id === b.id;
 }
 
-function PreviewImage({ 
-  source, 
-  isMulti, 
+function PreviewImage({
+  source,
+  isMulti,
   layoutId,
   isWindow,
   fallbackUrl
-}: { 
-  source: CaptureSource, 
-  isMulti: boolean, 
+}: {
+  source: CaptureSource,
+  isMulti: boolean,
   layoutId?: string,
   isWindow: boolean,
   fallbackUrl?: string | null
@@ -163,7 +163,7 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
           // If they shift-click a different type, we just replace the whole selection with the new item
           return [src];
         }
-        
+
         const exists = prev.some(p => sourcesEqual(p, src));
         if (exists) {
           return prev.filter(p => !sourcesEqual(p, src));
@@ -222,15 +222,11 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
       maxHeight: "100%",
     }}>
       <div style={{ flexShrink: 0 }}>
-        <h2 style={{ fontSize: fontSize.xl, fontWeight: fontWeight.bold, color: colors.text.primary, marginBottom: spacing.md, textAlign: "center" }}>
-          What should Collapse capture?
-        </h2>
-
         {/* Live preview */}
         <div style={{
           position: "relative",
           borderRadius: radii.lg, overflow: "hidden", background: colors.bg.sunken,
-          border: `1px solid ${colors.border.default}`, marginBottom: spacing.lg, aspectRatio: "16/9",
+          border: `1px solid ${colors.border.default}`, marginBottom: spacing.lg, aspectRatio: "2/1",
         }}>
           <LayoutGroup id="preview-handoff">
             <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "row", overflow: "hidden", position: "absolute", inset: 0, gap: selected.length > 1 ? spacing.xs : 0 }}>
@@ -242,10 +238,10 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
                     const isHoverMatch = !!hoveredWindow && sourcesEqual(hoveredWindow, src);
                     const handoffLayoutId = isWindow && isHoverMatch ? `hover-to-main-preview-${src.id}` : undefined;
                     return (
-                      <PreviewImage 
-                        key={`${src.type}:${src.id}`} 
-                        source={src} 
-                        isMulti={selected.length > 1} 
+                      <PreviewImage
+                        key={`${src.type}:${src.id}`}
+                        source={src}
+                        isMulti={selected.length > 1}
                         layoutId={handoffLayoutId}
                         isWindow={isWindow}
                         fallbackUrl={isHoverMatch ? hoverPreviewUrl : null}
@@ -373,153 +369,188 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
       </div>
 
       {/* Source list */}
-      <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: spacing.xs,
-        flex: 1, // Let it fill available space
-        minHeight: 0, // Critical for nested flex scrolling
-        overflowY: "auto",
-        // Add a smooth fade out mask at top/bottom of scroll area
-        maskImage: `linear-gradient(to bottom, ${showTopMask ? 'transparent 0%, black 12px' : 'black 0%, black 12px'}, ${showBottomMask ? 'black calc(100% - 12px), transparent 100%' : 'black calc(100% - 12px), black 100%'})`,
-        WebkitMaskImage: `linear-gradient(to bottom, ${showTopMask ? 'transparent 0%, black 12px' : 'black 0%, black 12px'}, ${showBottomMask ? 'black calc(100% - 12px), transparent 100%' : 'black calc(100% - 12px), black 100%'})`,
-        paddingBottom: spacing.xs,
-      }}>
-        {(tab === "screens" || !hasWindows) &&
-          sources.monitors.map((m) => {
-            const src: CaptureSource = { type: "monitor", id: m.id };
-            const isSelected = selected.some(p => sourcesEqual(p, src));
-            return (
-              <motion.button
-                key={`m-${m.id}`}
-                whileTap="active"
-                initial="idle"
-                style={{
-                  display: "flex", alignItems: "center", gap: spacing.md,
-                  padding: `${spacing.md}px ${spacing.md}px`, background: "transparent",
-                  border: "none", outline: "none", userSelect: "none",
-                  WebkitUserSelect: "none",
-                  borderRadius: radii.md, cursor: "pointer", textAlign: "left" as const,
-                  width: "100%", position: "relative",
-                }}
-                onClick={(e) => handleSelect(src, e.shiftKey)}
-              >
-                <motion.div
-                  variants={{ idle: { scale: 1 }, active: { scale: 0.98 } }}
-                  transition={{ type: "spring", stiffness: 1500, damping: 60 }}
+      <div style={{ flex: 1, position: "relative", minHeight: 0, display: "flex", flexDirection: "column" }}>
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: spacing.xs,
+          flex: 1, // Let it fill available space
+          minHeight: 0, // Critical for nested flex scrolling
+          overflowY: "auto",
+          // Add a smooth fade out mask at top/bottom of scroll area
+          maskImage: `linear-gradient(to bottom, ${showTopMask ? 'transparent 0%, black 12px' : 'black 0%, black 12px'}, ${showBottomMask ? 'black calc(100% - 12px), transparent 100%' : 'black calc(100% - 12px), black 100%'})`,
+          WebkitMaskImage: `linear-gradient(to bottom, ${showTopMask ? 'transparent 0%, black 12px' : 'black 0%, black 12px'}, ${showBottomMask ? 'black calc(100% - 12px), transparent 100%' : 'black calc(100% - 12px), black 100%'})`,
+          paddingBottom: spacing.xs,
+        }}>
+          {(tab === "screens" || !hasWindows) &&
+            sources.monitors.map((m) => {
+              const src: CaptureSource = { type: "monitor", id: m.id };
+              const isSelected = selected.some(p => sourcesEqual(p, src));
+              return (
+                <motion.button
+                  key={`m-${m.id}`}
+                  whileTap="active"
+                  initial="idle"
                   style={{
-                    position: "absolute", inset: 0,
-                    background: isSelected ? colors.bg.selected : colors.bg.surface,
-                    border: `1px solid ${isSelected ? colors.border.selected : colors.border.default}`,
-                    borderRadius: radii.md,
-                    zIndex: 0,
+                    display: "flex", alignItems: "center", gap: spacing.md,
+                    padding: `${spacing.md}px ${spacing.md}px`, background: "transparent",
+                    border: "none", outline: "none", userSelect: "none",
+                    WebkitUserSelect: "none",
+                    borderRadius: radii.md, cursor: "pointer", textAlign: "left" as const,
+                    width: "100%", position: "relative",
                   }}
-                />
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: spacing.md, width: "100%", position: "relative", zIndex: 1 }}
+                  onClick={(e) => handleSelect(src, e.shiftKey)}
                 >
-                  <div style={{
-                    width: 18, height: 18, borderRadius: "50%",
-                    border: `2px solid ${isSelected ? colors.icon.selected : colors.text.quaternary}`,
-                    flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>
-                    {isSelected && <div style={{ width: 8, height: 8, borderRadius: "50%", background: colors.icon.selected }} />}
+                  <motion.div
+                    variants={{ idle: { scale: 1 }, active: { scale: 0.98 } }}
+                    transition={{ type: "spring", stiffness: 1500, damping: 60 }}
+                    style={{
+                      position: "absolute", inset: 0,
+                      background: isSelected ? colors.bg.selected : colors.bg.surface,
+                      border: `1px solid ${isSelected ? colors.border.selected : colors.border.default}`,
+                      borderRadius: radii.md,
+                      zIndex: 0,
+                    }}
+                  />
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: spacing.md, width: "100%", position: "relative", zIndex: 1 }}
+                  >
+                    <div style={{
+                      width: 18, height: 18, borderRadius: "50%",
+                      border: `2px solid ${isSelected ? colors.icon.selected : colors.text.quaternary}`,
+                      flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {isSelected && <div style={{ width: 8, height: 8, borderRadius: "50%", background: colors.icon.selected }} />}
+                    </div>
+                    <div style={{ flex: 1, display: "flex", flexDirection: "column" as const, gap: 2, minWidth: 0 }}>
+                      <span style={{ fontSize: fontSize.md, fontWeight: fontWeight.semibold, color: colors.text.primary, display: "flex", alignItems: "center", gap: spacing.sm }}>
+                        {m.name}
+                        {m.isPrimary && (
+                          <span style={{
+                            fontSize: fontSize.xs - 1, fontWeight: fontWeight.semibold, color: colors.badge.primaryText,
+                            background: colors.badge.primaryBg, padding: "1px 6px", borderRadius: radii.sm,
+                          }}>
+                            Primary
+                          </span>
+                        )}
+                      </span>
+                      <span style={{ fontSize: fontSize.xs, color: colors.text.tertiary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
+                        {m.width}x{m.height}
+                        {m.scaleFactor > 1 && ` @ ${m.scaleFactor}x`}
+                      </span>
+                    </div>
                   </div>
-                  <div style={{ flex: 1, display: "flex", flexDirection: "column" as const, gap: 2, minWidth: 0 }}>
-                    <span style={{ fontSize: fontSize.md, fontWeight: fontWeight.semibold, color: colors.text.primary, display: "flex", alignItems: "center", gap: spacing.sm }}>
-                      {m.name}
-                      {m.isPrimary && (
+                </motion.button>
+              );
+            })}
+
+          {tab === "windows" && hasWindows &&
+            sources.windows.map((w) => {
+              const src: CaptureSource = { type: "window", id: w.id };
+              const isSelected = selected.some(p => sourcesEqual(p, src));
+              return (
+                <motion.button
+                  key={`w-${w.id}`}
+                  whileTap="active"
+                  initial="idle"
+                  style={{
+                    display: "flex", alignItems: "center", gap: spacing.md,
+                    padding: `${spacing.md}px ${spacing.md}px`, background: "transparent",
+                    border: "none", outline: "none", userSelect: "none",
+                    WebkitUserSelect: "none",
+                    borderRadius: radii.md, cursor: "pointer", textAlign: "left" as const,
+                    width: "100%", position: "relative",
+                    ...(w.isMinimized ? { opacity: 0.5 } : {}),
+                  }}
+                  onClick={(e) => handleSelect(src, e.shiftKey)}
+                  onMouseEnter={(e) => {
+                    setHoveredWindow(src);
+                    const ratio = w.height > 0 ? w.width / w.height : 16 / 9;
+                    setHoverAspectRatio(Math.min(3, Math.max(0.5, ratio)));
+                  }}
+                  onMouseLeave={() => {
+                    setHoveredWindow(null);
+                  }}
+                >
+                  <motion.div
+                    variants={{ idle: { scale: 1 }, active: { scale: 0.98 } }}
+                    transition={{ type: "spring", stiffness: 1500, damping: 60 }}
+                    style={{
+                      position: "absolute", inset: 0,
+                      background: isSelected ? colors.bg.selected : colors.bg.surface,
+                      border: `1px solid ${isSelected ? colors.border.selected : colors.border.default}`,
+                      borderRadius: radii.md,
+                      zIndex: 0,
+                    }}
+                  />
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: spacing.md, width: "100%", position: "relative", zIndex: 1 }}
+                  >
+                    <div style={{
+                      width: 18, height: 18, borderRadius: "50%",
+                      border: `2px solid ${isSelected ? colors.icon.selected : colors.text.quaternary}`,
+                      flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {isSelected && <div style={{ width: 8, height: 8, borderRadius: "50%", background: colors.icon.selected }} />}
+                    </div>
+                    <div style={{ flex: 1, display: "flex", flexDirection: "column" as const, gap: 2, minWidth: 0 }}>
+                      <span style={{ fontSize: fontSize.md, fontWeight: fontWeight.semibold, color: colors.text.primary, display: "flex", alignItems: "center", gap: spacing.sm }}>
+                        {w.appName || w.title}
+                        {w.isMinimized && (
                         <span style={{
-                          fontSize: fontSize.xs - 1, fontWeight: fontWeight.semibold, color: colors.badge.primaryText,
-                          background: colors.badge.primaryBg, padding: "1px 6px", borderRadius: radii.sm,
+                          fontSize: fontSize.xs - 1, fontWeight: fontWeight.medium, color: colors.text.secondary,
+                          background: `${colors.text.secondary}26`, padding: "1px 6px", borderRadius: radii.sm,
                         }}>
-                          Primary
+                          Minimized
                         </span>
                       )}
                     </span>
                     <span style={{ fontSize: fontSize.xs, color: colors.text.tertiary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
-                      {m.width}x{m.height}
-                      {m.scaleFactor > 1 && ` @ ${m.scaleFactor}x`}
+                      {w.title && w.appName ? w.title + " \u2014 " : ""}
+                      {w.width}x{w.height}
                     </span>
                   </div>
-                </div>
-              </motion.button>
-            );
-          })}
-
-        {tab === "windows" && hasWindows &&
-          sources.windows.map((w) => {
-            const src: CaptureSource = { type: "window", id: w.id };
-            const isSelected = selected.some(p => sourcesEqual(p, src));
-            return (
-              <motion.button
-                key={`w-${w.id}`}
-                whileTap="active"
-                initial="idle"
-                style={{
-                  display: "flex", alignItems: "center", gap: spacing.md,
-                  padding: `${spacing.md}px ${spacing.md}px`, background: "transparent",
-                  border: "none", outline: "none", userSelect: "none",
-                  WebkitUserSelect: "none",
-                  borderRadius: radii.md, cursor: "pointer", textAlign: "left" as const,
-                  width: "100%", position: "relative",
-                  ...(w.isMinimized ? { opacity: 0.5 } : {}),
-                }}
-                onClick={(e) => handleSelect(src, e.shiftKey)}
-                onMouseEnter={(e) => {
-                  setHoveredWindow(src);
-                  const ratio = w.height > 0 ? w.width / w.height : 16 / 9;
-                  setHoverAspectRatio(Math.min(3, Math.max(0.5, ratio)));
-                }}
-                onMouseLeave={() => {
-                  setHoveredWindow(null);
-                }}
-              >
-                <motion.div
-                  variants={{ idle: { scale: 1 }, active: { scale: 0.98 } }}
-                  transition={{ type: "spring", stiffness: 1500, damping: 60 }}
-                  style={{
-                    position: "absolute", inset: 0,
-                    background: isSelected ? colors.bg.selected : colors.bg.surface,
-                    border: `1px solid ${isSelected ? colors.border.selected : colors.border.default}`,
-                    borderRadius: radii.md,
-                    zIndex: 0,
-                  }}
-                />
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: spacing.md, width: "100%", position: "relative", zIndex: 1 }}
-                >
-                  <div style={{
-                    width: 18, height: 18, borderRadius: "50%",
-                    border: `2px solid ${isSelected ? colors.icon.selected : colors.text.quaternary}`,
-                    flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>
-                    {isSelected && <div style={{ width: 8, height: 8, borderRadius: "50%", background: colors.icon.selected }} />}
                   </div>
-                  <div style={{ flex: 1, display: "flex", flexDirection: "column" as const, gap: 2, minWidth: 0 }}>
-                    <span style={{ fontSize: fontSize.md, fontWeight: fontWeight.semibold, color: colors.text.primary, display: "flex", alignItems: "center", gap: spacing.sm }}>
-                      {w.appName || w.title}
-                      {w.isMinimized && (
-                      <span style={{
-                        fontSize: fontSize.xs - 1, fontWeight: fontWeight.medium, color: colors.text.secondary,
-                        background: `${colors.text.secondary}26`, padding: "1px 6px", borderRadius: radii.sm,
-                      }}>
-                        Minimized
-                      </span>
-                    )}
-                  </span>
-                  <span style={{ fontSize: fontSize.xs, color: colors.text.tertiary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
-                    {w.title && w.appName ? w.title + " \u2014 " : ""}
-                    {w.width}x{w.height}
-                  </span>
-                </div>
-                </div>
-              </motion.button>
-            );
-          })}
+                </motion.button>
+              );
+            })}
+        </div>
+
+        <AnimatePresence>
+          {((tab === "screens" && sources.monitors.length > 1) || (tab === "windows" && sources.windows.length > 1)) && (
+            <motion.div
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              transition={{ type: "spring", stiffness: 900, damping: 30 }}
+              style={{
+                position: "absolute",
+                bottom: '-0px',
+                right: spacing.lg,
+                background: "rgba(0, 0, 0, 0.7)",
+                backdropFilter: "blur(8px)",
+                WebkitBackdropFilter: "blur(8px)",
+                color: "#fff",
+                padding: "6px 10px",
+                borderRadius: radii.md,
+                fontSize: fontSize.xs,
+                display: "flex",
+                alignItems: "center",
+                pointerEvents: "none",
+                boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                zIndex: 10,
+              }}
+            >
+              <kbd style={{ border: "1px solid rgba(255,255,255,0.3)", background: "rgba(255,255,255,0.1)", borderRadius: 4, padding: "2px 4px", margin: "0 4px 0 0", fontFamily: "inherit" }}>shift</kbd>
+              +
+              <kbd style={{ border: "1px solid rgba(255,255,255,0.3)", background: "rgba(255,255,255,0.1)", borderRadius: 4, padding: "2px 4px", margin: "0 6px 0 4px", fontFamily: "inherit" }}>click</kbd>
+              to select multiple
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Start button */}

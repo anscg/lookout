@@ -161,14 +161,31 @@ export function App() {
       }
     };
 
-    getCurrentWindow().theme().then(updateTheme).catch(() => {});
+    const isLinux = navigator.userAgent.toLowerCase().includes("linux");
 
-    let unlisten: (() => void) | undefined;
-    getCurrentWindow().onThemeChanged((event) => {
-      updateTheme(event.payload);
-    }).then((fn) => { unlisten = fn; }).catch(() => {});
+    if (isLinux) {
+      // On Linux, Tauri's window.theme() can incorrectly report "light" and override the native GTK webview behavior.
+      // WebKitGTK natively supports prefers-color-scheme (via xdg-desktop-portal / org.freedesktop.appearance).
+      // So we just rely on standard browser matchMedia to get the universal native standard.
+      const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      updateTheme(mediaQuery.matches ? "dark" : "light");
 
-    return () => { if (unlisten) unlisten(); };
+      const listener = (e: MediaQueryListEvent) => {
+        updateTheme(e.matches ? "dark" : "light");
+      };
+      mediaQuery.addEventListener("change", listener);
+
+      return () => mediaQuery.removeEventListener("change", listener);
+    } else {
+      getCurrentWindow().theme().then(updateTheme).catch(() => {});
+
+      let unlisten: (() => void) | undefined;
+      getCurrentWindow().onThemeChanged((event) => {
+        updateTheme(event.payload);
+      }).then((fn) => { unlisten = fn; }).catch(() => {});
+
+      return () => { if (unlisten) unlisten(); };
+    }
   }, []);
 
   // Listen for native menu navigation events

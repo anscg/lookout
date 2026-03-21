@@ -7,6 +7,8 @@ import {
   colors,
   spacing,
   radii,
+  fontSize,
+  fontWeight,
 } from "@collapse/react";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { SourcePicker } from "./SourcePicker.js";
@@ -106,12 +108,13 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
   if (sessionCheck === "loading") {
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-        <div style={{ maxWidth: 480, margin: "0 auto", padding: spacing.lg, width: "100%", boxSizing: "border-box", flexShrink: 0 }}>
-          <Skeleton width={80} height={32} borderRadius={radii.lg} />
+        <div style={{ maxWidth: 480, margin: "0 auto", padding: spacing.lg, width: "100%", boxSizing: "border-box", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <Skeleton width={80} height={32} borderRadius={radii.md} />
+          <Skeleton width={180} height={24} borderRadius={radii.md} style={{ margin: "0 auto" }} />
+          <div style={{ width: 80 }}></div> {/* placeholder for balance */}
         </div>
         <div style={{ maxWidth: 480, margin: "0 auto", padding: spacing.lg, paddingTop: 0, flex: 1, width: "100%", boxSizing: "border-box" }}>
-          <Skeleton width="60%" height={20} style={{ marginBottom: spacing.md, marginLeft: "auto", marginRight: "auto" }} />
-          <Skeleton aspectRatio="16/9" borderRadius={radii.lg} style={{ marginBottom: spacing.lg }} />
+          <Skeleton aspectRatio="2/1" borderRadius={radii.lg} style={{ marginBottom: spacing.lg }} />
           <Skeleton height={36} borderRadius={radii.md} style={{ marginBottom: spacing.md }} />
           {[1, 2, 3].map((i) => (
             <Skeleton key={i} height={48} borderRadius={radii.md} style={{ marginBottom: spacing.xs }} />
@@ -191,8 +194,8 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
             }}
             style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", height: "100%" }}
           >
-            <div style={{ maxWidth: 480, margin: "0 auto", padding: spacing.lg, paddingBottom: 0, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, width: "100%", boxSizing: "border-box" }}>
-              <Button variant="secondary" size="sm" onClick={onBack} style={cardButtonStyle}>
+            <div style={{ maxWidth: 480, margin: "0 auto", padding: spacing.lg, paddingBottom: 0, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, width: "100%", boxSizing: "border-box", position: "relative" }}>
+              <Button variant="secondary" size="sm" onClick={onBack} style={{...cardButtonStyle, zIndex: 1}}>
                 {isMacOS ? (
                   <span>&larr; Gallery</span>
                 ) : (
@@ -204,8 +207,11 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
                   </span>
                 )}
               </Button>
+              <h2 style={{ position: "absolute", left: 0, right: 0, textAlign: "center", fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text.primary, margin: 0, pointerEvents: "none" }}>
+                What should Collapse capture?
+              </h2>
               {sessionStatus !== "pending" && (
-                <Button variant="danger" size="md" loading={stopping} onClick={handleStopClick}>
+                <Button variant="danger" size="md" loading={stopping} onClick={handleStopClick} style={{ zIndex: 1 }}>
                   Stop Session
                 </Button>
               )}
