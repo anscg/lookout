@@ -35,12 +35,19 @@
         width: 0px;
         background: transparent;
       }
+      body.os-windows { transform: rotate(0.001deg); }
     </style>
   </head>
   <body>
     <div id="root"></div>
     <div id="debug" style="display:none;position:fixed;bottom:0;left:0;right:0;background:#111;color:#0f0;font-family:monospace;font-size:11px;padding:0 8px 8px;max-height:40vh;overflow:auto;z-index:99999;border-top:1px solid #333;"></div>
     <script>
+      (function() {
+        const ua = navigator.userAgent.toLowerCase();
+        if (ua.includes('windows') || ua.includes('linux')) {
+          document.body.classList.add('os-windows');
+        }
+      })();
       window.__dbg = function(msg) {
         var el = document.getElementById('debug');
         if (el) el.innerHTML += new Date().toLocaleTimeString() + ' ' + msg + '<br>';

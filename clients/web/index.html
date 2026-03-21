@@ -35,10 +35,19 @@
         width: 0px;
         background: transparent;
       }
+      body.os-windows { transform: rotate(0.001deg); }
     </style>
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (function() {
+        const ua = navigator.userAgent.toLowerCase();
+        if (ua.includes('windows') || ua.includes('linux')) {
+          document.body.classList.add('os-windows');
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
