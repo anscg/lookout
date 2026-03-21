@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../api/client.js";
 import { formatTime } from "../hooks/useSessionTimer.js";
+import { VideoPlayer } from "@collapse/react";
 import type { SessionStatus } from "@collapse/shared";
 
 interface ResultProps {
@@ -63,12 +64,9 @@ export function Result({ status, trackedSeconds }: ResultProps) {
         </p>
         {error && <p style={{ color: "#ef4444" }}>{error}</p>}
         {videoUrl && (
-          <video
-            src={videoUrl}
-            controls
-            autoPlay
-            style={styles.video}
-          />
+          <div style={styles.videoContainer}>
+            <VideoPlayer src={videoUrl} />
+          </div>
         )}
       </div>
     );
@@ -95,10 +93,11 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888",
     marginBottom: 24,
   },
-  video: {
+  videoContainer: {
     width: "100%",
     borderRadius: 8,
     background: "#000",
+    overflow: "hidden",
   },
   spinner: {
     width: 40,

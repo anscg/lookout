@@ -2,6 +2,7 @@ import React from "react";
 import { Spinner } from "../ui/Spinner.js";
 import { colors, radii, fontSize, fontWeight, spacing } from "../ui/theme.js";
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
+import { VideoPlayer } from "./VideoPlayer.js";
 
 export interface ProcessingStateProps {
   status: string;
@@ -28,7 +29,7 @@ export function ProcessingState({ status, trackedSeconds, videoUrl, error, onVid
   if (status === "complete" && videoUrl) {
     return (
       <div style={{ width: "100%", borderRadius: 0, overflow: "hidden", background: colors.bg.sunken, aspectRatio: "16/9" }}>
-        <video src={videoUrl} controls autoPlay={false} style={{ width: "100%", height: "100%", display: "block" }} />
+        <VideoPlayer src={videoUrl} />
       </div>
     );
   }

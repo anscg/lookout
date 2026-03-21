@@ -20,6 +20,7 @@ export { ResultView } from "./components/ResultView.js";
 export type { ResultViewProps } from "./components/ResultView.js";
 export { ProcessingState } from "./components/ProcessingState.js";
 export type { ProcessingStateProps } from "./components/ProcessingState.js";
+export { VideoPlayer } from "./components/VideoPlayer.js";
 
 // Gallery components
 export { Gallery } from "./components/Gallery.js";

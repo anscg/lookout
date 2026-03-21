@@ -24,7 +24,8 @@
     "./dist/ui/theme.js",
     "./dist/ui/theme.mjs",
     "./dist/ui/theme.cjs",
-    "./src/ui/theme.ts"
+    "./src/ui/theme.ts",
+    "*.css"
   ],
   "scripts": {
     "build": "tsup",
@@ -37,6 +38,7 @@
   },
   "dependencies": {
     "@collapse/shared": "*",
+    "@videojs/react": "^10.0.0-beta.8",
     "motion": "^12.38.0"
   },
   "devDependencies": {

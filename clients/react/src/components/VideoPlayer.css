@@ -1,0 +1,13 @@
+.collapse-video-player .media-button--mute,
+.collapse-video-player .media-slider--volume {
+  display: none !important;
+}
+
+.collapse-video-player {
+  --media-border-radius: 8px;
+  --media-video-border-radius: 8px;
+}
+
+.collapse-video-player * {
+  --media-border-radius: 8px;
+}
