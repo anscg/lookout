@@ -37,6 +37,9 @@ function GalleryHeader({ onAdd }: { onAdd?: () => void }) {
   );
 }
 
+// Global cache for gallery scroll position
+let galleryScrollPosition = 0;
+
 export function Gallery({
   sessions,
   loading,
@@ -53,9 +56,18 @@ export function Gallery({
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    galleryScrollPosition = scrollTop;
     setShowTopMask(scrollTop > 0);
     setShowBottomMask(Math.ceil(scrollTop + clientHeight) < scrollHeight);
   }, []);
+
+  // Restore scroll position when sessions load or component mounts
+  useEffect(() => {
+    if (scrollRef.current && sessions.length > 0 && !loading) {
+      scrollRef.current.scrollTop = galleryScrollPosition;
+      handleScroll();
+    }
+  }, [sessions.length, loading, handleScroll]);
 
   useEffect(() => {
     handleScroll();
