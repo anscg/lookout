@@ -25,6 +25,14 @@ const tokenParamSchema = {
   required: ["token"] as const,
 };
 
+const sessionIdParamSchema = {
+  type: "object" as const,
+  properties: {
+    sessionId: { type: "string" as const, format: "uuid" },
+  },
+  required: ["sessionId"] as const,
+};
+
 /** Helper to look up session by token */
 async function findSession(token: string) {
   return db.query.sessions.findFirst({
@@ -660,29 +668,11 @@ export async function sessionRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: `${format.toUpperCase()} video not available` });
       }
 
-      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-      const command = new GetObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: r2Key,
-      });
-      const videoUrl = await getSignedUrl(r2Client, command, {
-        expiresIn: 3600,
-      });
+      const baseUrl = process.env.BASE_URL || "http://localhost:3000";
+      const ext = format === "webm" ? "video.webm" : "video.mp4";
+      const videoUrl = `${baseUrl}/api/media/${session.id}/${ext}`;
 
-      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-      try {
-        const command = new GetObjectCommand({
-          Bucket: R2_BUCKET,
-          Key: key,
-        });
-        const videoUrl = await getSignedUrl(r2Client, command, {
-          expiresIn: 3600,
-        });
-
-        return { videoUrl };
-      } catch (err) {
-        return reply.code(404).send({ error: "Requested video format not available" });
-      }
+      return { videoUrl };
     },
   );
 
@@ -710,14 +700,8 @@ export async function sessionRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Thumbnail not available" });
       }
 
-      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-      const command = new GetObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: session.thumbnailR2Key,
-      });
-      const thumbnailUrl = await getSignedUrl(r2Client, command, {
-        expiresIn: 3600,
-      });
+      const baseUrl = process.env.BASE_URL || "http://localhost:3000";
+      const thumbnailUrl = `${baseUrl}/api/media/${session.id}/thumbnail.jpg`;
 
       return { thumbnailUrl };
     },
@@ -801,19 +785,13 @@ export async function sessionRoutes(app: FastifyInstance) {
         ]),
       );
 
-      // Generate presigned thumbnail URLs
-      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-      const sessions = await Promise.all(
-        rows.map(async (s) => {
+      // Generate permanent thumbnail URLs via redirect endpoint
+      const baseUrl = process.env.BASE_URL || "http://localhost:3000";
+      const sessions = rows.map((s) => {
           const c = countMap.get(s.id) ?? { trackedSeconds: 0, screenshotCount: 0 };
-          let thumbnailUrl: string | null = null;
-          if (s.thumbnailR2Key) {
-            const cmd = new GetObjectCommand({
-              Bucket: R2_BUCKET,
-              Key: s.thumbnailR2Key,
-            });
-            thumbnailUrl = await getSignedUrl(r2Client, cmd, { expiresIn: 3600 });
-          }
+          const thumbnailUrl = s.thumbnailR2Key
+            ? `${baseUrl}/api/media/${s.id}/thumbnail.jpg`
+            : null;
           return {
             token: s.token,
             name: s.name,
@@ -828,8 +806,7 @@ export async function sessionRoutes(app: FastifyInstance) {
             videoWebmUrl: s.videoWebmUrl ?? null,
             metadata: s.metadata ?? {},
           };
-        }),
-      );
+        });
 
       // Sort newest first
       sessions.sort(
@@ -838,6 +815,91 @@ export async function sessionRoutes(app: FastifyInstance) {
       );
 
       return { sessions };
+    },
+  );
+
+  // ── Public media redirect endpoints ─────────────────────────
+  // Permanent URLs that redirect to short-lived presigned R2 URLs.
+  // Use session ID (public, unguessable UUID) instead of token (secret).
+
+  app.get<{ Params: { sessionId: string } }>(
+    "/api/media/:sessionId/thumbnail.jpg",
+    { schema: { params: sessionIdParamSchema } },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("media-thumbnail", request.params.sessionId, 60);
+      if (!rl.allowed) {
+        reply.header("Retry-After", String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)));
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await db.query.sessions.findFirst({
+        where: eq(schema.sessions.id, request.params.sessionId),
+      });
+      if (!session || !session.thumbnailR2Key) {
+        return reply.code(404).send({ error: "Thumbnail not available" });
+      }
+
+      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+      const url = await getSignedUrl(r2Client, new GetObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: session.thumbnailR2Key,
+      }), { expiresIn: 3600 });
+
+      return reply.redirect(url);
+    },
+  );
+
+  app.get<{ Params: { sessionId: string } }>(
+    "/api/media/:sessionId/video.mp4",
+    { schema: { params: sessionIdParamSchema } },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("media-video", request.params.sessionId, 30);
+      if (!rl.allowed) {
+        reply.header("Retry-After", String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)));
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await db.query.sessions.findFirst({
+        where: eq(schema.sessions.id, request.params.sessionId),
+      });
+      if (!session || session.status !== "complete" || !session.videoR2Key) {
+        return reply.code(404).send({ error: "Video not available" });
+      }
+
+      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+      const url = await getSignedUrl(r2Client, new GetObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: session.videoR2Key,
+      }), { expiresIn: 3600 });
+
+      return reply.redirect(url);
+    },
+  );
+
+  app.get<{ Params: { sessionId: string } }>(
+    "/api/media/:sessionId/video.webm",
+    { schema: { params: sessionIdParamSchema } },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("media-video-webm", request.params.sessionId, 30);
+      if (!rl.allowed) {
+        reply.header("Retry-After", String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)));
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await db.query.sessions.findFirst({
+        where: eq(schema.sessions.id, request.params.sessionId),
+      });
+      if (!session || session.status !== "complete" || !session.videoWebmR2Key) {
+        return reply.code(404).send({ error: "WebM video not available" });
+      }
+
+      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+      const url = await getSignedUrl(r2Client, new GetObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: session.videoWebmR2Key,
+      }), { expiresIn: 3600 });
+
+      return reply.redirect(url);
     },
   );
 }
