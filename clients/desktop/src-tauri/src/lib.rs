@@ -499,40 +499,20 @@ fn take_screenshot(
     capture::take_screenshot(source, max_width, max_height, jpeg_quality)
 }
 
-/// Full capture-upload-confirm pipeline in Rust (no browser CORS issues).
-/// Returns the confirm data AND the screenshot preview (base64) so the
-/// frontend can display the captured frame without a separate IPC call.
-#[tauri::command]
-async fn capture_and_upload(
-    sources: Vec<CaptureSource>,
-    max_width: u32,
-    max_height: u32,
-    jpeg_quality: u8,
-    state: State<'_, AppState>,
-    app: AppHandle,
+/// Shared upload-and-confirm pipeline: get presigned URL, PUT to R2, POST
+/// confirmation. Used by both `capture_and_upload` (screen/window) and
+/// `upload_frame` (camera).
+async fn upload_and_confirm(
+    jpeg_base64: &str,
+    width: u32,
+    height: u32,
+    config: &SessionConfig,
+    app: &AppHandle,
 ) -> Result<CaptureUploadResult, String> {
-    let config = {
-        let guard = state.config.lock().map_err(|e| e.to_string())?;
-        guard
-            .clone()
-            .ok_or("Not configured — call configure() first")?
-    };
+    let jpeg_bytes = base64_decode(jpeg_base64)?;
+    let size_bytes = jpeg_bytes.len();
 
-    // Step 1: Native screenshot
-    let _ = app.emit("capture-progress", "capturing screen...");
-    let screenshot = capture::take_stitched_screenshots(&sources, max_width, max_height, jpeg_quality)?;
-    let jpeg_bytes = base64_decode(&screenshot.base64)?;
-    let _ = app.emit(
-        "capture-progress",
-        format!(
-            "captured {}x{} ({}KB jpeg)",
-            screenshot.width,
-            screenshot.height,
-            jpeg_bytes.len() / 1024
-        ),
-    );
-
-    // Step 2: Get presigned URL from server
+    // Step 1: Get presigned URL from server
     let _ = app.emit("capture-progress", "getting upload url from server...");
     let client = reqwest::Client::new();
     let url_response = client
@@ -562,15 +542,15 @@ async fn capture_and_upload(
         ),
     );
 
-    // Step 3: Upload JPEG to R2
+    // Step 2: Upload JPEG to R2
     let _ = app.emit(
         "capture-progress",
-        format!("uploading {}KB to R2...", jpeg_bytes.len() / 1024),
+        format!("uploading {}KB to R2...", size_bytes / 1024),
     );
     client
         .put(&upload_url_resp.upload_url)
         .header("Content-Type", "image/jpeg")
-        .body(jpeg_bytes.clone())
+        .body(jpeg_bytes)
         .send()
         .await
         .map_err(|e| format!("R2 upload failed: {e}"))?
@@ -578,7 +558,7 @@ async fn capture_and_upload(
         .map_err(|e| format!("R2 upload rejected: {e}"))?;
     let _ = app.emit("capture-progress", "uploaded to R2 successfully");
 
-    // Step 4: Confirm upload with server
+    // Step 3: Confirm upload with server
     let _ = app.emit("capture-progress", "confirming upload with server...");
     let confirm_response = client
         .post(format!(
@@ -587,9 +567,9 @@ async fn capture_and_upload(
         ))
         .json(&serde_json::json!({
             "screenshotId": upload_url_resp.screenshot_id,
-            "width": screenshot.width,
-            "height": screenshot.height,
-            "fileSize": screenshot.size_bytes,
+            "width": width,
+            "height": height,
+            "fileSize": size_bytes,
         }))
         .send()
         .await
@@ -617,11 +597,77 @@ async fn capture_and_upload(
         confirmed: confirm_resp.confirmed,
         tracked_seconds: confirm_resp.tracked_seconds,
         next_expected_at: confirm_resp.next_expected_at,
-        // Return the same base64 we already have — no extra work
-        preview_base64: screenshot.base64,
-        preview_width: screenshot.width,
-        preview_height: screenshot.height,
+        preview_base64: jpeg_base64.to_string(),
+        preview_width: width,
+        preview_height: height,
     })
+}
+
+/// Full capture-upload-confirm pipeline in Rust (no browser CORS issues).
+/// Returns the confirm data AND the screenshot preview (base64) so the
+/// frontend can display the captured frame without a separate IPC call.
+#[tauri::command]
+async fn capture_and_upload(
+    sources: Vec<CaptureSource>,
+    max_width: u32,
+    max_height: u32,
+    jpeg_quality: u8,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<CaptureUploadResult, String> {
+    let config = {
+        let guard = state.config.lock().map_err(|e| e.to_string())?;
+        guard
+            .clone()
+            .ok_or("Not configured — call configure() first")?
+    };
+
+    // Native screenshot
+    let _ = app.emit("capture-progress", "capturing screen...");
+    let screenshot = capture::take_stitched_screenshots(&sources, max_width, max_height, jpeg_quality)?;
+    let _ = app.emit(
+        "capture-progress",
+        format!(
+            "captured {}x{} ({}KB jpeg)",
+            screenshot.width,
+            screenshot.height,
+            screenshot.size_bytes / 1024
+        ),
+    );
+
+    upload_and_confirm(
+        &screenshot.base64,
+        screenshot.width,
+        screenshot.height,
+        &config,
+        &app,
+    )
+    .await
+}
+
+/// Upload a pre-captured frame (e.g. from browser camera capture).
+/// Accepts base64-encoded JPEG from the frontend, runs the upload pipeline.
+#[tauri::command]
+async fn upload_frame(
+    base64: String,
+    width: u32,
+    height: u32,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<CaptureUploadResult, String> {
+    let config = {
+        let guard = state.config.lock().map_err(|e| e.to_string())?;
+        guard
+            .clone()
+            .ok_or("Not configured — call configure() first")?
+    };
+
+    let _ = app.emit(
+        "capture-progress",
+        format!("uploading camera frame {}x{}", width, height),
+    );
+
+    upload_and_confirm(&base64, width, height, &config, &app).await
 }
 
 fn base64_decode(b64: &str) -> Result<Vec<u8>, String> {
@@ -672,6 +718,7 @@ pub fn run() {
             configure,
             take_screenshot,
             capture_and_upload,
+            upload_frame,
             get_cold_start_urls,
             enable_vibrancy,
             disable_vibrancy,

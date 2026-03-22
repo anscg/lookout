@@ -3,8 +3,8 @@ import { invoke } from "../logger.js";
 import { SCREENSHOT_INTERVAL_MS, MAX_WIDTH, MAX_HEIGHT, JPEG_QUALITY } from "@collapse/shared";
 
 export interface CaptureSource {
-  type: "monitor" | "window";
-  id: number;
+  type: "monitor" | "window" | "camera";
+  id: number | string; // number for monitor/window, string (deviceId) for camera
 }
 
 interface CaptureUploadResult {
@@ -16,9 +16,16 @@ interface CaptureUploadResult {
   previewHeight: number;
 }
 
+/** Capture a single frame from a camera, returned as base64 JPEG. */
+export type CameraFrameCapture = () => Promise<{
+  base64: string;
+  width: number;
+  height: number;
+} | null>;
+
 /**
  * Desktop-native capture hook. Uses Tauri IPC to:
- * 1. Take a native screenshot via xcap (Rust)
+ * 1. Take a native screenshot via xcap (Rust) — or grab a camera frame via the provided callback
  * 2. Upload directly from Rust (no CORS)
  * 3. Confirm with the server
  * 4. Return the captured frame as a preview URL
@@ -27,6 +34,8 @@ export function useNativeCapture(
   token: string,
   apiBaseUrl: string,
   sources: CaptureSource[],
+  /** For camera sources: a callback that grabs a JPEG frame from the active stream. */
+  cameraCapture?: CameraFrameCapture,
 ) {
   const [isCapturing, setIsCapturing] = useState(false);
   const [trackedSeconds, setTrackedSeconds] = useState(0);
@@ -41,17 +50,46 @@ export function useNativeCapture(
   // Track blob URL for cleanup
   const blobUrlRef = useRef<string | null>(null);
 
+  // Keep cameraCapture in a ref so captureOnce always sees the latest version
+  const cameraCaptureRef = useRef(cameraCapture);
+  cameraCaptureRef.current = cameraCapture;
+
   const captureOnce = useCallback(async () => {
     const s = sourcesRef.current;
     if (s.length === 0) return;
     console.log(`[capture] starting capture for ${s.length} sources`);
     try {
-      const result = await invoke<CaptureUploadResult>("capture_and_upload", {
-        sources: s,
-        maxWidth: MAX_WIDTH,
-        maxHeight: MAX_HEIGHT,
-        jpegQuality: Math.round(JPEG_QUALITY * 100),
-      });
+      let result: CaptureUploadResult;
+
+      // Camera sources use a browser-side frame capture + Rust upload
+      const isCamera = s.length === 1 && s[0].type === "camera";
+      if (isCamera) {
+        const captureFn = cameraCaptureRef.current;
+        if (!captureFn) {
+          console.warn("[capture] camera source but no captureFrame callback provided, skipping");
+          return;
+        }
+        const frame = await captureFn();
+        if (!frame) {
+          console.warn("[capture] camera frame capture returned null, skipping this interval");
+          return;
+        }
+        console.log(`[capture] camera frame captured ${frame.width}x${frame.height} (${Math.round(frame.base64.length * 3 / 4 / 1024)}KB)`);
+        result = await invoke<CaptureUploadResult>("upload_frame", {
+          base64: frame.base64,
+          width: frame.width,
+          height: frame.height,
+        });
+      } else {
+        // Screen/window: full capture+upload pipeline in Rust (supports multi-source stitching)
+        result = await invoke<CaptureUploadResult>("capture_and_upload", {
+          sources: s,
+          maxWidth: MAX_WIDTH,
+          maxHeight: MAX_HEIGHT,
+          jpegQuality: Math.round(JPEG_QUALITY * 100),
+        });
+      }
+
       setTrackedSeconds(result.trackedSeconds);
       setScreenshotCount((c) => {
         const n = c + 1;
@@ -87,13 +125,21 @@ export function useNativeCapture(
   // Starts when isCapturing becomes true, stops when it becomes false.
   // Detects sleep by comparing elapsed time between ticks — if the gap is
   // much longer than the interval, the machine slept and we auto-resume.
+  // Uses a busy guard to prevent overlapping captures (camera uploads can
+  // take longer than the interval).
   useEffect(() => {
     if (!isCapturing) return;
 
     let lastTick = Date.now();
+    let busy = false;
     const SLEEP_THRESHOLD = SCREENSHOT_INTERVAL_MS * 2.5;
 
     const tick = async () => {
+      if (busy) {
+        console.debug("[capture] previous capture still in progress, skipping tick");
+        return;
+      }
+
       const now = Date.now();
       const elapsed = now - lastTick;
       lastTick = now;
@@ -123,11 +169,16 @@ export function useNativeCapture(
         }
       }
 
-      captureRef.current();
+      busy = true;
+      try {
+        await captureRef.current();
+      } finally {
+        busy = false;
+      }
     };
 
     console.log(`[capture] capture loop started, interval: ${SCREENSHOT_INTERVAL_MS}ms`);
-    captureRef.current();
+    tick();
     const id = setInterval(tick, SCREENSHOT_INTERVAL_MS);
     return () => {
       console.log("[capture] capture loop stopped");

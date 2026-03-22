@@ -19,6 +19,7 @@ import { NamingModal } from "./NamingModal.js";
 import { useNativeCapture } from "../hooks/useNativeCapture.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
+import { useCameraCapture, waitForVideoReady } from "../hooks/useCameraCapture.js";
 import { cardButtonStyle } from "./PageLayout.js";
 
 interface DesktopRecorderProps {
@@ -87,9 +88,24 @@ function RecorderPreviewItem({
 
 export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewSession }: DesktopRecorderProps) {
   const isMacOS = navigator.userAgent.includes("Mac");
+  const isCamera = source.length === 1 && source[0].type === "camera";
   const session = useSession();
-  const capture = useNativeCapture(token, API_BASE, source);
-  
+  const camera = useCameraCapture();
+
+  // Wrap camera.captureFrame to pass the rendered video element
+  const cameraFrameCapture = useCallback(async () => {
+    return camera.captureFrame(cameraVideoRef.current);
+  }, [camera]);
+
+  // Pass camera captureFrame to the native capture hook for camera sources
+  const capture = useNativeCapture(
+    token,
+    API_BASE,
+    source,
+    isCamera ? cameraFrameCapture : undefined,
+  );
+
+
   const displaySeconds = useSessionTimer(
     capture.trackedSeconds || session.trackedSeconds,
     capture.isCapturing,
@@ -102,28 +118,74 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
   const stopActionHandled = useRef(false);
   const autoStarted = useRef(false);
 
-  // Auto-start recording when component mounts and session is ready (#5)
+  // Camera video ref for live preview during recording
+  const cameraVideoRef = useRef<HTMLVideoElement>(null);
+
+  // Attach camera stream to video element for live preview
+  useEffect(() => {
+    if (cameraVideoRef.current && camera.stream) {
+      cameraVideoRef.current.srcObject = camera.stream;
+    }
+  }, [camera.stream]);
+
+  // Camera device ID (only meaningful when isCamera is true)
+  const cameraDeviceId = isCamera ? String(source[0].id) : "";
+
+  // Start camera stream, attach to video element, and wait for decoded dimensions.
+  // Must only be called when the <video> element is in the DOM (session not "loading").
+  const startCameraAndWait = useCallback(async () => {
+    await new Promise((r) => requestAnimationFrame(r));
+    const stream = await camera.startStream(cameraDeviceId);
+    if (cameraVideoRef.current && stream) {
+      cameraVideoRef.current.srcObject = stream;
+      try { await cameraVideoRef.current.play(); } catch {}
+      await waitForVideoReady(cameraVideoRef.current);
+      console.log(`[session] camera video ready: ${cameraVideoRef.current?.videoWidth}x${cameraVideoRef.current?.videoHeight}`);
+    }
+  }, [camera, cameraDeviceId]);
+
+  // Auto-start recording (and camera stream) when component mounts and session is ready.
+  // For camera sources, we must wait until cameraVideoRef is in the DOM (i.e. session
+  // is no longer "loading") before starting the stream, otherwise the <video> element
+  // won't exist for captureFrame to draw from.
   useEffect(() => {
     if (autoStarted.current) return;
     if (session.status === "loading" || session.status === "error") return;
-    const isActive = session.status === "active" || session.status === "pending";
-    if (isActive && !capture.isCapturing) {
-      autoStarted.current = true;
-      capture.startCapturing();
-    }
-  }, [session.status, capture.isCapturing, capture]);
+    const isSessionActive = session.status === "active" || session.status === "pending";
+    if (!isSessionActive || capture.isCapturing) return;
 
-  // Navigate to session detail when terminal state is reached (#9)
+    autoStarted.current = true;
+    (async () => {
+      if (isCamera) {
+        await startCameraAndWait();
+      }
+      capture.startCapturing();
+    })();
+  }, [session.status, capture.isCapturing, capture, isCamera, cameraDeviceId, camera]);
+
+  // Navigate to session detail when terminal state is reached
   useEffect(() => {
     if (["stopped", "compiling", "complete", "failed"].includes(session.status) && !isPrompting && !stopLoading) {
       onViewSession(token);
     }
   }, [session.status, token, onViewSession, isPrompting, stopLoading]);
 
+  // Cleanup camera stream on unmount — use refs to avoid stale closures
+  const isCameraRef = useRef(isCamera);
+  isCameraRef.current = isCamera;
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
+  useEffect(() => {
+    return () => {
+      if (isCameraRef.current) {
+        cameraRef.current.stopStream();
+      }
+    };
+  }, []);
+
   // Finalize stop: optionally name, then stop the session.
-  // Keep modal open during the stop so loading shows on modal button (#8)
   const handleConfirmStop = useCallback(async (name: string | null) => {
-    if (stopActionHandled.current) return; // prevent duplicate calls
+    if (stopActionHandled.current) return;
     stopActionHandled.current = true;
     setStopLoading(true);
     console.log(`[session] stopping, name: ${name?.trim() || "(none)"}`);
@@ -142,7 +204,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
     try {
       await session.stop();
       console.log("[session] stopped, navigating to session detail");
-      // Navigation happens via the useEffect watching session.status
+      if (isCamera) camera.stopStream();
       setIsPrompting(false);
       setStopLoading(false);
     } catch (e) {
@@ -150,33 +212,39 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
       setStopLoading(false);
       stopActionHandled.current = false;
     }
-  }, [token, session]);
+  }, [token, session, isCamera, camera]);
 
   const handlePause = useCallback(async () => {
     console.log("[session] pausing...");
     setPauseLoading(true);
     capture.stopCapturing();
+    if (isCamera) camera.stopStream();
     await session.pause();
     console.log("[session] paused");
     setPauseLoading(false);
-  }, [capture, session]);
+  }, [capture, session, isCamera, camera]);
 
   const handleResume = useCallback(async () => {
     console.log("[session] resuming...");
     setResumeLoading(true);
     await session.resume();
+    if (isCamera) {
+      console.log(`[session] restarting camera stream for device ${cameraDeviceId}`);
+      await startCameraAndWait();
+    }
     await capture.startCapturing();
     console.log("[session] resumed");
     setResumeLoading(false);
-  }, [capture, session]);
+  }, [capture, session, isCamera, cameraDeviceId, camera, startCameraAndWait]);
 
   // Stop button: pause session + stop capture + show naming modal
   const handleStopClick = useCallback(async () => {
     console.log("[session] stop clicked, pausing and opening naming modal");
     capture.stopCapturing();
+    if (isCamera) camera.stopStream();
     await session.pause();
     setIsPrompting(true);
-  }, [capture, session]);
+  }, [capture, session, isCamera, camera]);
 
   // Resume from naming modal: close modal, resume recording
   const handleResumeFromModal = useCallback(async () => {
@@ -184,11 +252,14 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
     setIsPrompting(false);
     setResumeLoading(true);
     await session.resume();
+    if (isCamera) {
+      await startCameraAndWait();
+    }
     await capture.startCapturing();
     setResumeLoading(false);
-  }, [capture, session]);
+  }, [capture, session, isCamera, cameraDeviceId, camera, startCameraAndWait]);
 
-  // Loading/skeleton state (#4)
+  // Loading/skeleton state
   if (session.status === "loading") {
     return (
       <div style={{
@@ -222,8 +293,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
     );
   }
 
-  // Terminal states are handled by the useEffect above (navigates to session detail)
-  // Show a brief loading state while navigation happens
+  // Terminal states — show spinner while navigation happens
   if (["stopped", "compiling", "complete", "failed"].includes(session.status)) {
     return (
       <PageContainer centered>
@@ -246,7 +316,6 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
   } else if (isPaused) {
     controlMode = "paused";
   } else {
-    // During auto-start, show recording layout
     controlMode = "recording";
   }
 
@@ -295,15 +364,25 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
         </span>
       </div>
 
-      {/* Screen preview — fills available space */}
-      <div style={{ 
-        flex: 1, 
-        minHeight: 0, 
-        display: "flex", 
-        flexDirection: "row", 
-        gap: source.length > 1 && !capture.lastScreenshotUrl ? spacing.xs : 0,
-        marginBottom: spacing.lg 
+      {/* Preview — fills available space */}
+      <div style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: isCamera ? "column" : "row",
+        gap: !isCamera && source.length > 1 && !capture.lastScreenshotUrl ? spacing.xs : 0,
+        marginBottom: spacing.lg
       }}>
+        {/* Hidden video element for camera sources — needed for captureFrame to draw from canvas */}
+        {isCamera && (
+          <video
+            ref={cameraVideoRef}
+            autoPlay
+            muted
+            playsInline
+            style={{ position: "absolute", width: 0, height: 0, opacity: 0, pointerEvents: "none" }}
+          />
+        )}
         {capture.lastScreenshotUrl ? (
           <div style={{
             position: "relative", borderRadius: radii.lg,

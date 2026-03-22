@@ -44,7 +44,8 @@ async function fetchSessionStatus(token: string): Promise<string | null> {
 
 export function App() {
   const isMacOS = navigator.userAgent.includes("Mac");
-  const [permissionGranted, setPermissionGranted] = useState(!isMacOS);
+  const [screenPermGranted, setScreenPermGranted] = useState(!isMacOS);
+  const [cameraPermGranted, setCameraPermGranted] = useState(!isMacOS);
   const { route, navigate } = useHashRouter();
   const tokenStore = useTokenStore();
   const gallery = useGallery({
@@ -333,8 +334,12 @@ export function App() {
     }
   })();
 
-  const mainView = !permissionGranted ? (
-    <PermissionScreen onGranted={() => setPermissionGranted(true)} />
+  // Sequential, independent permission gates — not else-if.
+  // key= forces React to mount a fresh instance for each type (resets `requested` state).
+  const mainView = !screenPermGranted ? (
+    <PermissionScreen key="screen" type="screen" onGranted={() => setScreenPermGranted(true)} />
+  ) : !cameraPermGranted ? (
+    <PermissionScreen key="camera" type="camera" onGranted={() => setCameraPermGranted(true)} />
   ) : (
     content
   );
