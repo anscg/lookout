@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { motion, AnimatePresence } from "motion/react";
 import type { StatusResponse, VideoResponse, SessionResponse } from "@collapse/shared";
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
 import { Button } from "../ui/Button.js";
@@ -23,6 +24,24 @@ export function SessionDetail({
   onArchive,
 }: SessionDetailProps) {
   const [sessionInfo, setSessionInfo] = useState<{ name: string; createdAt: string } | null>(null);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [isRenamingAnim, setIsRenamingAnim] = useState(false);
+  const [editName, setEditName] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isRenaming) {
+      setIsRenamingAnim(true);
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.select();
+      }
+    } else {
+      // Small delay before showing icon again to let layout animations finish
+      const t = setTimeout(() => setIsRenamingAnim(false), 600);
+      return () => clearTimeout(t);
+    }
+  }, [isRenaming]);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -132,12 +151,149 @@ export function SessionDetail({
           {/* Session name + date */}
           {sessionInfo && (
             <div style={{ marginBottom: spacing.lg }}>
-              <div style={{ fontSize: fontSize.xl, fontWeight: fontWeight.bold, color: colors.text.primary }}>
-                {sessionInfo.name}
+              <div style={{ display: "flex", alignItems: "center", gap: spacing.xs, height: 32 }}>
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const newName = editName.trim();
+                    if (newName && newName !== sessionInfo.name) {
+                      try {
+                        const res = await fetch(`${apiBaseUrl}/api/sessions/${token}/name`, {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ name: newName })
+                        });
+                        if (res.ok) {
+                          setSessionInfo(prev => prev ? { ...prev, name: newName } : prev);
+                        } else {
+                          alert("Failed to rename session.");
+                        }
+                      } catch (err) {
+                        alert("Error renaming session.");
+                      }
+                    }
+                    setIsRenaming(false);
+                    if (inputRef.current) inputRef.current.blur();
+                  }}
+                  style={{
+                    display: "grid",
+                    alignItems: "center",
+                    margin: 0
+                  }}
+                >
+                  <motion.span
+                    animate={{
+                      padding: isRenaming ? "0 16px" : "0 8px 0 0"
+                    }}
+                    transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                    style={{
+                      gridArea: "1 / 1",
+                      visibility: "hidden",
+                      whiteSpace: "pre",
+                      fontFamily: "inherit",
+                      fontSize: fontSize.xl,
+                      fontWeight: fontWeight.bold,
+                      pointerEvents: "none"
+                    }}
+                  >
+                    {isRenaming ? editName || " " : sessionInfo.name}
+                  </motion.span>
+
+                  <motion.input
+                    ref={inputRef}
+                    readOnly={!isRenaming}
+                    value={isRenaming ? editName : sessionInfo.name}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onBlur={() => setIsRenaming(false)}
+                    onDoubleClick={() => {
+                      if (!isRenaming) {
+                        setEditName(sessionInfo.name);
+                        setIsRenaming(true);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        setIsRenaming(false);
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    size={1}
+                    animate={{
+                      padding: isRenaming ? "0 8px" : "0",
+                      width: isRenaming ? "max(100%, 300px)" : "100%",
+                      backgroundColor: isRenaming ? colors.bg.surface : "transparent",
+                      borderColor: isRenaming ? colors.border.selected : "transparent"
+                    }}
+                    transition={{
+                      padding: { type: "spring", stiffness: 500, damping: 30 },
+                      width: { type: "spring", stiffness: 500, damping: 30 },
+                      backgroundColor: { duration: 0.15 },
+                      borderColor: { duration: 0.15 }
+                    }}
+                    style={{
+                      gridArea: "1 / 1",
+                      minWidth: 0,
+                      height: 32,
+                      fontFamily: "inherit",
+                      fontSize: fontSize.xl,
+                      fontWeight: fontWeight.bold,
+                      color: colors.text.primary,
+                      borderWidth: 1,
+                      borderStyle: "solid",
+                      borderRadius: radii.md,
+                      boxSizing: "border-box",
+                      outline: "none",
+                      cursor: isRenaming ? "text" : "default",
+                      transformOrigin: "left center"
+                    }}
+                  />
+                </form>
+
+                <div style={{ display: "flex", alignItems: "center", width: 24, height: 24 }}>
+                  <AnimatePresence>
+                    {!isRenamingAnim && (
+                      <motion.button
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        transition={{ duration: 0.15 }}
+                        title="Rename session"
+                        onClick={() => {
+                          setEditName(sessionInfo.name);
+                          setIsRenaming(true);
+                        }}
+                        onMouseDown={(e) => e.currentTarget.style.transform = "scale(0.9)"}
+                        onMouseUp={(e) => e.currentTarget.style.transform = "none"}
+                        onMouseLeave={(e) => e.currentTarget.style.transform = "none"}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          cursor: "pointer",
+                          padding: 0,
+                          margin: -5,
+                          color: colors.text.tertiary,
+                          display: "flex",
+                          alignItems: "center",
+                          transition: "transform 0.1s ease-in-out"
+                        }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
+                        </svg>
+                      </motion.button>
+                    )}
+                  </AnimatePresence>
+                </div>
               </div>
-              <div style={{ fontSize: fontSize.xs, color: colors.text.tertiary, marginTop: 2 }}>
+              <motion.div
+                animate={{
+                  y: (isRenaming == false) ? -4 : 0
+                }}
+                transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                style={{ fontSize: fontSize.xs, color: colors.text.tertiary, marginTop: 2, y: -4 }}
+              >
                 {new Date(sessionInfo.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
-              </div>
+              </motion.div>
             </div>
           )}
 
