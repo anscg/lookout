@@ -39,6 +39,7 @@ tauri-plugin-opener = "2.5.3"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
+
 [target."cfg(target_os = \"linux\")".dependencies]
 ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
 gstreamer = "0.24.5"

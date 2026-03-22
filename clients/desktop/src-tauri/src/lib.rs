@@ -1,9 +1,9 @@
 mod capture;
+mod crop;
 mod pipewire;
 mod screencast;
 
 #[cfg(target_os = "macos")]
-
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFNumberType, CFString, CGRect};
@@ -999,4 +999,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-pub mod crop;
