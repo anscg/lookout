@@ -49,19 +49,20 @@ fn capture_to_dynamic_image(
                     .map_err(|e| format!("Window capture failed: {e}"))?
             }
         }
-        CaptureSource::PipeWire { node_id } => {
+        CaptureSource::PipeWire { id } => {
             #[cfg(target_os = "linux")]
             {
                 let fd = pipewire_fd.ok_or_else(|| {
                     "PipeWire fd not provided. Did you request screencast first?".to_string()
                 })?;
-                return crate::pipewire::capture_pipewire_node(*node_id, fd);
+                let img = crate::pipewire::capture_pipewire_node(*id, fd)?;
+                return Ok(crate::crop::auto_crop_black_borders(img));
             }
             #[cfg(not(target_os = "linux"))]
             {
                 return Err(format!(
                     "PipeWire capture not supported on this OS (node: {})",
-                    node_id
+                    id
                 ));
             }
         }

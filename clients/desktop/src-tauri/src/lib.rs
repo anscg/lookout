@@ -98,7 +98,7 @@ pub enum CaptureSource {
     #[serde(rename = "window")]
     Window { id: u32 },
     #[serde(rename = "pipewire")]
-    PipeWire { node_id: u32 },
+    PipeWire { id: u32 },
 }
 
 #[derive(Serialize)]
@@ -764,7 +764,7 @@ pub fn run() {
                 let source = match source_type {
                     "monitor" => crate::CaptureSource::Monitor { id: source_id },
                     "window" => crate::CaptureSource::Window { id: source_id },
-                    "pipewire" => crate::CaptureSource::PipeWire { node_id: source_id },
+                    "pipewire" => crate::CaptureSource::PipeWire { id: source_id },
                     _ => {
                         responder.respond(http::Response::builder().status(400).body(Vec::new()).unwrap());
                         return;
@@ -999,3 +999,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+pub mod crop;
