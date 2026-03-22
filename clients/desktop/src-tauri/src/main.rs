@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    collapse_desktop_lib::run()
+    lookout_desktop_lib::run()
 }

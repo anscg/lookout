@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useCollapseContext } from "../CollapseProvider.js";
+import { useLookoutContext } from "../LookoutProvider.js";
 import { useScreenCapture } from "./useScreenCapture.js";
 import { useCameraCapture } from "./useCameraCapture.js";
 import { useUploader } from "./useUploader.js";
 import { useSession } from "./useSession.js";
 import { useSessionTimer } from "./useSessionTimer.js";
-import type { CollapseState, CollapseActions, RecorderStatus } from "../types.js";
+import type { LookoutState, LookoutActions, RecorderStatus } from "../types.js";
 
 /**
- * Primary hook for Collapse integration.
+ * Primary hook for Lookout integration.
  * Composes all lower-level hooks and orchestrates the capture-upload loop.
  */
-export function useCollapse(): { state: CollapseState; actions: CollapseActions } {
-  const { config, client } = useCollapseContext();
+export function useLookout(): { state: LookoutState; actions: LookoutActions } {
+  const { config, client } = useLookoutContext();
   const callbacksRef = useRef(config.callbacks);
   callbacksRef.current = config.callbacks;
 
@@ -229,7 +229,7 @@ export function useCollapse(): { state: CollapseState; actions: CollapseActions 
 
   const isRecording = capture.isSharing && (session.status === "active" || session.status === "pending");
 
-  const state: CollapseState = {
+  const state: LookoutState = {
     status: session.status,
     isSharing: capture.isSharing,
     isRecording,
@@ -247,7 +247,7 @@ export function useCollapse(): { state: CollapseState; actions: CollapseActions 
     previewStream: cameraCapture.previewStream,
   };
 
-  const actions: CollapseActions = {
+  const actions: LookoutActions = {
     startSharing,
     stopSharing,
     pause,

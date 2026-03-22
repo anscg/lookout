@@ -12,7 +12,7 @@ import {
   AUTO_STOP_AFTER_MINUTES,
   UNCONFIRMED_CLEANUP_AFTER_MINUTES,
   STUCK_COMPILING_TIMEOUT_MINUTES,
-} from "@collapse/shared";
+} from "@lookout/shared";
 
 /**
  * Register periodic jobs with pgBoss.
@@ -51,7 +51,10 @@ async function checkTimeouts() {
     .where(
       and(
         eq(schema.sessions.status, "active"),
-        lt(schema.sessions.lastScreenshotAt, autoPauseThreshold),
+        lt(
+          sql`COALESCE(${schema.sessions.lastScreenshotAt}, ${schema.sessions.startedAt}, ${schema.sessions.createdAt})`,
+          autoPauseThreshold,
+        ),
       ),
     );
 
@@ -82,8 +85,11 @@ async function checkTimeouts() {
     .from(schema.sessions)
     .where(
       and(
-        inArray(schema.sessions.status, ["active", "paused"]),
-        lt(schema.sessions.lastScreenshotAt, autoStopThreshold),
+        inArray(schema.sessions.status, ["active", "paused", "pending"]),
+        lt(
+          sql`COALESCE(${schema.sessions.lastScreenshotAt}, ${schema.sessions.startedAt}, ${schema.sessions.createdAt})`,
+          autoStopThreshold,
+        ),
       ),
     );
 
@@ -106,8 +112,25 @@ async function checkTimeouts() {
       })
       .where(eq(schema.sessions.id, session.id));
 
-    // Enqueue compilation
-    await boss.send(COMPILE_JOB, { sessionId: session.id });
+    // Enqueue compilation if screenshots exist, otherwise mark complete
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.screenshots)
+      .where(
+        and(
+          eq(schema.screenshots.sessionId, session.id),
+          eq(schema.screenshots.confirmed, true),
+        ),
+      );
+
+    if (count > 0) {
+      await boss.send(COMPILE_JOB, { sessionId: session.id });
+    } else {
+      await db
+        .update(schema.sessions)
+        .set({ status: "failed", updatedAt: now })
+        .where(eq(schema.sessions.id, session.id));
+    }
   }
 
   // Detect stuck compiling sessions (>1 hour)

@@ -65,7 +65,7 @@ export const sessions = pgTable(
     index("idx_sessions_status").on(table.status),
     index("idx_sessions_active_last_screenshot")
       .on(table.lastScreenshotAt)
-      .where(sql`status IN ('active', 'paused')`),
+      .where(sql`status IN ('active', 'paused', 'pending')`),
   ],
 );
 

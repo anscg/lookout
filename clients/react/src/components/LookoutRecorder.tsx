@@ -1,5 +1,5 @@
 import React from "react";
-import { useCollapse } from "../hooks/useCollapse.js";
+import { useLookout } from "../hooks/useLookout.js";
 import { StatusBar } from "./StatusBar.js";
 import { ScreenPreview } from "./ScreenPreview.js";
 import { CameraPreview } from "./CameraPreview.js";
@@ -20,10 +20,10 @@ import { colors, fontSize, fontWeight, spacing } from "../ui/theme.js";
  * - `"screen"` (default): screen sharing flow with `getDisplayMedia`
  * - `"camera"`: webcam flow with live preview, device picker, then recording
  *
- * Must be used within a `<CollapseProvider>`.
+ * Must be used within a `<LookoutProvider>`.
  */
-export function CollapseRecorder() {
-  const { state, actions } = useCollapse();
+export function LookoutRecorder() {
+  const { state, actions } = useLookout();
 
   if (state.status === "loading") {
     return (

@@ -12,7 +12,7 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
-    // Proxy API calls to the Collapse server during dev
+    // Proxy API calls to the Lookout server during dev
     proxy: {
       "/api": "http://localhost:3001",
     },

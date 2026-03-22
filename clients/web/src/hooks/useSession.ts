@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import type { SessionStatus, SessionResponse } from "@collapse/shared";
+import type { SessionStatus, SessionResponse } from "@lookout/shared";
 import { api } from "../api/client.js";
 
 interface SessionState {

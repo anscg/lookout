@@ -13,7 +13,7 @@ import {
   fontSize,
   fontWeight,
   radii,
-} from "@collapse/react";
+} from "@lookout/react";
 import { getReport } from "../logger.js";
 import { NamingModal } from "./NamingModal.js";
 import { useNativeCapture } from "../hooks/useNativeCapture.js";
@@ -29,7 +29,7 @@ interface DesktopRecorderProps {
   onViewSession: (token: string) => void;
 }
 
-const API_BASE = "https://collapse.b.selfhosted.hackclub.com";
+const API_BASE = "https://lookout.hackclub.com";
 
 function RecorderPreviewItem({ 
   src, 

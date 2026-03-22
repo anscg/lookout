@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import type { StatusResponse, VideoResponse, SessionResponse } from "@collapse/shared";
+import type { StatusResponse, VideoResponse, SessionResponse } from "@lookout/shared";
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
 import { Button } from "../ui/Button.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";

@@ -10,7 +10,7 @@ import {
   radii,
   fontSize,
   fontWeight,
-} from "@collapse/react";
+} from "@lookout/react";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
 import { enumerateCameras } from "../hooks/useCameraCapture.js";

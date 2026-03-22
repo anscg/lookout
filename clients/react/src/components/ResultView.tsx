@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useCollapseContext } from "../CollapseProvider.js";
+import { useLookoutContext } from "../LookoutProvider.js";
 import { ProcessingState } from "./ProcessingState.js";
 import type { RecorderStatus } from "../types.js";
 
@@ -9,7 +9,7 @@ export interface ResultViewProps {
 }
 
 export function ResultView({ status, trackedSeconds }: ResultViewProps) {
-  const { client, config } = useCollapseContext();
+  const { client, config } = useLookoutContext();
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 

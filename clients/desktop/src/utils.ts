@@ -4,7 +4,7 @@ export function isValidToken(token: string): boolean {
 
 export function extractToken(url: string): string | null {
   try {
-    const normalized = url.replace("collapse://", "https://collapse.local/");
+    const normalized = url.replace("lookout://", "https://lookout.local/");
     const parsed = new URL(normalized);
     const fromQuery = parsed.searchParams.get("token");
     if (fromQuery && isValidToken(fromQuery)) return fromQuery;

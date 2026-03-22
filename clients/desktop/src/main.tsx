@@ -7,7 +7,7 @@ import { App } from "./App.js";
 
 // Add global debug helper for deep links
 (window as any).__simulateDeepLink = (url: string) => {
-  emit('collapse-deep-link', [url]).catch(err => console.error("Simulate deep link failed:", err));
+  emit('lookout-deep-link', [url]).catch(err => console.error("Simulate deep link failed:", err));
 };
 
 // Wrap fetch so only cross-origin requests go through Tauri's HTTP plugin.
@@ -41,10 +41,10 @@ window.fetch = function (input, init) {
 
 // Clear any bad stored tokens from previous testing
 try {
-  const raw = localStorage.getItem("collapse-tokens");
+  const raw = localStorage.getItem("lookout-tokens");
   if (raw) JSON.parse(raw);
 } catch {
-  localStorage.removeItem("collapse-tokens");
+  localStorage.removeItem("lookout-tokens");
 }
 
 class ErrorBoundary extends React.Component<

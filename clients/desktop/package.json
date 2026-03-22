@@ -1,6 +1,6 @@
 {
-  "name": "@collapse/desktop",
-  "version": "0.0.13",
+  "name": "@lookout/desktop",
+  "version": "0.0.26",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,8 +9,8 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@collapse/react": "*",
-    "@collapse/shared": "*",
+    "@lookout/react": "*",
+    "@lookout/shared": "*",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-deep-link": "^2.4.7",
     "@tauri-apps/plugin-dialog": "^2.0.0",

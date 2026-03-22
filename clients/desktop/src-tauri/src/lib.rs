@@ -66,7 +66,7 @@ fn handle_deep_link_urls(app: &AppHandle, urls: Vec<String>) {
         .filter_map(|u| u.parse::<url::Url>().ok())
         .collect();
     if !parsed.is_empty() {
-        let _ = app.emit("collapse-deep-link", parsed);
+        let _ = app.emit("lookout-deep-link", parsed);
     }
 
     // Focus the window
@@ -310,7 +310,7 @@ fn list_macos_windows_any_space() -> Vec<WindowInfo> {
         if title.is_empty() && app_name.is_empty() {
             continue;
         }
-        if app_name == "Collapse" {
+        if app_name == "Lookout" {
             continue;
         }
         if !window_is_capturable(id as u32, bounds) {
@@ -427,7 +427,7 @@ fn list_capture_sources() -> Result<CaptureSourceList, String> {
             if title.is_empty() && app_name.is_empty() {
                 return None;
             }
-            if app_name == "Collapse" {
+            if app_name == "Lookout" {
                 return None;
             }
             Some(WindowInfo {
@@ -732,7 +732,7 @@ mod base64_engine {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .register_asynchronous_uri_scheme_protocol("collapse-preview", |app_handle, request, responder| {
+        .register_asynchronous_uri_scheme_protocol("lookout-preview", |app_handle, request, responder| {
             #[allow(unused_variables)]
             let app_handle = app_handle.app_handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -821,13 +821,13 @@ pub fn run() {
         // before initializing any other plugins.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // On Windows/Linux, deep-link URLs arrive as CLI args when a second
-            // instance is launched. Search all args for a collapse:// URL rather
+            // instance is launched. Search all args for a lookout:// URL rather
             // than assuming a fixed position — installers and protocol handlers
             // may pass extra flags.
             eprintln!("[single-instance] args: {args:?}");
             let urls: Vec<String> = args
                 .iter()
-                .filter(|arg| arg.starts_with("collapse://"))
+                .filter(|arg| arg.starts_with("lookout://"))
                 .cloned()
                 .collect();
             handle_deep_link_urls(app, urls);
@@ -864,14 +864,14 @@ pub fn run() {
 
                 let app_menu = Submenu::with_items(
                     app,
-                    "Collapse",
+                    "Lookout",
                     true,
                     &[
                         &PredefinedMenuItem::about(
                             app,
-                            Some("About Collapse"),
+                            Some("About Lookout"),
                             Some(AboutMetadata {
-                                name: Some("Collapse".to_string()),
+                                name: Some("Lookout".to_string()),
                                 version: app.config().version.clone(),
                                 authors: Some(vec!["Hack Club".to_string()]),
                                 copyright: Some("© 2026 Hack Club, A 501(c)(3) nonprofit project for student makers.".to_string()),
@@ -884,11 +884,11 @@ pub fn run() {
                         &PredefinedMenuItem::separator(app)?,
                         &PredefinedMenuItem::services(app, None)?,
                         &PredefinedMenuItem::separator(app)?,
-                        &PredefinedMenuItem::hide(app, Some("Hide Collapse"))?,
+                        &PredefinedMenuItem::hide(app, Some("Hide Lookout"))?,
                         &PredefinedMenuItem::hide_others(app, None)?,
                         &PredefinedMenuItem::show_all(app, None)?,
                         &PredefinedMenuItem::separator(app)?,
-                        &PredefinedMenuItem::quit(app, Some("Quit Collapse"))?,
+                        &PredefinedMenuItem::quit(app, Some("Quit Lookout"))?,
                     ],
                 )?;
 
@@ -939,7 +939,7 @@ pub fn run() {
 
                 app.on_menu_event(move |app_handle, event| {
                     if event.id().0 == "start_timelapse" {
-                        let _ = app_handle.emit("collapse-navigate", "/add");
+                        let _ = app_handle.emit("lookout-navigate", "/add");
                         if let Some(w) = app_handle.get_webview_window("main") {
                             let _ = w.set_focus();
                         }
@@ -960,13 +960,13 @@ pub fn run() {
                         use tauri_plugin_opener::OpenerExt;
                         let _ = app_handle
                             .opener()
-                            .open_url("https://github.com/hackclub/collapse/", None::<&str>);
+                            .open_url("https://github.com/hackclub/lookout/", None::<&str>);
                     }
                 });
 
             }
 
-            // On Windows/Linux, ensure the collapse:// protocol handler is
+            // On Windows/Linux, ensure the lookout:// protocol handler is
             // registered even if the installer didn't do it (dev builds,
             // portable installs, AppImages).
             #[cfg(desktop)]

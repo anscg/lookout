@@ -1,8 +1,8 @@
 // Inject CSS custom properties for light/dark theme.
 // Deduped: only injects once even if multiple modules import this file.
-if (typeof document !== "undefined" && !document.querySelector("style[data-collapse-theme]")) {
+if (typeof document !== "undefined" && !document.querySelector("style[data-lookout-theme]")) {
   const style = document.createElement("style");
-  style.setAttribute("data-collapse-theme", "");
+  style.setAttribute("data-lookout-theme", "");
   style.textContent = `
     *, *::before, *::after, b, strong, i, em {
       font-family: inherit;

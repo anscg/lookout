@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { api } from "../api/client.js";
 import { formatTime } from "../hooks/useSessionTimer.js";
-import { VideoPlayer } from "@collapse/react";
-import type { SessionStatus } from "@collapse/shared";
+import { VideoPlayer } from "@lookout/react";
+import type { SessionStatus } from "@lookout/shared";
 
 interface ResultProps {
   status: SessionStatus;

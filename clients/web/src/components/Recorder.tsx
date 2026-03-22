@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { SCREENSHOT_INTERVAL_MS } from "@collapse/shared";
+import { SCREENSHOT_INTERVAL_MS } from "@lookout/shared";
 import { useScreenCapture } from "../hooks/useScreenCapture.js";
 import { useUploader } from "../hooks/useUploader.js";
 import { StatusBar } from "./StatusBar.js";
-import type { SessionStatus } from "@collapse/shared";
+import type { SessionStatus } from "@lookout/shared";
 
 interface RecorderProps {
   sessionStatus: SessionStatus;

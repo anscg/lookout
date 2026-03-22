@@ -1,4 +1,4 @@
-# Collapse Server API Documentation
+# Lookout Server API Documentation
 
 **Framework:** Fastify v5
 **Base URL:** `http://localhost:3000` (configurable via `PORT` and `BASE_URL` env vars)

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useCollapseContext } from "../CollapseProvider.js";
+import { useLookoutContext } from "../LookoutProvider.js";
+import { HttpError } from "../api/client.js";
 import type { RecorderStatus } from "../types.js";
 
 interface SessionState {
@@ -14,7 +15,7 @@ interface SessionState {
 }
 
 export function useSession() {
-  const { client, config } = useCollapseContext();
+  const { client, config } = useLookoutContext();
   const pollIntervalMs = config.statusPollIntervalMs;
 
   const [state, setState] = useState<SessionState>({
@@ -106,8 +107,7 @@ export function useSession() {
         totalActiveSeconds: data.totalActiveSeconds,
       }));
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "";
-      if (msg.includes("409")) {
+      if (e instanceof HttpError && e.status === 409) {
         console.warn("[session] pause returned 409, syncing status");
         await syncStatus();
       } else {
@@ -121,8 +121,7 @@ export function useSession() {
       const data = await client.resume();
       setState((s) => ({ ...s, status: data.status }));
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "";
-      if (msg.includes("409")) {
+      if (e instanceof HttpError && e.status === 409) {
         console.warn("[session] resume returned 409, syncing status");
         await syncStatus();
       } else {
@@ -140,24 +139,40 @@ export function useSession() {
         console.warn("[session] rename failed (non-fatal):", e);
       }
     }
-    try {
-      const data = await client.stop();
-      setState((s) => ({
-        ...s,
-        status: data.status,
-        trackedSeconds: data.trackedSeconds,
-        totalActiveSeconds: data.totalActiveSeconds,
-      }));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "";
-      if (msg.includes("409")) {
-        console.warn("[session] stop returned 409, syncing status");
-        await syncStatus();
-      } else {
+    let stopped = false;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS = [1000, 2000, 4000];
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const data = await client.stop();
+        setState((s) => ({
+          ...s,
+          status: data.status,
+          trackedSeconds: data.trackedSeconds,
+          totalActiveSeconds: data.totalActiveSeconds,
+        }));
+        stopped = true;
+        break;
+      } catch (e) {
+        if (e instanceof HttpError && e.status === 409) {
+          console.warn("[session] stop returned 409, syncing status");
+          const data = await client.getStatus();
+          setState((s) => ({ ...s, status: data.status, trackedSeconds: data.trackedSeconds }));
+          stopped = data.status === "stopped" || data.status === "compiling";
+          break;
+        }
+        const isRetryable = e instanceof HttpError && e.status >= 500;
+        if (isRetryable && attempt < MAX_RETRIES) {
+          console.warn(`[session] stop failed (${(e as HttpError).status}), retrying in ${RETRY_DELAYS[attempt]}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+          await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt]));
+          continue;
+        }
         throw e;
       }
     }
-    startPolling();
+    if (stopped) {
+      startPolling();
+    }
   }, [client, startPolling]);
 
   const updateTrackedSeconds = useCallback((seconds: number) => {

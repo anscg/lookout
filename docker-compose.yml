@@ -4,13 +4,13 @@ services:
     ports:
       - "5433:5432"
     environment:
-      POSTGRES_DB: collapse
-      POSTGRES_USER: collapse
-      POSTGRES_PASSWORD: collapse
+      POSTGRES_DB: lookout
+      POSTGRES_USER: lookout
+      POSTGRES_PASSWORD: lookout
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U collapse"]
+      test: ["CMD-SHELL", "pg_isready -U lookout"]
       interval: 5s
       timeout: 3s
       retries: 5

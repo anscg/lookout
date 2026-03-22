@@ -1,9 +1,9 @@
 // Provider
-export { CollapseProvider } from "./CollapseProvider.js";
-export type { CollapseProviderProps } from "./CollapseProvider.js";
+export { LookoutProvider } from "./LookoutProvider.js";
+export type { LookoutProviderProps } from "./LookoutProvider.js";
 
 // Drop-in widget
-export { CollapseRecorder } from "./components/CollapseRecorder.js";
+export { LookoutRecorder } from "./components/LookoutRecorder.js";
 
 // Sub-components
 export { StatusBar } from "./components/StatusBar.js";
@@ -31,7 +31,7 @@ export { SessionDetail } from "./components/SessionDetail.js";
 export type { SessionDetailProps } from "./components/SessionDetail.js";
 
 // Headless hooks
-export { useCollapse } from "./hooks/useCollapse.js";
+export { useLookout } from "./hooks/useLookout.js";
 export { useScreenCapture } from "./hooks/useScreenCapture.js";
 export { useCameraCapture } from "./hooks/useCameraCapture.js";
 export { useUploader } from "./hooks/useUploader.js";
@@ -47,15 +47,15 @@ export { useHashRouter } from "./hooks/useHashRouter.js";
 export type { Route } from "./hooks/useHashRouter.js";
 
 // API client (no React dependency)
-export { createCollapseClient } from "./api/client.js";
-export type { CollapseClient, CreateClientOptions } from "./api/client.js";
+export { createLookoutClient } from "./api/client.js";
+export type { LookoutClient, CreateClientOptions } from "./api/client.js";
 
 // Types
 export type {
-  CollapseConfig,
-  CollapseState,
-  CollapseActions,
-  CollapseCallbacks,
+  LookoutConfig,
+  LookoutState,
+  LookoutActions,
+  LookoutCallbacks,
   CaptureSettings,
   CaptureMode,
   CameraSettings,
@@ -68,8 +68,8 @@ export type {
 } from "./types.js";
 
 // Re-export shared types consumers need
-export type { SessionStatus, SessionSummary } from "@collapse/shared";
-export { SESSION_STATUSES } from "@collapse/shared";
+export type { SessionStatus, SessionSummary } from "@lookout/shared";
+export { SESSION_STATUSES } from "@lookout/shared";
 
 // UI primitives
 export * from "./ui/index.js";

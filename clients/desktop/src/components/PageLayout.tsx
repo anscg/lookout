@@ -6,7 +6,7 @@ import {
   fontSize,
   fontWeight,
   radii,
-} from "@collapse/react";
+} from "@lookout/react";
 
 export const cardButtonStyle: React.CSSProperties = {
   background: colors.bg.surface,

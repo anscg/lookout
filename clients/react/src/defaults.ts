@@ -6,10 +6,10 @@ import {
   MAX_UPLOAD_RETRIES,
   UPLOAD_RETRY_DELAYS_MS,
   MAX_PENDING_BUFFER,
-} from "@collapse/shared";
-import type { CollapseConfig, ResolvedConfig } from "./types.js";
+} from "@lookout/shared";
+import type { LookoutConfig, ResolvedConfig } from "./types.js";
 
-export function resolveConfig(config: CollapseConfig): ResolvedConfig {
+export function resolveConfig(config: LookoutConfig): ResolvedConfig {
   return {
     token: config.token,
     apiBaseUrl: config.apiBaseUrl ?? "",

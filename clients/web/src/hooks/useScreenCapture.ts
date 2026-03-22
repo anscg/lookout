@@ -5,7 +5,7 @@ import {
   JPEG_QUALITY,
   CANVAS_TO_BLOB_TIMEOUT_MS,
   VIDEO_READY_TIMEOUT_MS,
-} from "@collapse/shared";
+} from "@lookout/shared";
 
 export interface CaptureResult {
   blob: Blob;

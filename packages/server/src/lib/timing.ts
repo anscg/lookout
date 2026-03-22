@@ -1,4 +1,4 @@
-import { RATE_LIMIT_PER_MINUTE } from "@collapse/shared";
+import { RATE_LIMIT_PER_MINUTE } from "@lookout/shared";
 
 /**
  * Compute the minute bucket for a screenshot based on server timestamp.

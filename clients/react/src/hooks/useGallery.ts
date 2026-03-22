@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import type { SessionSummary } from "@collapse/shared";
+import type { SessionSummary } from "@lookout/shared";
 
 export interface UseGalleryOptions {
   apiBaseUrl: string;

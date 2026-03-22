@@ -1,39 +1,39 @@
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
-import { createCollapseClient, type CollapseClient } from "./api/client.js";
+import { createLookoutClient, type LookoutClient } from "./api/client.js";
 import { resolveConfig } from "./defaults.js";
-import type { CollapseConfig, ResolvedConfig } from "./types.js";
+import type { LookoutConfig, ResolvedConfig } from "./types.js";
 
-interface CollapseContextValue {
+interface LookoutContextValue {
   config: ResolvedConfig;
-  client: CollapseClient;
+  client: LookoutClient;
 }
 
-const CollapseContext = createContext<CollapseContextValue | null>(null);
+const LookoutContext = createContext<LookoutContextValue | null>(null);
 
-export function useCollapseContext(): CollapseContextValue {
-  const ctx = useContext(CollapseContext);
+export function useLookoutContext(): LookoutContextValue {
+  const ctx = useContext(LookoutContext);
   if (!ctx) {
     throw new Error(
-      "Collapse hooks must be used within a <CollapseProvider>. " +
-        "Wrap your component tree with <CollapseProvider token=\"...\">.",
+      "Lookout hooks must be used within a <LookoutProvider>. " +
+        "Wrap your component tree with <LookoutProvider token=\"...\">.",
     );
   }
   return ctx;
 }
 
-export interface CollapseProviderProps extends CollapseConfig {
+export interface LookoutProviderProps extends LookoutConfig {
   children: ReactNode;
 }
 
-export function CollapseProvider({
+export function LookoutProvider({
   children,
   ...config
-}: CollapseProviderProps) {
+}: LookoutProviderProps) {
   const resolved = useMemo(() => resolveConfig(config), [config]);
 
   const client = useMemo(
     () =>
-      createCollapseClient({
+      createLookoutClient({
         baseUrl: resolved.apiBaseUrl,
         token: resolved.token,
       }),
@@ -46,9 +46,9 @@ export function CollapseProvider({
   // Deduped: only injects once even if multiple providers mount.
   useEffect(() => {
     if (typeof document === "undefined") return;
-    if (document.querySelector("style[data-collapse-keyframes]")) return;
+    if (document.querySelector("style[data-lookout-keyframes]")) return;
     const style = document.createElement("style");
-    style.setAttribute("data-collapse-keyframes", "");
+    style.setAttribute("data-lookout-keyframes", "");
     style.textContent = [
       "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}",
       "@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}",
@@ -58,8 +58,8 @@ export function CollapseProvider({
   }, []);
 
   return (
-    <CollapseContext.Provider value={value}>
+    <LookoutContext.Provider value={value}>
       {children}
-    </CollapseContext.Provider>
+    </LookoutContext.Provider>
   );
 }

@@ -1,6 +1,6 @@
 import React from "react";
 import { motion } from "motion/react";
-import type { SessionSummary } from "@collapse/shared";
+import type { SessionSummary } from "@lookout/shared";
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
 import { Badge } from "../ui/Badge.js";
 import { Card } from "../ui/Card.js";

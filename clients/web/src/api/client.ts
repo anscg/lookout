@@ -8,7 +8,16 @@ import type {
   StopResponse,
   StatusResponse,
   VideoResponse,
-} from "@collapse/shared";
+} from "@lookout/shared";
+
+export class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
 
 const API_BASE = "/api";
 
@@ -35,7 +44,8 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     } catch {
       detail = text;
     }
-    throw new Error(
+    throw new HttpError(
+      res.status,
       `HTTP ${res.status} ${res.statusText} from ${url}${detail ? "\n" + detail.slice(0, 500) : ""}`,
     );
   }

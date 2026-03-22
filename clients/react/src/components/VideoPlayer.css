@@ -1,25 +1,25 @@
-.collapse-video-player .media-button--mute,
-.collapse-video-player .media-slider--volume {
+.lookout-video-player .media-button--mute,
+.lookout-video-player .media-slider--volume {
   display: none !important;
 }
 
 /* Hide PiP on Windows, Mac, Linux */
-.collapse-video-player.platform-windows .media-button--pip,
-.collapse-video-player.platform-mac .media-button--pip,
-.collapse-video-player.platform-linux .media-button--pip {
+.lookout-video-player.platform-windows .media-button--pip,
+.lookout-video-player.platform-mac .media-button--pip,
+.lookout-video-player.platform-linux .media-button--pip {
   display: none !important;
 }
 
 /* Hide Fullscreen on Linux only */
-.collapse-video-player.platform-linux .media-button--fullscreen {
+.lookout-video-player.platform-linux .media-button--fullscreen {
   display: none !important;
 }
 
-.collapse-video-player {
+.lookout-video-player {
   --media-border-radius: 8px;
   --media-video-border-radius: 8px;
 }
 
-.collapse-video-player * {
+.lookout-video-player * {
   --media-border-radius: 8px;
 }

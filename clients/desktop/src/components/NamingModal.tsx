@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import { motion } from "motion/react";
-import { Button, Card, colors, spacing, radii, fontSize, fontWeight } from "@collapse/react";
+import { Button, Card, colors, spacing, radii, fontSize, fontWeight } from "@lookout/react";
 
 interface NamingModalProps {
   loading: boolean;

@@ -13,7 +13,7 @@ import {
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOTS_PER_SESSION,
   MAX_UPLOAD_REQUESTS_PER_SESSION,
-} from "@collapse/shared";
+} from "@lookout/shared";
 
 // ── Shared schema fragments ─────────────────────────────────
 
@@ -581,10 +581,10 @@ export async function sessionRoutes(app: FastifyInstance) {
       if (screenshotCount > 0) {
         await boss.send(COMPILE_JOB, { sessionId: session.id });
       } else {
-        // No screenshots — mark complete immediately with no video
+        // No screenshots — mark failed (no video possible)
         await db
           .update(schema.sessions)
-          .set({ status: "complete", updatedAt: now })
+          .set({ status: "failed", updatedAt: now })
           .where(eq(schema.sessions.id, session.id));
       }
 
@@ -845,6 +845,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         Key: session.thumbnailR2Key,
       }), { expiresIn: 3600 });
 
+      reply.header("Cache-Control", "public, max-age=1800");
       return reply.redirect(url);
     },
   );
@@ -872,6 +873,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         Key: session.videoR2Key,
       }), { expiresIn: 3600 });
 
+      reply.header("Cache-Control", "public, max-age=1800");
       return reply.redirect(url);
     },
   );
@@ -899,6 +901,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         Key: session.videoWebmR2Key,
       }), { expiresIn: 3600 });
 
+      reply.header("Cache-Control", "public, max-age=1800");
       return reply.redirect(url);
     },
   );

@@ -6,7 +6,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=postgresql://collapse:${POSTGRES_PASSWORD:?}@postgres:5432/collapse
+      - DATABASE_URL=postgresql://lookout:${POSTGRES_PASSWORD:?}@postgres:5432/lookout
       - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
       - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
       - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
@@ -28,7 +28,7 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     environment:
-      - DATABASE_URL=postgresql://collapse:${POSTGRES_PASSWORD:?}@postgres:5432/collapse
+      - DATABASE_URL=postgresql://lookout:${POSTGRES_PASSWORD:?}@postgres:5432/lookout
       - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
       - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
       - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
@@ -49,15 +49,15 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: collapse
-      POSTGRES_USER: collapse
+      POSTGRES_DB: lookout
+      POSTGRES_USER: lookout
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
       - backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U collapse"]
+      test: ["CMD-SHELL", "pg_isready -U lookout"]
       interval: 5s
       timeout: 3s
       retries: 5

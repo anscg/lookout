@@ -1,6 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 import type { CaptureResult, CaptureSettings } from "../types.js";
-import { useCollapseContext } from "../CollapseProvider.js";
+import { useLookoutContext } from "../LookoutProvider.js";
 import { waitForVideoReady, captureFrameAsJpeg } from "./captureUtils.js";
 
 /**
@@ -12,10 +12,10 @@ import { waitForVideoReady, captureFrameAsJpeg } from "./captureUtils.js";
  *      can show a live `<video>` and a device picker *before* recording.
  *   2. **Recording** — `startSharing()` reuses the preview stream (or
  *      acquires one if preview wasn't started) and sets `isSharing = true`,
- *      which tells `useCollapse` to begin the capture-upload loop.
+ *      which tells `useLookout` to begin the capture-upload loop.
  *
  * Mirrors the base return shape of `useScreenCapture` (`isSharing`,
- * `startSharing`, `takeScreenshot`, `stopSharing`) so `useCollapse` can
+ * `startSharing`, `takeScreenshot`, `stopSharing`) so `useLookout` can
  * delegate to either hook interchangeably, plus camera-specific extras.
  */
 export function useCameraCapture(overrides?: CaptureSettings) {
@@ -28,7 +28,7 @@ export function useCameraCapture(overrides?: CaptureSettings) {
   };
 
   try {
-    const { config } = useCollapseContext();
+    const { config } = useLookoutContext();
     settings = {
       maxWidth: overrides?.maxWidth ?? config.capture.maxWidth,
       maxHeight: overrides?.maxHeight ?? config.capture.maxHeight,

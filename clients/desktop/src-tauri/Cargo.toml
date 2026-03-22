@@ -5,12 +5,12 @@ opt-level = 3
 opt-level = 1
 
 [package]
-name = "collapse-desktop"
-version = "0.0.22"
+name = "lookout-desktop"
+version = "0.0.26"
 edition = "2021"
 
 [lib]
-name = "collapse_desktop_lib"
+name = "lookout_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

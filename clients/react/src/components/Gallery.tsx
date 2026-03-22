@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
-import type { SessionSummary } from "@collapse/shared";
+import type { SessionSummary } from "@lookout/shared";
 import { SessionCard } from "./SessionCard.js";
 import { Button } from "../ui/Button.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";

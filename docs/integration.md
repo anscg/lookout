@@ -1,6 +1,6 @@
-# Collapse Integration Guide
+# Lookout Integration Guide
 
-Collapse is a screen recording timelapse service. It has two distinct API surfaces:
+Lookout is a screen recording timelapse service. It has two distinct API surfaces:
 
 1. **Internal API** — server-to-server, protected by API key. Used by your trusted backend to create/manage sessions.
 2. **Client API** — browser-facing, authenticated by session token. Used by the user's browser to record and upload screenshots.
@@ -9,7 +9,7 @@ Collapse is a screen recording timelapse service. It has two distinct API surfac
 
 ```
 ┌─────────────────────┐         ┌───────────────────────┐
-│  Your Backend       │         │  Collapse Server      │
+│  Your Backend       │         │  Lookout Server      │
 │  (trusted server)   │────────>│  (internal API)       │
 │                     │  POST   │                       │
 │  Creates sessions,  │  /api/  │  Creates session,     │
@@ -20,7 +20,7 @@ Collapse is a screen recording timelapse service. It has two distinct API surfac
           │ (URL param, redirect, etc.)   │
           v                               │
 ┌─────────────────────┐         ┌───────────────────────┐
-│  User's Browser     │         │  Collapse Server      │
+│  User's Browser     │         │  Lookout Server      │
 │  (untrusted client) │────────>│  (client API)         │
 │                     │  token  │                       │
 │  Screen capture,    │  based  │  Presigned URLs,      │
@@ -43,7 +43,7 @@ API calls require the `X-API-Key` header.
 ### Create a session
 
 ```bash
-curl -X POST https://collapse.example.com/api/internal/sessions \
+curl -X POST https://lookout.example.com/api/internal/sessions \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
   -d '{"metadata": {"userId": "user_123", "projectId": "proj_456"}}'
@@ -54,7 +54,7 @@ Response:
 {
   "token": "5b70dd22...64-char-hex-string",
   "sessionId": "137c9b2f-3e74-4c25-a295-b41bd4d2c5d1",
-  "sessionUrl": "https://collapse.example.com/session?token=5b70dd22..."
+  "sessionUrl": "https://lookout.example.com/session?token=5b70dd22..."
 }
 ```
 
@@ -66,7 +66,7 @@ Response:
 ### Check session status
 
 ```bash
-curl https://collapse.example.com/api/internal/sessions/SESSION_ID \
+curl https://lookout.example.com/api/internal/sessions/SESSION_ID \
   -H "X-API-Key: your-api-key"
 ```
 
@@ -75,14 +75,14 @@ Response includes `trackedSeconds` (tamper-proof, = distinct minute buckets × 6
 ### Force-stop a session
 
 ```bash
-curl -X POST https://collapse.example.com/api/internal/sessions/SESSION_ID/stop \
+curl -X POST https://lookout.example.com/api/internal/sessions/SESSION_ID/stop \
   -H "X-API-Key: your-api-key"
 ```
 
 ### Recompile a failed session
 
 ```bash
-curl -X POST https://collapse.example.com/api/internal/sessions/SESSION_ID/recompile \
+curl -X POST https://lookout.example.com/api/internal/sessions/SESSION_ID/recompile \
   -H "X-API-Key: your-api-key"
 ```
 
@@ -212,7 +212,7 @@ needs a CORS policy. In the Cloudflare dashboard (R2 → your bucket → Setting
 ```json
 [
   {
-    "AllowedOrigins": ["https://collapse.example.com"],
+    "AllowedOrigins": ["https://lookout.example.com"],
     "AllowedMethods": ["PUT", "HEAD"],
     "AllowedHeaders": ["Content-Type"],
     "MaxAgeSeconds": 3600

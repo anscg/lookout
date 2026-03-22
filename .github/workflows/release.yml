@@ -269,15 +269,15 @@ jobs:
               *) OS="unknown" ;;
             esac
             # Normalize RPM names to match underscore convention used by other artifacts
-            # Collapse-0.0.16-1.x86_64.rpm -> Collapse_0.0.16_x86_64.rpm
+            # Lookout-0.0.16-1.x86_64.rpm -> Lookout_0.0.16_x86_64.rpm
             if [[ "$FILENAME" == *.rpm ]]; then
-              # Strip "Collapse-", version, release number; extract arch
-              RPM_REST="${FILENAME#Collapse-}"       # 0.0.16-1.x86_64.rpm
+              # Strip "Lookout-", version, release number; extract arch
+              RPM_REST="${FILENAME#Lookout-}"       # 0.0.16-1.x86_64.rpm
               RPM_VER="${RPM_REST%%-[0-9].*}"        # 0.0.16
               RPM_ARCH="${RPM_REST##*-[0-9].}"       # x86_64.rpm
-              FILENAME="Collapse_${RPM_VER}_${RPM_ARCH}"
+              FILENAME="Lookout_${RPM_VER}_${RPM_ARCH}"
             fi
-            # Add OS label: Collapse_0.0.16_x64-setup.exe -> Collapse_linux-0.0.16_x64-setup.exe
+            # Add OS label: Lookout_0.0.16_x64-setup.exe -> Lookout_linux-0.0.16_x64-setup.exe
             if [[ "$FILENAME" == *"_"* ]] && [[ "$FILENAME" != *"${OS}-"* ]]; then
               PREFIX="${FILENAME%%_*}"
               SUFFIX="${FILENAME#*_}"
@@ -299,7 +299,7 @@ jobs:
 
           # Create draft release
           gh release create "$TAG" \
-            --title "Collapse v${VERSION}" \
+            --title "Lookout v${VERSION}" \
             --notes "See the assets to download and install." \
             --draft
 

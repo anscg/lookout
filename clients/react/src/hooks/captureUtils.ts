@@ -1,7 +1,7 @@
 import {
   CANVAS_TO_BLOB_TIMEOUT_MS,
   VIDEO_READY_TIMEOUT_MS,
-} from "@collapse/shared";
+} from "@lookout/shared";
 import type { CaptureResult } from "../types.js";
 
 /** Wait for the video element to have decoded dimensions after play(). */

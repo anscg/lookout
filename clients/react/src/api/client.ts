@@ -9,10 +9,10 @@ import type {
   RenameSessionResponse,
   StatusResponse,
   VideoResponse,
-} from "@collapse/shared";
+} from "@lookout/shared";
 import type { TokenProvider } from "../types.js";
 
-export interface CollapseClient {
+export interface LookoutClient {
   resolveToken(): Promise<string>;
   getSession(): Promise<SessionResponse>;
   getUploadUrl(): Promise<UploadUrlResponse>;
@@ -24,6 +24,15 @@ export interface CollapseClient {
   rename(name: string): Promise<RenameSessionResponse>;
   getStatus(): Promise<StatusResponse>;
   getVideo(options?: { format?: "mp4" | "webm" }): Promise<VideoResponse>;
+}
+
+export class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
 }
 
 export interface CreateClientOptions {
@@ -60,14 +69,15 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     } catch {
       detail = text;
     }
-    throw new Error(
+    throw new HttpError(
+      res.status,
       `HTTP ${res.status} ${res.statusText} from ${url}${detail ? "\n" + detail.slice(0, 500) : ""}`,
     );
   }
   return res.json() as Promise<T>;
 }
 
-export function createCollapseClient(options: CreateClientOptions): CollapseClient {
+export function createLookoutClient(options: CreateClientOptions): LookoutClient {
   const { baseUrl, token } = options;
 
   const resolveToken = () => resolveTokenValue(token);

@@ -10,14 +10,14 @@ import {
   useTokenStore,
   useGallery,
   useHashRouter,
-} from "@collapse/react";
+} from "@lookout/react";
 import { getVersion } from "@tauri-apps/api/app";
 import { isValidToken, extractToken } from "./utils.js";
 import { PermissionScreen } from "./components/PermissionScreen.js";
 import { RecordPage } from "./components/RecordPage.js";
 import { AddSessionPage } from "./components/AddSessionPage.js";
 
-const API_BASE = "https://collapse.b.selfhosted.hackclub.com";
+const API_BASE = "https://lookout.hackclub.com";
 
 /** Pause a session by token. Fire-and-forget, logs errors. */
 async function pauseSession(token: string): Promise<void> {
@@ -99,11 +99,11 @@ export function App() {
   handleDeepLinkRef.current = handleDeepLinkUrls;
 
   // Listen for deep links while app is running (warm start).
-  // We use our custom "collapse-deep-link" event to avoid conflicts and infinite loops
+  // We use our custom "lookout-deep-link" event to avoid conflicts and infinite loops
   // with the tauri-plugin-deep-link internal event loops.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<string[]>("collapse-deep-link", (event) => {
+    listen<string[]>("lookout-deep-link", (event) => {
       handleDeepLinkRef.current(event.payload);
     }).then((fn) => {
       unlisten = fn;
@@ -147,7 +147,7 @@ export function App() {
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
     if (token && isValidToken(token)) {
-      handleDeepLinkRef.current([`collapse://session/?token=${token}`]);
+      handleDeepLinkRef.current([`lookout://session/?token=${token}`]);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -199,7 +199,7 @@ export function App() {
   // Listen for native menu navigation events
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<string>("collapse-navigate", (event) => {
+    listen<string>("lookout-navigate", (event) => {
       if (event.payload === "/add") {
         navigate({ page: "add" });
       }
@@ -212,7 +212,7 @@ export function App() {
   // Set window title with version
   useEffect(() => {
     getVersion().then((v) => {
-      getCurrentWindow().setTitle(`Collapse v${v}`);
+      getCurrentWindow().setTitle(`Lookout v${v}`);
     }).catch(() => {});
   }, []);
 
@@ -290,7 +290,7 @@ export function App() {
             onBack={() => navigate({ page: "gallery" })}
             onStart={(token) => {
               tokenStore.addToken(token);
-              handleDeepLinkRef.current([`collapse://session/?token=${token}`]);
+              handleDeepLinkRef.current([`lookout://session/?token=${token}`]);
             }}
           />
         );

@@ -9,6 +9,6 @@ export default defineConfig({
   dbCredentials: {
     url:
       process.env.DATABASE_URL ||
-      "postgresql://collapse:collapse@localhost:5433/collapse",
+      "postgresql://lookout:lookout@localhost:5433/lookout",
   },
 });

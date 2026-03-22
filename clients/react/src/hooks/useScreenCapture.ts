@@ -1,12 +1,12 @@
 import { useRef, useState, useCallback } from "react";
 import type { CaptureResult, CaptureSettings } from "../types.js";
-import { useCollapseContext } from "../CollapseProvider.js";
+import { useLookoutContext } from "../LookoutProvider.js";
 import { waitForVideoReady, captureFrameAsJpeg } from "./captureUtils.js";
 
 /**
  * Handles getDisplayMedia, canvas snapshots, and stream lifecycle.
  *
- * Reads capture settings from CollapseProvider context. Pass explicit
+ * Reads capture settings from LookoutProvider context. Pass explicit
  * settings to override or use standalone (without provider).
  */
 export function useScreenCapture(overrides?: CaptureSettings) {
@@ -15,7 +15,7 @@ export function useScreenCapture(overrides?: CaptureSettings) {
   };
 
   try {
-    const { config } = useCollapseContext();
+    const { config } = useLookoutContext();
     settings = {
       ...config.capture,
       ...overrides,

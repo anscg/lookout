@@ -6,7 +6,7 @@ import {
   fontSize,
   fontWeight,
   radii,
-} from "@collapse/react";
+} from "@lookout/react";
 
 import { extractToken } from "../utils.js";
 import { PageLayout } from "./PageLayout.js";
@@ -44,7 +44,7 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
       onBack={onBack}
       icon={undefined}
       title="Timelapses need to be started from Hack Club sites"
-      subtitle="Open Collapse from a Hack Club site, or paste in a link below"
+      subtitle="Open Lookout from a Hack Club site, or paste in a link below"
       actions={<>
         {error && (
           <p style={{ fontSize: fontSize.sm, color: colors.status.danger, margin: 0, textAlign: "center" }}>
@@ -57,7 +57,7 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
           value={link}
           onChange={(e) => { setLink(e.target.value); setError(null); }}
           onKeyDown={(e) => { if (e.key === "Enter" && !loading) handleStart(); }}
-          placeholder="Paste a collapse:// link here"
+          placeholder="Paste a lookout:// link here"
           disabled={loading}
           style={{
             width: "100%",

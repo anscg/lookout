@@ -1,5 +1,5 @@
 /**
- * Centralized logger for the Collapse desktop app.
+ * Centralized logger for the Lookout desktop app.
  *
  * - Captures all console.log/warn/error/debug output
  * - Renders to the #debug panel (toggled with backtick)
@@ -187,7 +187,7 @@ export function getReport(): string {
   const platform = navigator.platform || "unknown";
   const ua = navigator.userAgent || "";
 
-  const lines = [`Collapse Desktop v${appVersion} | ${platform} | ${now}`, `UA: ${ua}`, "---"];
+  const lines = [`Lookout Desktop v${appVersion} | ${platform} | ${now}`, `UA: ${ua}`, "---"];
 
   // Last 100 entries
   const recent = entries.slice(-100);

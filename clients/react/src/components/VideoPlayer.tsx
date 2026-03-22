@@ -27,7 +27,7 @@ export function VideoPlayer({ src }: VideoPlayerProps) {
   }, []);
 
   return (
-    <div className={`collapse-video-player platform-${platform}`} style={{ width: "100%", height: "100%", display: "flex", "--media-border-radius": "8px", "--media-video-border-radius": "8px" } as React.CSSProperties}>
+    <div className={`lookout-video-player platform-${platform}`} style={{ width: "100%", height: "100%", display: "flex", "--media-border-radius": "8px", "--media-video-border-radius": "8px" } as React.CSSProperties}>
       <Player.Provider>
         <VideoSkin style={{ width: "100%", height: "100%" }}>
           <Video src={src} muted playsInline autoPlay={false} />

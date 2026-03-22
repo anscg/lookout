@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/refs/tags/tauri-v2.3.1/crates/tauri-utils/schema.json",
-  "productName": "Collapse",
-  "identifier": "com.hackclub.collapse",
-  "version": "0.0.22",
+  "productName": "Lookout",
+  "identifier": "com.hackclub.lookout",
+  "version": "0.0.26",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "Collapse",
+        "title": "Lookout",
         "width": 480,
         "minWidth": 480,
         "maxWidth": 480,
@@ -31,7 +31,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src https://collapse.b.selfhosted.hackclub.com https://*.r2.cloudflarestorage.com http://localhost:* ws://localhost:* ipc: tauri: collapse-preview: http://collapse-preview.localhost; img-src 'self' blob: data: https://*.r2.cloudflarestorage.com collapse-preview: http://collapse-preview.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; media-src 'self' blob: https://*.r2.cloudflarestorage.com; font-src 'self' data:",
+      "csp": "default-src 'self'; connect-src https://lookout.hackclub.com https://*.r2.cloudflarestorage.com http://localhost:* ws://localhost:* ipc: tauri: lookout-preview: http://lookout-preview.localhost; img-src 'self' blob: data: https://lookout.hackclub.com https://*.r2.cloudflarestorage.com lookout-preview: http://lookout-preview.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; media-src 'self' blob: https://lookout.hackclub.com https://*.r2.cloudflarestorage.com; font-src 'self' data:",
       "dangerousDisableAssetCspModification": true
     }
   },
@@ -52,7 +52,7 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["collapse"]
+        "schemes": ["lookout"]
       }
     }
   }

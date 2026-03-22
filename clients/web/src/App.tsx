@@ -1,16 +1,16 @@
 import React, { useEffect } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
-  CollapseProvider,
-  CollapseRecorder,
+  LookoutProvider,
+  LookoutRecorder,
   Gallery,
   SessionDetail,
   useTokenStore,
   useGallery,
   useHashRouter,
-} from "@collapse/react";
+} from "@lookout/react";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "https://collapse.b.selfhosted.hackclub.com";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "https://lookout.hackclub.com";
 
 export function App() {
   const { route, navigate } = useHashRouter();
@@ -53,7 +53,7 @@ export function App() {
 
       case "record":
         return (
-          <CollapseProvider token={route.token} apiBaseUrl={API_BASE}>
+          <LookoutProvider token={route.token} apiBaseUrl={API_BASE}>
             <div style={{ maxWidth: 640, margin: "0 auto", padding: 16 }}>
               <button
                 onClick={() => navigate({ page: "gallery" })}
@@ -61,9 +61,9 @@ export function App() {
               >
                 &larr; Gallery
               </button>
-              <CollapseRecorder />
+              <LookoutRecorder />
             </div>
-          </CollapseProvider>
+          </LookoutProvider>
         );
 
       case "session":

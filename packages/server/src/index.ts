@@ -17,7 +17,11 @@ await app.register(cors, {
   origin: (origin, cb) => {
     // Allow: no origin (server-to-server), *.hackclub.com, localhost dev, tauri app
     // Tauri uses tauri:// on macOS/Linux but http://tauri.localhost on Windows
-    if (!origin || origin.startsWith("tauri://") || origin === "http://tauri.localhost") {
+    if (
+      !origin ||
+      origin.startsWith("tauri://") ||
+      origin === "http://tauri.localhost"
+    ) {
       cb(null, true);
       return;
     }
@@ -76,7 +80,12 @@ if (existsSync(publicDir)) {
     if (request.url.startsWith("/api/")) {
       return reply.code(404).send({ error: "Not found" });
     }
-    return reply.code(200).send({ message: "Collapse API is running. Frontend not built yet." });
+    return reply
+      .code(200)
+      .send({
+        message:
+          "The Lookout server is running. https://github.com/hackclub/lookout",
+      });
   });
 }
 

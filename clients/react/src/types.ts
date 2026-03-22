@@ -1,4 +1,4 @@
-import type { SessionStatus } from "@collapse/shared";
+import type { SessionStatus } from "@lookout/shared";
 
 // ─── Token Provider ──────────────────────────────────────
 
@@ -79,7 +79,7 @@ export type RecorderStatus =
 
 // ─── Callbacks ───────────────────────────────────────────
 
-export interface CollapseCallbacks {
+export interface LookoutCallbacks {
   /** Screen sharing started. */
   onShareStart?: () => void;
   /** Screen sharing ended. */
@@ -114,7 +114,7 @@ export interface CollapseCallbacks {
 
 // ─── Main Config ─────────────────────────────────────────
 
-export interface CollapseConfig {
+export interface LookoutConfig {
   /** Session token. Required. */
   token: TokenProvider;
   /** API base URL. Default: "" (same origin). */
@@ -124,7 +124,7 @@ export interface CollapseConfig {
   /** Retry/buffer settings. */
   retry?: RetrySettings;
   /** Lifecycle callbacks. */
-  callbacks?: CollapseCallbacks;
+  callbacks?: LookoutCallbacks;
   /** Compilation status poll interval in ms. Default: 3000 */
   statusPollIntervalMs?: number;
   /** Auto-start screen sharing on mount. Default: false */
@@ -141,14 +141,14 @@ export interface ResolvedConfig {
     camera: CameraSettings;
   };
   retry: Required<RetrySettings>;
-  callbacks: CollapseCallbacks;
+  callbacks: LookoutCallbacks;
   statusPollIntervalMs: number;
   autoStart: boolean;
 }
 
-// ─── Collapse State ──────────────────────────────────────
+// ─── Lookout State ──────────────────────────────────────
 
-export interface CollapseState {
+export interface LookoutState {
   /** Current recorder status. */
   status: RecorderStatus;
   /** Whether getDisplayMedia is active. */
@@ -181,9 +181,9 @@ export interface CollapseState {
   previewStream: MediaStream | null;
 }
 
-// ─── Collapse Actions ────────────────────────────────────
+// ─── Lookout Actions ────────────────────────────────────
 
-export interface CollapseActions {
+export interface LookoutActions {
   /** Start screen sharing (or camera) and begin capturing. */
   startSharing: () => Promise<void>;
   /** Stop screen share (or camera) without stopping session (auto-pauses). */

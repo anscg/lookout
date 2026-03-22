@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 
-const STORAGE_KEY = "collapse-tokens";
+const STORAGE_KEY = "lookout-tokens";
 
 export interface TokenEntry {
   token: string;

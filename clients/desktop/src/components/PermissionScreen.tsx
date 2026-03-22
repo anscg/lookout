@@ -5,7 +5,7 @@ import {
   checkCameraPermission,
   requestCameraPermission,
 } from "tauri-plugin-macos-permissions-api";
-import { Button, PageContainer, Spinner, colors, spacing, fontSize } from "@collapse/react";
+import { Button, PageContainer, Spinner, colors, spacing, fontSize } from "@lookout/react";
 import { PageLayout } from "./PageLayout.js";
 
 type PermissionStatus = "checking" | "granted" | "denied";
@@ -30,8 +30,8 @@ const PERMISSION_CONFIG: Record<PermissionType, {
       </svg>
     ),
     title: "Screen Recording Permission",
-    subtitle: "Collapse needs screen recording access to capture screenshots of your work. Your screen is captured locally and only periodic screenshots are uploaded.",
-    hint: 'After enabling "Collapse" in System Settings > Privacy > Screen Recording, quit and reopen the app. If it still doesn\'t work, remove Collapse from the list entirely, restart the app, and grant permission again.',
+    subtitle: "Lookout needs screen recording access to capture screenshots of your work. Your screen is captured locally and only periodic screenshots are uploaded.",
+    hint: 'After enabling "Lookout" in System Settings > Privacy > Screen Recording, quit and reopen the app. If it still doesn\'t work, remove Lookout from the list entirely, restart the app, and grant permission again.',
     checkingLabel: "Checking screen recording permission...",
     check: checkScreenRecordingPermission,
     request: requestScreenRecordingPermission,
@@ -44,8 +44,8 @@ const PERMISSION_CONFIG: Record<PermissionType, {
       </svg>
     ),
     title: "Camera Permission",
-    subtitle: "Collapse uses your camera to capture periodic photos of your work for timelapses. Photos are taken locally and only periodic snapshots are uploaded.",
-    hint: 'After enabling "Collapse" in System Settings > Privacy > Camera, quit and reopen the app. If it still doesn\'t work, remove Collapse from the list entirely, restart the app, and grant permission again.',
+    subtitle: "Lookout uses your camera to capture periodic photos of your work for timelapses. Photos are taken locally and only periodic snapshots are uploaded.",
+    hint: 'After enabling "Lookout" in System Settings > Privacy > Camera, quit and reopen the app. If it still doesn\'t work, remove Lookout from the list entirely, restart the app, and grant permission again.',
     checkingLabel: "Checking camera permission...",
     check: checkCameraPermission,
     request: requestCameraPermission,

@@ -1,6 +1,6 @@
-# @collapse/react — React SDK Documentation
+# @lookout/react — React SDK Documentation
 
-**Package:** `@collapse/react` v0.0.15
+**Package:** `@lookout/react` v0.0.15
 **Peer Dependencies:** React 18+ or 19+
 **Exports:** ESM + CJS with TypeScript declarations
 
@@ -9,13 +9,13 @@
 ## Quick Start
 
 ```tsx
-import { CollapseProvider, CollapseRecorder } from "@collapse/react";
+import { LookoutProvider, LookoutRecorder } from "@lookout/react";
 
 function App() {
   return (
-    <CollapseProvider token="your-64-char-hex-token" apiBaseUrl="https://api.example.com">
-      <CollapseRecorder />
-    </CollapseProvider>
+    <LookoutProvider token="your-64-char-hex-token" apiBaseUrl="https://api.example.com">
+      <LookoutRecorder />
+    </LookoutProvider>
   );
 }
 ```
@@ -23,10 +23,10 @@ function App() {
 For headless usage:
 
 ```tsx
-import { CollapseProvider, useCollapse } from "@collapse/react";
+import { LookoutProvider, useLookout } from "@lookout/react";
 
 function MyRecorder() {
-  const { state, actions } = useCollapse();
+  const { state, actions } = useLookout();
 
   return (
     <div>
@@ -41,9 +41,9 @@ function MyRecorder() {
 
 function App() {
   return (
-    <CollapseProvider token="..." apiBaseUrl="https://api.example.com">
+    <LookoutProvider token="..." apiBaseUrl="https://api.example.com">
       <MyRecorder />
-    </CollapseProvider>
+    </LookoutProvider>
   );
 }
 ```
@@ -51,17 +51,17 @@ function App() {
 For camera (webcam) capture:
 
 ```tsx
-import { CollapseProvider, CollapseRecorder } from "@collapse/react";
+import { LookoutProvider, LookoutRecorder } from "@lookout/react";
 
 function App() {
   return (
-    <CollapseProvider
+    <LookoutProvider
       token="your-64-char-hex-token"
       apiBaseUrl="https://api.example.com"
       capture={{ mode: "camera" }}
     >
-      <CollapseRecorder />
-    </CollapseProvider>
+      <LookoutRecorder />
+    </LookoutProvider>
   );
 }
 ```
@@ -70,22 +70,22 @@ function App() {
 
 ## Provider
 
-### `<CollapseProvider>`
+### `<LookoutProvider>`
 
 Context provider that configures the API client and settings for all child hooks/components.
 
 ```tsx
-<CollapseProvider
+<LookoutProvider
   token="..."
   apiBaseUrl="https://api.example.com"
   capture={{ intervalMs: 30000, jpegQuality: 0.9 }}
   autoStart
 >
   {children}
-</CollapseProvider>
+</LookoutProvider>
 ```
 
-**Props** (`CollapseProviderProps` extends `CollapseConfig`):
+**Props** (`LookoutProviderProps` extends `LookoutConfig`):
 
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
@@ -93,7 +93,7 @@ Context provider that configures the API client and settings for all child hooks
 | `apiBaseUrl` | `string` | `""` (same origin) | Server API base URL |
 | `capture` | `CaptureSettings` | See below | Screenshot capture settings |
 | `retry` | `RetrySettings` | See below | Upload retry/buffer settings |
-| `callbacks` | `CollapseCallbacks` | `{}` | Lifecycle event callbacks |
+| `callbacks` | `LookoutCallbacks` | `{}` | Lifecycle event callbacks |
 | `statusPollIntervalMs` | `number` | `3000` | Compilation status poll interval (ms) |
 | `autoStart` | `boolean` | `false` | Auto-start screen sharing on mount |
 | `children` | `ReactNode` | *required* | Child components |
@@ -144,17 +144,17 @@ type CaptureMode = "screen" | "camera";
 
 ## Hooks
 
-### `useCollapse()`
+### `useLookout()`
 
-Primary hook — composes all lower-level hooks and orchestrates the capture-upload loop. Must be used within `<CollapseProvider>`.
+Primary hook — composes all lower-level hooks and orchestrates the capture-upload loop. Must be used within `<LookoutProvider>`.
 
 ```ts
-const { state, actions } = useCollapse();
+const { state, actions } = useLookout();
 ```
 
 **Returns:**
 
-#### `state: CollapseState`
+#### `state: LookoutState`
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -174,7 +174,7 @@ const { state, actions } = useCollapse();
 | `isPreviewing` | `boolean` | Whether camera is in preview mode (stream live, capture loop not started). Camera mode only. |
 | `previewStream` | `MediaStream \| null` | Live camera MediaStream for rendering in a `<video>` element. Available during preview and recording in camera mode. |
 
-#### `actions: CollapseActions`
+#### `actions: LookoutActions`
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -244,7 +244,7 @@ interface CaptureResult {
 
 ### `useCameraCapture(overrides?)`
 
-Handles `getUserMedia` (webcam), device enumeration, canvas snapshots, and stream lifecycle. Supports a two-phase flow: **preview** (stream live, no capture loop) → **recording** (`isSharing = true`, triggers capture loop in `useCollapse`). Can be used standalone (without provider) by passing explicit settings.
+Handles `getUserMedia` (webcam), device enumeration, canvas snapshots, and stream lifecycle. Supports a two-phase flow: **preview** (stream live, no capture loop) → **recording** (`isSharing = true`, triggers capture loop in `useLookout`). Can be used standalone (without provider) by passing explicit settings.
 
 ```ts
 const {
@@ -286,7 +286,7 @@ const {
 
 ### `useUploader()`
 
-Manages the upload queue with retries and backoff. Must be used within `<CollapseProvider>`.
+Manages the upload queue with retries and backoff. Must be used within `<LookoutProvider>`.
 
 ```ts
 const { enqueue, uploads, trackedSeconds, lastScreenshotUrl, nextExpectedAt, lastError } = useUploader();
@@ -307,7 +307,7 @@ const { enqueue, uploads, trackedSeconds, lastScreenshotUrl, nextExpectedAt, las
 
 ### `useSession()`
 
-Manages session state, status polling, and server interactions. Must be used within `<CollapseProvider>`.
+Manages session state, status polling, and server interactions. Must be used within `<LookoutProvider>`.
 
 ```ts
 const session = useSession();
@@ -387,7 +387,7 @@ interface TokenEntry {
 }
 ```
 
-**Storage key:** `collapse-tokens`
+**Storage key:** `lookout-tokens`
 
 ---
 
@@ -448,12 +448,12 @@ type Route =
 
 ## Components
 
-### `<CollapseRecorder>`
+### `<LookoutRecorder>`
 
-Drop-in recorder widget. Handles the full lifecycle: capture, upload, pause/resume/stop, compilation polling, and video display. Adapts its UI based on the configured `capture.mode`. Must be used within `<CollapseProvider>`.
+Drop-in recorder widget. Handles the full lifecycle: capture, upload, pause/resume/stop, compilation polling, and video display. Adapts its UI based on the configured `capture.mode`. Must be used within `<LookoutProvider>`.
 
 ```tsx
-<CollapseRecorder />
+<LookoutRecorder />
 ```
 
 No props — reads everything from context.
@@ -605,7 +605,7 @@ Displays compilation progress, video player, or failure state.
 
 ### `<ResultView>`
 
-Wraps `<ProcessingState>` with automatic video URL fetching from the API. Must be used within `<CollapseProvider>`.
+Wraps `<ProcessingState>` with automatic video URL fetching from the API. Must be used within `<LookoutProvider>`.
 
 ```tsx
 <ResultView status="complete" trackedSeconds={300} />
@@ -692,10 +692,10 @@ Full session detail view with video player, stats, and compilation polling. Stan
 
 ## Callbacks
 
-Pass via `CollapseProvider`'s `callbacks` prop:
+Pass via `LookoutProvider`'s `callbacks` prop:
 
 ```tsx
-<CollapseProvider
+<LookoutProvider
   token="..."
   callbacks={{
     onShareStart: () => console.log("sharing started"),
@@ -732,14 +732,14 @@ Pass via `CollapseProvider`'s `callbacks` prop:
 
 ## API Client
 
-### `createCollapseClient(options)`
+### `createLookoutClient(options)`
 
 Standalone API client with no React dependency. Useful for server-side or non-React contexts.
 
 ```ts
-import { createCollapseClient } from "@collapse/react";
+import { createLookoutClient } from "@lookout/react";
 
-const client = createCollapseClient({
+const client = createLookoutClient({
   baseUrl: "https://api.example.com",
   token: "your-token",
 });
@@ -754,7 +754,7 @@ const session = await client.getSession();
 | `baseUrl` | `string` | Server API base URL |
 | `token` | `TokenProvider` | Session token (string, sync, or async getter) |
 
-**Returns (`CollapseClient`):**
+**Returns (`LookoutClient`):**
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -796,7 +796,7 @@ The SDK exports styled UI primitives used by its components. All use inline styl
 Formats seconds as `H:MM:SS` or `M:SS`. Used for the live timer display.
 
 ```ts
-import { formatTime } from "@collapse/react";
+import { formatTime } from "@lookout/react";
 
 formatTime(0);     // "0:00"
 formatTime(65);    // "1:05"
@@ -808,7 +808,7 @@ formatTime(3661);  // "1:01:01"
 Formats seconds as human-readable tracked time. Used for static time displays (gallery cards, stats) where second-level precision is unnecessary.
 
 ```ts
-import { formatTrackedTime } from "@collapse/react";
+import { formatTrackedTime } from "@lookout/react";
 
 formatTrackedTime(0);      // "< 1min"
 formatTrackedTime(300);    // "5min"

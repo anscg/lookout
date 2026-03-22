@@ -1,6 +1,6 @@
 {
-  "name": "@collapse/web",
-  "version": "0.0.1",
+  "name": "@lookout/web",
+  "version": "0.0.26",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,8 +8,8 @@
     "dev": "vite"
   },
   "dependencies": {
-    "@collapse/react": "*",
-    "@collapse/shared": "*",
+    "@lookout/react": "*",
+    "@lookout/shared": "*",
     "@videojs/react": "^10.0.0-beta.8",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

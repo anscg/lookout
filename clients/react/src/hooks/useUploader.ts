@@ -1,5 +1,5 @@
 import { useRef, useCallback, useState } from "react";
-import { useCollapseContext } from "../CollapseProvider.js";
+import { useLookoutContext } from "../LookoutProvider.js";
 import type { CaptureResult, UploadState } from "../types.js";
 
 async function retry<T>(
@@ -34,7 +34,7 @@ export interface UploaderResult {
 }
 
 export function useUploader(): UploaderResult {
-  const { client, config } = useCollapseContext();
+  const { client, config } = useLookoutContext();
   const { maxRetries, retryDelays, maxPendingBuffer } = config.retry;
 
   const [uploads, setUploads] = useState<UploadState>({

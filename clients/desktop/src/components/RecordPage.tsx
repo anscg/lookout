@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
-  CollapseProvider,
+  LookoutProvider,
   Button,
   Skeleton,
   colors,
@@ -9,14 +9,14 @@ import {
   radii,
   fontSize,
   fontWeight,
-} from "@collapse/react";
+} from "@lookout/react";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { SourcePicker } from "./SourcePicker.js";
 import { DesktopRecorder } from "./DesktopRecorder.js";
 import { NamingModal } from "./NamingModal.js";
 import { PageLayout, cardButtonStyle } from "./PageLayout.js";
 
-const API_BASE = "https://collapse.b.selfhosted.hackclub.com";
+const API_BASE = "https://lookout.hackclub.com";
 
 interface RecordPageProps {
   token: string;
@@ -208,7 +208,7 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
                 )}
               </Button>
               <h2 style={{ position: "absolute", left: 0, right: 0, textAlign: "center", fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text.primary, margin: 0, pointerEvents: "none" }}>
-                What should Collapse capture?
+                What should Lookout capture?
               </h2>
               {sessionStatus !== "pending" && (
                 <Button variant="danger" size="md" loading={stopping} onClick={handleStopClick} style={{ zIndex: 1 }}>
@@ -258,7 +258,7 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
             }}
             style={{ position: "absolute", inset: 0, height: "100%" }}
           >
-            <CollapseProvider token={token} apiBaseUrl={API_BASE}>
+            <LookoutProvider token={token} apiBaseUrl={API_BASE}>
               <DesktopRecorder
                 token={token}
                 source={captureSource}
@@ -266,7 +266,7 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
                 onBack={onBack}
                 onViewSession={onViewSession}
               />
-            </CollapseProvider>
+            </LookoutProvider>
           </motion.div>
         )}
       </AnimatePresence>
