@@ -87,7 +87,9 @@ export function useScreenPreview(
       };
 
       try {
-        const url = `lookout-preview://localhost/${s.type}/${s.id}?maxWidth=854&maxHeight=480&jpegQuality=65&t=${Date.now()}`;
+        const isWindows = navigator.userAgent.includes("Windows");
+        const baseUrl = isWindows ? "http://lookout-preview.localhost" : "lookout-preview://localhost";
+        const url = `${baseUrl}/${s.type}/${s.id}?maxWidth=854&maxHeight=480&jpegQuality=65&t=${Date.now()}`;
         
         // Use fetch + blob to manually control memory allocation.
         // Directly assigning URL to img.src can cause DOM rendering cache memory leaks
