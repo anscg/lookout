@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { isGlassSupported, setLiquidGlassEffect, GlassMaterialVariant } from "tauri-plugin-liquid-glass-api";
 import { Button, colors, spacing, fontSize, fontWeight, radii } from "@lookout/react";
 import NumberFlow from "@number-flow/react";
 
@@ -38,6 +39,49 @@ export function TrayApp() {
   });
 
   const [liveSeconds, setLiveSeconds] = useState(0);
+
+  const [isWindows, setIsWindows] = useState(false);
+
+  useEffect(() => {
+    // Force global transparency for the tray window to ensure native glass shows through
+    document.documentElement.style.setProperty('background', 'transparent', 'important');
+    document.body.style.setProperty('background', 'transparent', 'important');
+    
+    // Also explicitly force #root to be transparent
+    const root = document.getElementById('root');
+    if (root) {
+      root.style.setProperty('background', 'transparent', 'important');
+    }
+
+    // Check OS for styling fallbacks
+    const ua = navigator.userAgent.toLowerCase();
+    const windows = ua.includes('windows') || ua.includes('linux');
+    setIsWindows(windows);
+
+    // Apply native glass effects
+    async function setupGlass() {
+      try {
+        const supported = await isGlassSupported();
+        console.log("Liquid glass supported:", supported);
+        
+        await setLiquidGlassEffect({
+          cornerRadius: 16,
+          tintColor: "#00000000",
+          variant: GlassMaterialVariant.Sidebar, 
+        });
+      } catch (e) {
+        console.error("Failed to setup liquid glass", e);
+      }
+    }
+    setupGlass();
+    
+    return () => {
+      // Cleanup styles if unmounted (though this is the tray entry point)
+      document.documentElement.style.removeProperty('background');
+      document.body.style.removeProperty('background');
+      if (root) root.style.removeProperty('background');
+    };
+  }, []);
 
   // Derive the live real-time seconds ticking up
   useEffect(() => {
@@ -111,12 +155,31 @@ export function TrayApp() {
   };
 
   return (
-    <div style={{
-      display: "flex", alignItems: "center", justifyContent: "space-between",
-      padding: `${spacing.sm}px ${spacing.md}px`,
-      width: "100%", height: "100%", boxSizing: "border-box",
-      fontFamily: "system-ui, -apple-system, sans-serif"
-    }}>
+    <>
+      <style>{`
+        /* Force absolute transparency on all root elements for macOS */
+        :root, html, body, #root {
+          background: transparent !important;
+          background-color: transparent !important;
+        }
+        /* Override the Lookout theme variables just for the tray */
+        :root {
+          --color-bg-body: transparent !important;
+          --color-bg-panel: transparent !important;
+        }
+      `}</style>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: `${spacing.sm}px ${spacing.md}px`,
+        width: "100%", height: "100%", boxSizing: "border-box",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+        backgroundColor: isWindows ? colors.bg.panel : "transparent",
+        borderRadius: isWindows ? radii.md : 16, // Enforce rounded corners on the HTML div itself
+        border: isWindows ? `1px solid ${colors.border.default}` : "none",
+        overflow: "hidden", // Ensure content doesn't bleed past the rounded corners
+        /* Explicitly add a border-radius here that matches cornerRadius */
+        WebkitBorderRadius: "16px",
+      }}>
       <div style={{ display: "flex", alignItems: "center", gap: spacing.md }}>
         <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
           {state.controlMode === "recording" && (
@@ -162,6 +225,7 @@ export function TrayApp() {
           Stop
         </Button>
       </div>
-    </div>
+      </div>
+    </>
   );
 }

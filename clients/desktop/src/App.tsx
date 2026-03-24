@@ -219,6 +219,18 @@ export function App() {
 
   // Enable vibrancy globally for the app
   useEffect(() => {
+    // Wait to determine if this is the tray window
+    if (window.location.hash.includes("tray")) {
+      console.log("[vibrancy] skipped on tray window");
+      // Even though we skip vibrancy, we MUST ensure the background is transparent
+      // so the native glass effect applied in TrayApp.tsx can be seen.
+      document.documentElement.style.background = "transparent";
+      document.body.style.background = "transparent";
+      const root = document.getElementById("root");
+      if (root) root.style.background = "transparent";
+      return;
+    }
+
     const html = document.documentElement;
     const body = document.body;
     const root = document.getElementById("root");

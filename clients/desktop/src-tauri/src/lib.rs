@@ -3,6 +3,8 @@ mod crop;
 mod pipewire;
 mod screencast;
 mod tray;
+#[cfg(target_os = "windows")]
+mod windows_permissions;
 
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFNumberType, CFString, CGRect};
@@ -845,6 +847,7 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_macos_permissions::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_liquid_glass::init())
         .manage(AppState {
             config: Mutex::new(None),
             cold_start_urls: Mutex::new(None),
@@ -1005,6 +1008,11 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_maximizable(false)?;
                 window.set_fullscreen(false)?;
+
+                // Auto-grant camera/microphone permissions on Windows so the
+                // WebView2 native prompt never appears.
+                #[cfg(target_os = "windows")]
+                windows_permissions::register_permission_handler(&window);
             }
 
             Ok(())
