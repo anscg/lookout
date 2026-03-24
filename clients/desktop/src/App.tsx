@@ -16,6 +16,7 @@ import { isValidToken, extractToken } from "./utils.js";
 import { PermissionScreen } from "./components/PermissionScreen.js";
 import { RecordPage } from "./components/RecordPage.js";
 import { AddSessionPage } from "./components/AddSessionPage.js";
+import { useUpdateCheck } from "./hooks/useUpdateCheck.js";
 
 const API_BASE = "https://lookout.hackclub.com";
 
@@ -48,6 +49,7 @@ export function App() {
   const [cameraPermGranted, setCameraPermGranted] = useState(!isMacOS);
   const { route, navigate } = useHashRouter();
   const tokenStore = useTokenStore();
+  const updateStatus = useUpdateCheck();
   const gallery = useGallery({
     apiBaseUrl: API_BASE,
     tokens: tokenStore.getAllTokenValues(),
@@ -362,6 +364,34 @@ export function App() {
   }, [route]);
 
   const routeKey = `${route.page}:${(route as { token?: string }).token ?? ""}`;
+
+  if (updateStatus.state !== "idle") {
+    return (
+      <div style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100vh",
+        gap: 12,
+        fontFamily: "inherit",
+      }}>
+        {isMacOS && (
+          <div
+            data-tauri-drag-region
+            style={{ position: "absolute", top: 0, left: 0, right: 0, height: 32, background: "transparent", cursor: "default" }}
+          />
+        )}
+        <div style={{ fontSize: 14, opacity: 0.7 }}>
+          {updateStatus.state === "checking" && "Checking for updates…"}
+          {updateStatus.state === "no-update" && updateStatus.message}
+          {updateStatus.state === "downloading" && `Updating… ${updateStatus.progress}%`}
+          {updateStatus.state === "installing" && "Installing update…"}
+          {updateStatus.state === "done" && "Restarting…"}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>

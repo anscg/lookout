@@ -105,6 +105,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build app (without signing)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -112,6 +114,8 @@ jobs:
         working-directory: clients/desktop
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build Arch Linux package (.pkg.tar.zst)
         if: runner.os == 'Linux'
@@ -225,6 +229,13 @@ jobs:
             clients/desktop/src-tauri/target/*/release/bundle/**/*.msi
             clients/desktop/src-tauri/target/*/release/bundle/**/*.exe
             clients/desktop/src-tauri/target/release/bundle/**/*.pkg.tar.zst
+            clients/desktop/src-tauri/target/*/release/bundle/**/*.app.tar.gz.sig
+            clients/desktop/src-tauri/target/release/bundle/**/*.app.tar.gz.sig
+            clients/desktop/src-tauri/target/release/bundle/**/*.AppImage.sig
+            clients/desktop/src-tauri/target/release/bundle/**/*.exe.sig
+            clients/desktop/src-tauri/target/*/release/bundle/**/*.exe.sig
+            clients/desktop/src-tauri/target/release/bundle/**/*.msi.sig
+            clients/desktop/src-tauri/target/*/release/bundle/**/*.msi.sig
 
   release:
     needs: build
@@ -258,7 +269,11 @@ jobs:
             -name "*.rpm" -o \
             -name "*.msi" -o \
             -name "*.exe" -o \
-            -name "*.pkg.tar.zst" \
+            -name "*.pkg.tar.zst" -o \
+            -name "*.app.tar.gz.sig" -o \
+            -name "*.AppImage.sig" -o \
+            -name "*.exe.sig" -o \
+            -name "*.msi.sig" \
           \) | while read -r file; do
             FILENAME=$(basename "$file")
             # Determine OS label from artifact directory
@@ -282,6 +297,9 @@ jobs:
               PREFIX="${FILENAME%%_*}"
               SUFFIX="${FILENAME#*_}"
               NEW_NAME="${PREFIX}_${OS}-${SUFFIX}"
+            elif [[ "$FILENAME" != *"${OS}"* ]]; then
+              # Files without underscores (e.g. Lookout.app.tar.gz) — prepend OS
+              NEW_NAME="${OS}-${FILENAME}"
             else
               NEW_NAME="$FILENAME"
             fi
@@ -289,6 +307,71 @@ jobs:
             cp "$file" "release-assets/$NEW_NAME"
           done
           ls -la release-assets/
+
+      - name: Generate update manifest (latest.json)
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          BASE_URL="https://github.com/hackclub/lookout/releases/download/v${VERSION}"
+
+          # Read signatures from .sig files
+          MAC_SIG=""
+          WIN_X64_SIG=""
+          WIN_ARM_SIG=""
+          LINUX_X64_SIG=""
+          LINUX_ARM_SIG=""
+
+          for sig_file in release-assets/*.sig; do
+            [ -f "$sig_file" ] || continue
+            SIG_CONTENT=$(cat "$sig_file")
+            FILENAME=$(basename "$sig_file")
+            case "$FILENAME" in
+              *macos*.app.tar.gz.sig) MAC_SIG="$SIG_CONTENT" ;;
+              *windows*aarch64*setup.exe.sig|*windows*arm*setup.exe.sig) WIN_ARM_SIG="$SIG_CONTENT" ;;
+              *windows*setup.exe.sig) WIN_X64_SIG="$SIG_CONTENT" ;;
+              *linux*aarch64*.AppImage.sig|*linux*arm*.AppImage.sig) LINUX_ARM_SIG="$SIG_CONTENT" ;;
+              *linux*.AppImage.sig) LINUX_X64_SIG="$SIG_CONTENT" ;;
+            esac
+          done
+
+          # Find actual updatable artifact filenames
+          MAC_FILE=$(ls release-assets/*macos*.app.tar.gz 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "")
+          WIN_X64_FILE=$(ls release-assets/*windows*setup.exe 2>/dev/null | grep -v -e aarch64 -e arm64 | head -1 | xargs basename 2>/dev/null || echo "")
+          WIN_ARM_FILE=$(find release-assets -maxdepth 1 -name '*windows*setup.exe' | grep -e aarch64 -e arm64 | head -1 | xargs -r basename 2>/dev/null || echo "")
+          LINUX_X64_FILE=$(find release-assets -maxdepth 1 -name '*linux*.AppImage' | grep -v -e aarch64 -e arm | head -1 | xargs -r basename 2>/dev/null || echo "")
+          LINUX_ARM_FILE=$(find release-assets -maxdepth 1 -name '*linux*.AppImage' | grep -e aarch64 -e arm | head -1 | xargs -r basename 2>/dev/null || echo "")
+
+          # Build platforms JSON dynamically (only include platforms with artifacts)
+          PLATFORMS="{"
+          FIRST=true
+
+          add_platform() {
+            local key="$1" sig="$2" file="$3"
+            [ -z "$sig" ] || [ -z "$file" ] && return
+            if [ "$FIRST" = true ]; then FIRST=false; else PLATFORMS="$PLATFORMS,"; fi
+            PLATFORMS="$PLATFORMS \"$key\": { \"signature\": \"$sig\", \"url\": \"$BASE_URL/$file\" }"
+          }
+
+          add_platform "darwin-universal" "$MAC_SIG" "$MAC_FILE"
+          add_platform "darwin-x86_64" "$MAC_SIG" "$MAC_FILE"
+          add_platform "darwin-aarch64" "$MAC_SIG" "$MAC_FILE"
+          add_platform "windows-x86_64" "$WIN_X64_SIG" "$WIN_X64_FILE"
+          add_platform "windows-aarch64" "$WIN_ARM_SIG" "$WIN_ARM_FILE"
+          add_platform "linux-x86_64" "$LINUX_X64_SIG" "$LINUX_X64_FILE"
+          add_platform "linux-aarch64" "$LINUX_ARM_SIG" "$LINUX_ARM_FILE"
+
+          PLATFORMS="$PLATFORMS }"
+
+          cat > release-assets/latest.json << ENDJSON
+          {
+            "version": "v${VERSION}",
+            "notes": "See the assets to download and install.",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": ${PLATFORMS}
+          }
+          ENDJSON
+
+          echo "Generated latest.json:"
+          cat release-assets/latest.json
 
       - name: Create GitHub Release
         env:
