@@ -13,7 +13,6 @@
     "@lookout/shared": "*",
     "@number-flow/react": "^0.6.0",
     "@sentry/react": "^10.45.0",
-    "@sentry/vite-plugin": "^5.1.1",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-deep-link": "^2.4.7",
     "@tauri-apps/plugin-dialog": "^2.0.0",
@@ -28,6 +27,7 @@
     "tauri-plugin-macos-permissions-api": "^2.3.0"
   },
   "devDependencies": {
+    "@sentry/vite-plugin": "^5.1.1",
     "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
