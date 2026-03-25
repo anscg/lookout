@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../logger.js";
 import { isGlassSupported, setLiquidGlassEffect, GlassMaterialVariant } from "tauri-plugin-liquid-glass-api";
-import { Button, colors, spacing, fontSize, fontWeight, radii } from "@lookout/react";
+import { Button, colors, spacing, fontSize, fontWeight } from "@lookout/react";
 import NumberFlow from "@number-flow/react";
 
 function TrayTimer({ totalSeconds }: { totalSeconds: number }) {
@@ -130,7 +130,9 @@ export function TrayApp() {
       syncState();
     };
     
-    setup();
+    setup().catch((e) => {
+      console.error("Failed to set up tray listeners", e);
+    });
     
     // Also sync on window focus just in case
     window.addEventListener("focus", syncState);

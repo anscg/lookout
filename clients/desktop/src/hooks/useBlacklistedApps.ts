@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "../logger.js";
 
 const STORAGE_KEY = "lookout-blacklisted-apps";
@@ -24,7 +24,6 @@ function saveToStorage(apps: string[]) {
  */
 export function useBlacklistedApps() {
   const [blacklistedApps, setBlacklistedApps] = useState<string[]>(loadFromStorage);
-  const syncedRef = useRef(false);
 
   // Sync to Rust on mount and whenever the list changes
   useEffect(() => {
@@ -34,17 +33,7 @@ export function useBlacklistedApps() {
     saveToStorage(blacklistedApps);
   }, [blacklistedApps]);
 
-  // Initial sync from localStorage to Rust on mount
-  useEffect(() => {
-    if (syncedRef.current) return;
-    syncedRef.current = true;
-    const stored = loadFromStorage();
-    if (stored.length > 0) {
-      invoke("set_blacklisted_apps", { apps: stored }).catch((e: unknown) =>
-        console.warn("[blacklist] initial sync failed:", e)
-      );
-    }
-  }, []);
+
 
   const addApp = useCallback((appName: string) => {
     setBlacklistedApps((prev) => {
