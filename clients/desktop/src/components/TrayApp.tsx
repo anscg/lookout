@@ -173,7 +173,7 @@ export function TrayApp() {
         padding: `${spacing.sm}px ${spacing.md}px`,
         width: "100%", height: "100%", boxSizing: "border-box",
         fontFamily: "system-ui, -apple-system, sans-serif",
-        backgroundColor: "transparent",
+        backgroundColor: isWindows ? "#000000" : "transparent",
         borderRadius: 16,
         border: isWindows ? `1px solid ${colors.border.default}` : "none",
         overflow: "hidden", // Ensure content doesn't bleed past the rounded corners

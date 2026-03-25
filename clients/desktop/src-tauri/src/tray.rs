@@ -89,12 +89,6 @@ fn toggle_tray_window(app: &AppHandle, rect: tauri::Rect) {
         }
 
         if let Ok(window) = builder.build() {
-            #[cfg(target_os = "windows")]
-            {
-                let _ = window_vibrancy::apply_acrylic(&window, Some((0, 0, 0, 0)));
-                // fully transparent acrylic
-            }
-
             // Hide on blur
             let w = window.clone();
             window.on_window_event(move |event| {
