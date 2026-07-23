@@ -166,6 +166,17 @@ export const screenshots = pgTable(
     // existed or when the client sent nothing. The session's "first recorded"
     // clientInfo is derived from the earliest row that has one.
     clientInfo: text("client_info"),
+    // JA4 TLS client fingerprint of the connection that made the upload-url
+    // request. Unlike clientInfo (client-supplied and freely spoofable) this is
+    // observed at the TLS layer, so it's a harder-to-forge abuse signal: a
+    // genuine Lookout client has a stable JA4, and it drifting mid-session (or
+    // disagreeing with the claimed clientInfo) is suspicious. The Node origin
+    // can't compute JA4 — it's set by the edge proxy (e.g. a Cloudflare
+    // Transform Rule from `cf.bot_management.ja4`) as a request header and read
+    // via JA4_HEADER. Stored opaquely. NULL when the header is absent (local
+    // dev, direct-to-origin) or predates this column. Like clientInfo, the
+    // session's "first recorded" JA4 is the earliest row that has one.
+    ja4: text("ja4"),
     // Credit-mode only. 0 or 60. NULL for bucket-mode rows.
     creditedSeconds: integer("credited_seconds"),
     // Credit-mode only. Server-predicted capture time at confirm; lets us
