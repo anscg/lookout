@@ -77,6 +77,8 @@ export interface SessionResponse {
   videoWebmUrl?: string | null;
   /** First recorded client telemetry for the session; `null` if none captured. */
   clientInfo?: ClientInfo | null;
+  /** First recorded JA4 TLS fingerprint (edge-observed); `null` if none. */
+  ja4?: string | null;
   metadata: Record<string, unknown>;
 }
 
@@ -89,6 +91,8 @@ export interface TimingsResponse {
   last: string | null;
   /** First recorded client telemetry for the session; `null` if none captured. */
   clientInfo: ClientInfo | null;
+  /** First recorded JA4 TLS fingerprint (edge-observed); `null` if none. */
+  ja4: string | null;
   timestamps: string[];
 }
 
