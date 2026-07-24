@@ -141,6 +141,13 @@ export const SCREENSHOT_RETENTION_DAYS = 7;
  *  client; real payloads are a few hundred bytes. */
 export const CLIENT_INFO_MAX_BYTES = 1024;
 
+/** Max byte length of a JA4 TLS fingerprint read from the edge-set request
+ *  header (JA4_HEADER). A canonical JA4 is ~36 chars (e.g.
+ *  "t13d1516h2_8daaf6152771_b186095e22b6"); the cap leaves headroom for
+ *  variants while bounding a hostile/misconfigured edge. Longer values are
+ *  ignored (stored as null). */
+export const JA4_MAX_BYTES = 128;
+
 // ──────────────────────────────────────────────────────────
 // Screenshot capture settings
 // ──────────────────────────────────────────────────────────

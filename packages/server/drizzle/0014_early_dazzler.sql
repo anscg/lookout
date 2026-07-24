@@ -1,0 +1,1 @@
+ALTER TABLE "screenshots" ADD COLUMN "ja4" text;
