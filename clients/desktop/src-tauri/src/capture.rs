@@ -200,7 +200,9 @@ fn capture_to_dynamic_image_with_blacklist(
     if let CaptureSource::Monitor { id } = source {
         if !blacklisted_apps.is_empty() {
             if let Some(bounds) = get_monitor_screen_bounds(*id) {
-                let mut rgba = dynamic.to_rgba8();
+                // into_rgba8 is a move (captures are always RGBA8) — avoids
+                // cloning a full-resolution frame just to draw on it.
+                let mut rgba = dynamic.into_rgba8();
                 let w = rgba.width();
                 let h = rgba.height();
                 redact_blacklisted_regions(&mut rgba, bounds, blacklisted_apps, w, h);
@@ -233,23 +235,6 @@ pub struct RawCaptureResult {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
-}
-
-pub fn take_screenshot_raw(
-    source: CaptureSource,
-    max_width: u32,
-    max_height: u32,
-    jpeg_quality: u8,
-    pipewire_fds: &std::collections::HashMap<u32, i32>,
-) -> Result<RawCaptureResult, String> {
-    take_screenshot_raw_with_blacklist(
-        source,
-        max_width,
-        max_height,
-        jpeg_quality,
-        pipewire_fds,
-        &[],
-    )
 }
 
 pub fn take_screenshot_raw_with_blacklist(
@@ -301,31 +286,13 @@ pub fn take_screenshot(
     jpeg_quality: u8,
     pipewire_fds: &std::collections::HashMap<u32, i32>,
 ) -> Result<CaptureResult, String> {
-    take_screenshot_with_blacklist(
-        source,
-        max_width,
-        max_height,
-        jpeg_quality,
-        pipewire_fds,
-        &[],
-    )
-}
-
-pub fn take_screenshot_with_blacklist(
-    source: CaptureSource,
-    max_width: u32,
-    max_height: u32,
-    jpeg_quality: u8,
-    pipewire_fds: &std::collections::HashMap<u32, i32>,
-    blacklisted_apps: &[String],
-) -> Result<CaptureResult, String> {
     let raw = take_screenshot_raw_with_blacklist(
         source,
         max_width,
         max_height,
         jpeg_quality,
         pipewire_fds,
-        blacklisted_apps,
+        &[],
     )?;
     let size_bytes = raw.data.len();
 
@@ -340,37 +307,23 @@ pub fn take_screenshot_with_blacklist(
     })
 }
 
-pub fn take_stitched_screenshots(
-    sources: &[CaptureSource],
-    max_width: u32,
-    max_height: u32,
-    jpeg_quality: u8,
-    pipewire_fds: &std::collections::HashMap<u32, i32>,
-) -> Result<CaptureResult, String> {
-    take_stitched_screenshots_with_blacklist(
-        sources,
-        max_width,
-        max_height,
-        jpeg_quality,
-        pipewire_fds,
-        &[],
-    )
-}
-
-pub fn take_stitched_screenshots_with_blacklist(
+/// Capture one or more sources side-by-side and encode as a single JPEG.
+/// Returns raw JPEG bytes — callers that need base64 (e.g. for the preview
+/// event) encode it themselves, so the upload path never has to decode.
+pub fn take_stitched_screenshots_raw_with_blacklist(
     sources: &[CaptureSource],
     max_width: u32,
     max_height: u32,
     jpeg_quality: u8,
     pipewire_fds: &std::collections::HashMap<u32, i32>,
     blacklisted_apps: &[String],
-) -> Result<CaptureResult, String> {
+) -> Result<RawCaptureResult, String> {
     if sources.is_empty() {
         return Err("No sources provided".to_string());
     }
 
     if sources.len() == 1 {
-        return take_screenshot_with_blacklist(
+        return take_screenshot_raw_with_blacklist(
             sources[0].clone(),
             max_width,
             max_height,
@@ -409,7 +362,9 @@ pub fn take_stitched_screenshots_with_blacklist(
         if h != target_h && h > 0 {
             let scale = target_h as f64 / h as f64;
             let new_w = (w as f64 * scale).round() as u32;
-            let scaled = img.resize_exact(new_w, target_h, image::imageops::FilterType::Lanczos3);
+            // Triangle matches the single-source path — Lanczos3 here cost
+            // several times the CPU for a difference invisible at 60s/frame.
+            let scaled = img.resize_exact(new_w, target_h, image::imageops::FilterType::Triangle);
             total_w += scaled.width();
             scaled_images.push(scaled);
         } else {
@@ -419,11 +374,13 @@ pub fn take_stitched_screenshots_with_blacklist(
     }
 
     let mut stitched = image::RgbaImage::new(total_w, target_h);
-    let mut current_x = 0;
+    let mut current_x: i64 = 0;
     for img in scaled_images {
-        let rgba = img.to_rgba8();
-        image::imageops::overlay(&mut stitched, &rgba, current_x as i64, 0);
-        current_x += img.width() as i64;
+        let w = img.width() as i64;
+        // into_rgba8 is a move for RGBA8 frames — no full-frame clone.
+        let rgba = img.into_rgba8();
+        image::imageops::overlay(&mut stitched, &rgba, current_x, 0);
+        current_x += w;
     }
 
     let mut dynamic = DynamicImage::ImageRgba8(stitched);
@@ -441,7 +398,7 @@ pub fn take_stitched_screenshots_with_blacklist(
         );
         let new_w = (w as f64 * scale).round() as u32;
         let new_h = (h as f64 * scale).round() as u32;
-        dynamic = dynamic.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+        dynamic = dynamic.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle);
     }
 
     let (final_w, final_h) = (dynamic.width(), dynamic.height());
@@ -454,17 +411,10 @@ pub fn take_stitched_screenshots_with_blacklist(
         .encode_image(&rgb)
         .map_err(|e| format!("JPEG encoding failed: {e}"))?;
 
-    let jpeg_bytes = jpeg_buf.into_inner();
-    let size_bytes = jpeg_bytes.len();
-
-    use base64::Engine;
-    let base64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
-
-    Ok(CaptureResult {
-        base64,
+    Ok(RawCaptureResult {
+        data: jpeg_buf.into_inner(),
         width: final_w,
         height: final_h,
-        size_bytes,
     })
 }
 

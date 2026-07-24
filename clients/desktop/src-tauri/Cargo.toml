@@ -33,6 +33,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
+# Refcounted byte buffers for the upload pipeline — retrying an R2 PUT clones
+# the request body, and `Bytes` makes that clone a refcount bump instead of a
+# full JPEG copy. Already in the dependency tree via tokio/reqwest.
+bytes = "1"
 tauri-plugin-deep-link = "2.4.7"
 tauri-plugin-http = "2.5.7"
 tauri-plugin-macos-permissions = "2.3.0"
@@ -53,6 +57,7 @@ sentry = "0.38"
 tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-foundation = { version = "0.3.2", features = ["NSProcessInfo", "NSString"] }
