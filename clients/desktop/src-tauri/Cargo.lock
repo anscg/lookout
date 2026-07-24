@@ -3156,10 +3156,12 @@ version = "0.3.5"
 dependencies = [
  "ashpd",
  "base64 0.22.1",
+ "bytes",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-video",
  "image",
+ "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",

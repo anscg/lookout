@@ -35,10 +35,14 @@ export function SettingsPage({ onBack, isWayland }: SettingsPageProps) {
     }
   }, []);
 
-  // Fetch on mount, then refresh every 5 seconds
+  // Fetch on mount, then refresh every 5 seconds. Each refresh enumerates
+  // every window on the system, so skip ticks while the window is hidden —
+  // the list refreshes on the next visible tick anyway.
   useEffect(() => {
     fetchRunningApps();
-    refreshTimerRef.current = setInterval(fetchRunningApps, 5000);
+    refreshTimerRef.current = setInterval(() => {
+      if (!document.hidden) fetchRunningApps();
+    }, 5000);
     return () => {
       if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
     };
