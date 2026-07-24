@@ -65,7 +65,8 @@ export function useScreenPreview(
 
     let cancelled = false;
     let timerId: ReturnType<typeof setTimeout>;
-    
+    let removeVisibilityListener: (() => void) | null = null;
+
     // Convert fps to ms interval, min 16ms (60fps)
     const intervalMs = Math.max(16, Math.floor(1000 / targetFps));
 
@@ -73,10 +74,25 @@ export function useScreenPreview(
 
     const loop = async () => {
       if (cancelled) return;
-      
+
       const s = sourceRef.current;
       if (!s) return;
-      
+
+      // Each preview frame is a full native screen capture + JPEG encode.
+      // Nobody can see the result while the window is hidden/minimized, so
+      // park the loop until the document becomes visible again.
+      if (document.hidden) {
+        const onVisibility = () => {
+          document.removeEventListener("visibilitychange", onVisibility);
+          removeVisibilityListener = null;
+          if (!cancelled) loop();
+        };
+        document.addEventListener("visibilitychange", onVisibility);
+        removeVisibilityListener = () =>
+          document.removeEventListener("visibilitychange", onVisibility);
+        return;
+      }
+
       const startTime = performance.now();
       const scheduleNext = () => {
         if (cancelled) return;
@@ -137,6 +153,7 @@ export function useScreenPreview(
     return () => {
       cancelled = true;
       clearTimeout(timerId);
+      removeVisibilityListener?.();
       console.debug("[preview] stopping preview loop");
     };
   }, [sourceKey, targetFps, live]);

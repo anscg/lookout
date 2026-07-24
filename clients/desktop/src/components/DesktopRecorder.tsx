@@ -336,9 +336,11 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
 
   const screenshotCount = session.screenshotCount + capture.screenshotCount;
 
-  // Keep a ref of the latest state
-  const trayStateRef = useRef({ displaySeconds, screenshotCount, controlMode });
-  trayStateRef.current = { displaySeconds, screenshotCount, controlMode };
+  // Keep a ref of the latest state. `updatedAt` matters: the tray window
+  // extrapolates the ticking clock from it, so omitting it (as the tray-ready
+  // fallback used to) made the tray compute NaN until the next sync.
+  const trayStateRef = useRef({ displaySeconds, screenshotCount, controlMode, updatedAt: Date.now() });
+  trayStateRef.current = { displaySeconds, screenshotCount, controlMode, updatedAt: Date.now() };
 
   // Listen for tray requesting initial state (fallback)
   useEffect(() => {
@@ -377,23 +379,27 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controlMode]);
 
-  // Per-second state sync (tray window, not menu-bar title)
+  // Tray-window state sync — event-driven, NOT per-second.
+  //
+  // The tray window ticks its own clock by extrapolating from `updatedAt`,
+  // and the Rust ticker owns the menu-bar title. So the only things worth
+  // pushing over IPC are the ones the tray can't derive locally: screenshot
+  // count changes, pause/resume, and server time corrections. Syncing every
+  // second (3 IPC calls + a broadcast event) was pure overhead that also
+  // drowned the debug log in [ipc] noise.
   useEffect(() => {
-    const state = {
-      displaySeconds,
-      screenshotCount,
-      controlMode,
-      updatedAt: Date.now(),
-    };
+    const state = trayStateRef.current;
     invoke("set_tray_state", { state }).catch(console.error);
     emit("tray-state", state).catch(console.error);
+  }, [screenshotCount, controlMode, capture.trackedSeconds]);
 
-    // Sync tracked seconds to Rust tray timer so it stays accurate
-    // after server corrections or session timer updates.
+  // Sync tracked seconds to the Rust tray timer when the server corrects it
+  // (arrives with each confirmed capture, ~once a minute).
+  useEffect(() => {
     if (capture.trackedSeconds > 0) {
       invoke("sync_tray_tracked_seconds", { trackedSeconds: capture.trackedSeconds }).catch(console.error);
     }
-  }, [displaySeconds, screenshotCount, controlMode]);
+  }, [capture.trackedSeconds]);
 
   // Hide tray on unmount or session end
   useEffect(() => {

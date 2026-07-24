@@ -42,6 +42,9 @@ pub fn show_tray(time_text: String, app: AppHandle) -> Result<(), String> {
 
     let _tray = TrayIconBuilder::with_id("timelapse_tray")
         .title(&time_text)
+        // Windows doesn't render tray titles — the tooltip is the only place
+        // the recorded time is visible there.
+        .tooltip(format!("Lookout — {time_text} recorded"))
         .icon(icon)
         .icon_as_template(true)
         .on_tray_icon_event(move |tray, event| {
@@ -164,9 +167,23 @@ fn position_and_show_window(
 }
 
 #[tauri::command]
-pub fn update_tray_time(time_text: String, _is_paused: bool, app: AppHandle) -> Result<(), String> {
+pub fn update_tray_time(time_text: String, is_paused: bool, app: AppHandle) -> Result<(), String> {
+    // Show a pause glyph in the menu bar while paused. The Rust ticker skips
+    // its updates while the timer is paused, so this sticks until resume —
+    // and its first running tick force-refreshes the plain title back.
+    let title = if is_paused {
+        format!("⏸ {time_text}")
+    } else {
+        time_text.clone()
+    };
+    let tooltip = if is_paused {
+        format!("Lookout — paused at {time_text}")
+    } else {
+        format!("Lookout — {time_text} recorded")
+    };
     if let Some(tray) = app.tray_by_id("timelapse_tray") {
-        let _ = tray.set_title(Some(time_text));
+        let _ = tray.set_title(Some(title));
+        let _ = tray.set_tooltip(Some(tooltip));
     }
     Ok(())
 }
