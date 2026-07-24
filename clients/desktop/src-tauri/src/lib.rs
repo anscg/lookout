@@ -6,6 +6,56 @@ mod tray;
 #[cfg(target_os = "windows")]
 mod windows_permissions;
 
+/// Scoped App Nap / idle-system-sleep suppression (macOS).
+///
+/// The assertion must be held while a session is recording (or paused
+/// mid-session) so macOS never throttles the capture cadence or lets the
+/// machine idle-sleep out from under an active recording. It must NOT be
+/// held for the whole process lifetime — that kept the user's Mac from ever
+/// idle-sleeping just because Lookout sat open on the gallery.
+#[cfg(target_os = "macos")]
+mod power {
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    use std::sync::Mutex;
+
+    struct ActivityToken(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+    // SAFETY: the token is an opaque handle whose only use is being handed
+    // back to `NSProcessInfo::endActivity`, which is documented thread-safe.
+    unsafe impl Send for ActivityToken {}
+
+    static ACTIVITY: Mutex<Option<ActivityToken>> = Mutex::new(None);
+
+    /// Begin the recording assertion. Idempotent — a second call while one
+    /// is already held is a no-op.
+    pub fn begin_recording_assertion() {
+        let mut guard = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            return;
+        }
+        let info = NSProcessInfo::processInfo();
+        let reason = NSString::from_str("Periodic screenshot capture must not be throttled");
+        let opts =
+            NSActivityOptions::LatencyCritical | NSActivityOptions::IdleSystemSleepDisabled;
+        *guard = Some(ActivityToken(
+            info.beginActivityWithOptions_reason(opts, &reason),
+        ));
+        eprintln!("[power] recording sleep/App Nap suppression ON");
+    }
+
+    /// End the recording assertion (no-op if none is held).
+    pub fn end_recording_assertion() {
+        let mut guard = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(token) = guard.take() {
+            // SAFETY: `token.0` came from `beginActivityWithOptions_reason`,
+            // so it is the correct activity type.
+            unsafe { NSProcessInfo::processInfo().endActivity(&token.0) };
+            eprintln!("[power] recording sleep/App Nap suppression OFF");
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFNumberType, CFString, CGRect};
 #[cfg(target_os = "macos")]
@@ -818,6 +868,22 @@ fn take_screenshot(
     capture::take_screenshot(source, max_width, max_height, jpeg_quality, &pipewire_fds)
 }
 
+/// Shared HTTP client for all server/R2 traffic. Building a `reqwest::Client`
+/// allocates a fresh connection pool + TLS config, so constructing one per
+/// request (as each capture tick used to) both wastes CPU and forces a new
+/// TCP/TLS handshake every 60 seconds. One shared client keeps connections
+/// alive between ticks. Timeouts differ per call site, so they're applied
+/// per-request via `RequestBuilder::timeout` instead of on the client.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 /// Free-form client telemetry string sent on every upload-url request, e.g.
 /// "Lookout Desktop/0.2.6 (macOS 14.3)". Computed once. NOT the HTTP
 /// User-Agent — explicit info for server-side telemetry/debugging.
@@ -1036,24 +1102,26 @@ macro_rules! retry_upload_step {
 /// screenshot was actually taken. Optional — when `None`, the request
 /// matches the legacy bucket-mode payload byte-for-byte. When `Some`, it
 /// opts the session into credit-mode tracking on the first request.
+///
+/// Takes the JPEG as `bytes::Bytes` (cheap refcounted clones for retries —
+/// no full-buffer copy per attempt) plus its base64 form, which is only
+/// carried through for the JS preview. Callers that capture natively encode
+/// base64 exactly once; nothing here decodes it back.
 async fn upload_and_confirm(
-    jpeg_base64: &str,
+    jpeg_bytes: bytes::Bytes,
+    jpeg_base64: String,
     width: u32,
     height: u32,
     captured_at: Option<&str>,
     config: &SessionConfig,
     app: &AppHandle,
 ) -> Result<CaptureUploadResult, String> {
-    let jpeg_bytes = base64_decode(jpeg_base64)?;
     let size_bytes = jpeg_bytes.len();
+    const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     // Step 1: Get presigned URL from server
     let _ = app.emit("capture-progress", "getting upload url from server...");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    let client = http_client();
     let upload_url_url = format!(
         "{}/api/sessions/{}/upload-url",
         config.api_base_url, config.token
@@ -1069,6 +1137,7 @@ async fn upload_and_confirm(
         let url_response = client
             .get(upload_url_url.as_str())
             .query(&query)
+            .timeout(STEP_TIMEOUT)
             .send()
             .await
             .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?;
@@ -1108,7 +1177,9 @@ async fn upload_and_confirm(
         client
             .put(upload_url_resp.upload_url.as_str())
             .header("Content-Type", "image/jpeg")
+            // Bytes::clone is a refcount bump, not a buffer copy.
             .body(jpeg_bytes.clone())
+            .timeout(STEP_TIMEOUT)
             .send()
             .await
             .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?
@@ -1132,6 +1203,7 @@ async fn upload_and_confirm(
                 "height": height,
                 "fileSize": size_bytes,
             }))
+            .timeout(STEP_TIMEOUT)
             .send()
             .await
             .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?;
@@ -1158,7 +1230,7 @@ async fn upload_and_confirm(
         confirmed: confirm_resp.confirmed,
         tracked_seconds: confirm_resp.tracked_seconds,
         next_expected_at: confirm_resp.next_expected_at,
-        preview_base64: jpeg_base64.to_string(),
+        preview_base64: jpeg_base64,
         preview_width: width,
         preview_height: height,
     })
@@ -1383,21 +1455,27 @@ async fn capture_and_upload(
         pipewire_fds = guard.clone();
     }
 
-    let screenshot = capture::take_stitched_screenshots_with_blacklist(
-        &sources,
-        max_width,
-        max_height,
-        jpeg_quality,
-        &pipewire_fds,
-        &blacklisted,
-    )?;
+    // Screen capture + JPEG encode is heavy blocking work — keep it off the
+    // async runtime's worker threads (same as the Rust capture loop does).
+    let screenshot = tokio::task::spawn_blocking(move || {
+        capture::take_stitched_screenshots_raw_with_blacklist(
+            &sources,
+            max_width,
+            max_height,
+            jpeg_quality,
+            &pipewire_fds,
+            &blacklisted,
+        )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking panicked: {e}"))??;
     let _ = app.emit(
         "capture-progress",
         format!(
             "captured {}x{} ({}KB jpeg)",
             screenshot.width,
             screenshot.height,
-            screenshot.size_bytes / 1024
+            screenshot.data.len() / 1024
         ),
     );
 
@@ -1406,8 +1484,10 @@ async fn capture_and_upload(
     } else {
         None
     };
+    let jpeg_base64 = base64_encode(&screenshot.data);
     upload_and_confirm(
-        &screenshot.base64,
+        bytes::Bytes::from(screenshot.data),
+        jpeg_base64,
         screenshot.width,
         screenshot.height,
         captured_at.as_deref(),
@@ -1444,7 +1524,9 @@ async fn upload_frame(
     } else {
         None
     };
-    upload_and_confirm(&base64, width, height, captured_at.as_deref(), &config, &app).await
+    let jpeg_bytes = bytes::Bytes::from(base64_decode(&base64)?);
+    upload_and_confirm(jpeg_bytes, base64, width, height, captured_at.as_deref(), &config, &app)
+        .await
 }
 
 // ── Capture-loop interval (seconds) ─────────────────────────────
@@ -1480,6 +1562,14 @@ async fn tray_timer_task(
     let mut ticker = interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    // The title only changes at minute granularity, so most 1s ticks would
+    // rewrite the exact same string. Cache the last text and skip redundant
+    // native tray updates. After a paused stretch the JS side may have
+    // overwritten the title (paused indicator), so force one refresh on the
+    // first running tick after a pause even if the text matches.
+    let mut last_title: Option<String> = None;
+    let mut was_paused = false;
+
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
@@ -1490,6 +1580,7 @@ async fn tray_timer_task(
         }
 
         if !timer_state.is_running.load(Ordering::Relaxed) {
+            was_paused = true;
             continue;
         }
 
@@ -1501,12 +1592,16 @@ async fn tray_timer_task(
         let display_seconds = base_seconds + elapsed;
 
         let time_text = format_tray_time(display_seconds);
-        if let Some(tray) = app.tray_by_id("timelapse_tray") {
-            let _ = tray.set_title(Some(time_text));
+        if was_paused || last_title.as_deref() != Some(time_text.as_str()) {
+            if let Some(tray) = app.tray_by_id("timelapse_tray") {
+                let _ = tray.set_title(Some(&time_text));
+                // Windows doesn't render tray titles — the hover tooltip is
+                // the only way to see the recorded time there.
+                let _ = tray.set_tooltip(Some(format!("Lookout — {time_text} recorded")));
+            }
+            last_title = Some(time_text);
         }
-
-        // Also emit to the tray popup window so it stays in sync
-        let _ = app.emit("tray-timer-tick", display_seconds);
+        was_paused = false;
     }
 }
 
@@ -1519,6 +1614,12 @@ fn start_tray_timer(app: &AppHandle, state: &AppState) -> Arc<TrayTimerState> {
     if let Some(ref handle) = *guard {
         return Arc::clone(&handle.state);
     }
+
+    // The tray timer lives exactly as long as a session is being recorded
+    // (screen sessions via start_capture_loop, camera via start_tray_ticker),
+    // so it's the right scope for the keep-awake assertion.
+    #[cfg(target_os = "macos")]
+    power::begin_recording_assertion();
 
     let timer_state = Arc::new(TrayTimerState {
         tracked_seconds: AtomicI64::new(0),
@@ -1553,6 +1654,10 @@ fn stop_tray_timer(state: &AppState) {
         eprintln!("[tray-timer] stopping");
         let _ = handle.cancel_tx.send(true);
         handle.join_handle.abort();
+
+        // Recording is over — let macOS nap/idle-sleep normally again.
+        #[cfg(target_os = "macos")]
+        power::end_recording_assertion();
     }
 }
 
@@ -1668,12 +1773,10 @@ async fn capture_loop_task(
         app: &AppHandle,
         config: &SessionConfig,
     ) -> Result<bool /* should_continue */, ()> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
+        let client = http_client();
+        let status_timeout = std::time::Duration::from_secs(15);
         let url = format!("{}/api/sessions/{}/status", config.api_base_url, config.token);
-        match client.get(&url).send().await {
+        match client.get(&url).timeout(status_timeout).send().await {
             Ok(res) if res.status().is_success() => {
                 if let Ok(data) = res.json::<SessionStatusResponse>().await {
                     eprintln!("[capture-loop] session status after sleep: {}", data.status);
@@ -1685,7 +1788,7 @@ async fn capture_loop_task(
                             "{}/api/sessions/{}/resume",
                             config.api_base_url, config.token
                         );
-                        let _ = client.post(&resume_url).send().await;
+                        let _ = client.post(&resume_url).timeout(status_timeout).send().await;
                         eprintln!("[capture-loop] session resumed after sleep");
                     } else if data.status != "active" && data.status != "pending" {
                         eprintln!(
@@ -1777,7 +1880,7 @@ async fn capture_loop_task(
         let bl = blacklisted;
         let pw_fds = pipewire_fds;
         let screenshot_result = tokio::task::spawn_blocking(move || {
-            capture::take_stitched_screenshots_with_blacklist(
+            capture::take_stitched_screenshots_raw_with_blacklist(
                 &sources_clone,
                 max_width,
                 max_height,
@@ -1800,8 +1903,10 @@ async fn capture_loop_task(
 
         match screenshot_result {
             Ok(screenshot) => {
+                let jpeg_base64 = base64_encode(&screenshot.data);
                 match upload_and_confirm(
-                    &screenshot.base64,
+                    bytes::Bytes::from(screenshot.data),
+                    jpeg_base64,
                     screenshot.width,
                     screenshot.height,
                     captured_at.as_deref(),
@@ -2079,6 +2184,11 @@ fn base64_decode(b64: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("Base64 decode failed: {e}"))
 }
 
+fn base64_encode(data: &[u8]) -> String {
+    use base64_engine::*;
+    ENGINE.encode(data)
+}
+
 mod base64_engine {
     pub use base64::engine::general_purpose::STANDARD as ENGINE;
     pub use base64::Engine;
@@ -2270,23 +2380,9 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
-                // Disable App Nap so macOS doesn't throttle WebView timers when
-                // the window is occluded or Low Power Mode is on.  The capture
-                // loop runs entirely in JS, so throttled timers = missed screenshots.
-                // The returned activity token is intentionally leaked (never ended)
-                // so the assertion lasts for the lifetime of the process.
-                {
-                    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-                    let info = NSProcessInfo::processInfo();
-                    let reason = NSString::from_str("Periodic screenshot capture must not be throttled");
-                    let opts = NSActivityOptions::LatencyCritical
-                        | NSActivityOptions::IdleSystemSleepDisabled;
-                    let _activity = info.beginActivityWithOptions_reason(opts, &reason);
-                    // Leak the token so the activity assertion persists.
-                    std::mem::forget(_activity);
-                    eprintln!("[power] App Nap suppression enabled");
-                }
-
+                // NOTE: App Nap / idle-sleep suppression is scoped to active
+                // recordings — see the `power` module. It is deliberately NOT
+                // asserted here for the whole process lifetime.
                 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
                 let app_menu = Submenu::with_items(
@@ -2479,15 +2575,17 @@ pub fn run() {
                         eprintln!("[exit] pausing session before exit");
                         let app_handle = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let client = reqwest::Client::builder()
-                                .timeout(std::time::Duration::from_secs(5))
-                                .build()
-                                .unwrap_or_default();
+                            let client = http_client();
                             let url = format!(
                                 "{}/api/sessions/{}/pause",
                                 config.api_base_url, config.token
                             );
-                            match client.post(&url).send().await {
+                            match client
+                                .post(&url)
+                                .timeout(std::time::Duration::from_secs(5))
+                                .send()
+                                .await
+                            {
                                 Ok(res) => eprintln!("[exit] pause response: {}", res.status()),
                                 Err(e) => eprintln!("[exit] pause failed (best-effort): {e}"),
                             }
