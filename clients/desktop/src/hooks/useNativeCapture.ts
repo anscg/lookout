@@ -71,6 +71,10 @@ export function useNativeCapture(
   // check if the user intentionally stopped (avoids auto-resume race).
   const capturingRef = useRef(false);
 
+  // Latest tracked seconds, for seeding a freshly started Rust tray timer.
+  const trackedSecondsRef = useRef(0);
+  trackedSecondsRef.current = trackedSeconds;
+
   // Track blob URL for cleanup
   const blobUrlRef = useRef<string | null>(null);
 
@@ -253,6 +257,13 @@ export function useNativeCapture(
       maxWidth: MAX_WIDTH,
       maxHeight: MAX_HEIGHT,
       jpegQuality: Math.round(JPEG_QUALITY * 100),
+    }).then(() => {
+      // A freshly started Rust tray timer counts from 0 — seed it with the
+      // last known tracked seconds so the menu-bar time doesn't reset while
+      // waiting for the first confirm (visible on pause → resume).
+      if (trackedSecondsRef.current > 0) {
+        invoke("sync_tray_tracked_seconds", { trackedSeconds: trackedSecondsRef.current }).catch(console.error);
+      }
     }).catch((err) => {
       console.error("[capture] failed to start Rust capture loop:", err);
       setError(String(err));
