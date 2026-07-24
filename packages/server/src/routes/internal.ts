@@ -123,6 +123,19 @@ export async function internalRoutes(app: FastifyInstance) {
         )
         .orderBy(sql`${schema.screenshots.requestedAt} ASC`)
         .limit(1);
+      // First recorded JA4 TLS fingerprint (edge-observed, resolved
+      // independently of clientInfo). NULL when the edge never set it.
+      const [firstJa4] = await db
+        .select({ ja4: schema.screenshots.ja4 })
+        .from(schema.screenshots)
+        .where(
+          and(
+            eq(schema.screenshots.sessionId, sessionId),
+            isNotNull(schema.screenshots.ja4),
+          ),
+        )
+        .orderBy(sql`${schema.screenshots.requestedAt} ASC`)
+        .limit(1);
       return {
         session: {
           ...sessionData,
@@ -136,6 +149,7 @@ export async function internalRoutes(app: FastifyInstance) {
         trackedSeconds,
         screenshotCount: Number(confirmedCount),
         clientInfo: firstClient?.clientInfo ?? null,
+        ja4: firstJa4?.ja4 ?? null,
       };
     },
   );
