@@ -62,6 +62,16 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
 
   const programLabel = (p: Program) => p.displayName || p.name;
 
+  // If the deep link never comes back (user closed the browser tab, changed
+  // their mind, the program errored), the buttons used to stay disabled with
+  // a spinner forever. Re-enable them after a grace period so retrying
+  // doesn't require leaving and re-entering the page.
+  useEffect(() => {
+    if (!launched) return;
+    const id = setTimeout(() => setLaunched(null), 15_000);
+    return () => clearTimeout(id);
+  }, [launched]);
+
   const handleOpenProgram = async (program: Program) => {
     setError(null);
     setLaunched(programLabel(program));
