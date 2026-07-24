@@ -50,6 +50,33 @@ function sourcesEqual(a: CaptureSource | null, b: CaptureSource | null): boolean
   return a.type === b.type && a.id === b.id;
 }
 
+// Most people record the same screen(s) every session — remember the last
+// monitor selection so it's preselected next time. Only monitors: window ids
+// aren't stable across app launches, and cameras load asynchronously.
+const LAST_MONITORS_KEY = "lookout-last-monitor-selection";
+
+function loadLastMonitorIds(): number[] {
+  try {
+    const raw = localStorage.getItem(LAST_MONITORS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every((id) => typeof id === "number")) {
+        return parsed;
+      }
+    }
+  } catch { /* corrupted entry — fall back to the primary-monitor default */ }
+  return [];
+}
+
+function saveLastMonitorSelection(sources: CaptureSource[]) {
+  const ids = sources.filter((s) => s.type === "monitor").map((s) => s.id);
+  try {
+    if (ids.length > 0) {
+      localStorage.setItem(LAST_MONITORS_KEY, JSON.stringify(ids));
+    }
+  } catch { /* storage unavailable — non-fatal */ }
+}
+
 type TabId = "screens" | "windows" | "cameras" | "cast";
 
 function PreviewImage({
@@ -248,12 +275,20 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
       // Wait for render then check scroll
       setTimeout(handleScroll, 10);
 
-      // Auto-select primary monitor if nothing selected yet
+      // Auto-select if nothing selected yet: prefer the monitors used last
+      // session (when every one of them is still connected), else the primary.
       if (selected.length === 0 && !wayland) {
-        const primary = result.monitors.find((m) => m.isPrimary) ?? result.monitors[0];
-        if (primary) {
-          console.log(`[sources] auto-selected: monitor id=${primary.id} (${primary.name})`);
-          setSelected([{ type: "monitor", id: primary.id }]);
+        const lastIds = loadLastMonitorIds();
+        const remembered = lastIds.filter((id) => result.monitors.some((m) => m.id === id));
+        if (lastIds.length > 0 && remembered.length === lastIds.length) {
+          console.log(`[sources] auto-selected remembered monitors: ${remembered.join(", ")}`);
+          setSelected(remembered.map((id) => ({ type: "monitor" as const, id })));
+        } else {
+          const primary = result.monitors.find((m) => m.isPrimary) ?? result.monitors[0];
+          if (primary) {
+            console.log(`[sources] auto-selected: monitor id=${primary.id} (${primary.name})`);
+            setSelected([{ type: "monitor", id: primary.id }]);
+          }
         }
       }
     } catch (err) {
@@ -801,7 +836,16 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
       {/* Start button */}
       <div style={{ flexShrink: 0 }}>
         {selected.length > 0 && (
-          <Button variant="primary" size="lg" fullWidth onClick={() => onSelect(selected)} style={{ marginTop: spacing.lg }}>
+          <Button
+            variant="primary"
+            size="lg"
+            fullWidth
+            onClick={() => {
+              saveLastMonitorSelection(selected);
+              onSelect(selected);
+            }}
+            style={{ marginTop: spacing.lg }}
+          >
             {submitLabel}
           </Button>
         )}
