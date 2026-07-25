@@ -322,7 +322,9 @@ export async function compileTimelapse(sessionId: string): Promise<{
           "-i", concatListPath,
           "-c:v", "libx264",
           "-preset", "fast",
-          "-crf", "28",
+          // Match the segment encoder's visually-lossless setting — this
+          // fallback must not be a quality downgrade either.
+          "-crf", "18",
           "-pix_fmt", "yuv420p",
           "-r", String(SEGMENT_FPS),
           "-movflags", "+faststart",

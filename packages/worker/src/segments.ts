@@ -42,7 +42,13 @@ export const SEGMENT_ENCODE_ARGS = [
   "-profile:v", "high",
   "-level:v", "4.0",
   "-preset", "fast",
-  "-crf", "28",
+  // CRF 18 = visually lossless: the compile step must not be a quality
+  // event — the clip bitrate is the only intended quality dial. (The
+  // legacy pipeline used CRF 28, which added a visible second generation
+  // of loss on top of already-compressed clips.) Costs ~2.5-3x the
+  // output size of CRF 28; timelapses are short, so absolute sizes stay
+  // modest.
+  "-crf", "18",
   "-pix_fmt", "yuv420p",
   "-g", String(SEGMENT_FPS),
   "-keyint_min", String(SEGMENT_FPS),
