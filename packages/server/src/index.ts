@@ -27,9 +27,20 @@ const app = Fastify({ logger: true });
 
 const IS_DEV = process.env.NODE_ENV !== "production";
 
+// Self-hosted deployments serve the admin panel from BASE_URL, so the
+// server's own public hostname must pass CORS alongside *.hackclub.com.
+const BASE_URL_HOSTNAME = (() => {
+  try {
+    return process.env.BASE_URL ? new URL(process.env.BASE_URL).hostname : null;
+  } catch {
+    return null;
+  }
+})();
+
 await app.register(cors, {
   origin: (origin, cb) => {
-    // Allow: no origin (server-to-server), *.hackclub.com, tauri app
+    // Allow: no origin (server-to-server), *.hackclub.com, BASE_URL's own
+    // host (self-hosted deployments), tauri app
     // Tauri uses tauri:// on macOS/Linux but http://tauri.localhost on Windows
     if (
       !origin ||
@@ -44,6 +55,7 @@ await app.register(cors, {
       const isAllowed =
         /\.hackclub\.com$/.test(hostname) ||
         hostname === "hackclub.com" ||
+        (BASE_URL_HOSTNAME !== null && hostname === BASE_URL_HOSTNAME) ||
         // Only allow localhost origins in development
         (IS_DEV && /^https?:\/\/localhost(:\d+)?$/.test(origin));
 
