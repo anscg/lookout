@@ -30,6 +30,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 xcap = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# SIMD resizing (SSE4/AVX2/NEON) for the capture downscale — ~4x faster than
+# the `image` crate's scalar filters at screen sizes (29ms → 7ms, 5K→1080p).
+fast_image_resize = "5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
@@ -62,12 +65,20 @@ objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-foundation = { version = "0.3.2", features = ["NSProcessInfo", "NSString", "NSArray", "NSData", "NSDictionary", "NSEnumerator", "NSBundle", "NSURL"] }
 objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "objc2-core-graphics"] }
+# Clip encoding: hardware H.264 via AVAssetWriter (VideoToolbox under the
+# hood) writing MP4 directly. All already in the tree transitively via xcap.
+objc2-av-foundation = { version = "0.3.2", features = ["AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = { version = "0.3.2", features = ["CMTime"] }
+objc2-core-video = { version = "0.3.2", features = ["CVPixelBuffer", "CVBuffer", "CVReturn", "CVImageBuffer"] }
+block2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com = "0.38"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # Clip encoding: hardware H.264 via the Media Foundation sink writer.
+    "Win32_Media_MediaFoundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_UI_Shell",

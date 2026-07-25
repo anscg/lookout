@@ -21,6 +21,7 @@ import { NamingModal } from "./NamingModal.js";
 import { useNativeCapture } from "../hooks/useNativeCapture.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
+import { useWindowFocus } from "../hooks/useWindowFocus.js";
 import { useCameraCapture, waitForVideoReady } from "../hooks/useCameraCapture.js";
 import { useSessionNotifications } from "../hooks/useSessionNotifications.js";
 
@@ -37,22 +38,24 @@ import { getApiBase } from "../serverConfig.js";
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
 
-function RecorderPreviewItem({ 
-  src, 
-  isMain, 
-  captureUrl, 
-  isMulti 
-}: { 
-  src: CaptureSource; 
-  isMain: boolean; 
-  captureUrl: string | null; 
+function RecorderPreviewItem({
+  src,
+  captureUrl,
+  isMulti,
+  live,
+}: {
+  src: CaptureSource;
+  /** Latest uploaded capture, shown when the live loop is parked. */
+  captureUrl: string | null;
   isMulti: boolean;
+  /** Poll the native live preview. When false, useScreenPreview fetches at
+   *  most one frame and parks — the tile freezes (or shows captureUrl)
+   *  instead of burning a native capture per second off-focus. */
+  live: boolean;
 }) {
-  const { previewUrl: livePreviewUrl } = useScreenPreview(
-    isMain && captureUrl ? null : src,
-    1
-  );
-  const previewUrl = (isMain ? captureUrl : null) || livePreviewUrl;
+  const { previewUrl: livePreviewUrl } = useScreenPreview(src, 1, live);
+  const showingLive = live && !!livePreviewUrl;
+  const previewUrl = showingLive ? livePreviewUrl : captureUrl ?? livePreviewUrl;
 
   if (!previewUrl) {
     return (
@@ -78,13 +81,13 @@ function RecorderPreviewItem({
         alt="Screen preview"
         style={{ width: "100%", height: "100%", objectFit: isMulti ? "cover" : "contain", display: "block" }}
       />
-      {isMain && (
+      {!isMulti && (
         <span style={{
           position: "absolute", bottom: 6, right: 6, fontSize: fontSize.xs,
           color: colors.badge.overlayText, background: colors.badge.overlayBg,
           padding: "2px 6px", borderRadius: radii.sm,
         }}>
-          {captureUrl ? "Latest capture" : "Live preview"}
+          {showingLive ? "Live preview" : captureUrl ? "Latest capture" : "Live preview"}
         </span>
       )}
     </div>
@@ -103,6 +106,7 @@ function formatTimeTray(totalSeconds: number): string {
 export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource, onBack, onViewSession }: DesktopRecorderProps) {
   const isMacOS = navigator.userAgent.includes("Mac");
   const isCamera = source.length === 1 && source[0].type === "camera";
+  const windowFocused = useWindowFocus();
   const session = useSession();
   const camera = useCameraCapture();
 
@@ -515,7 +519,11 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
         </span>
       </div>
 
-      {/* Preview — fills available space */}
+      {/* Preview — fills available space. Once the Rust capture loop is
+          running it feeds this image directly: in-between frames arrive at
+          the clip cadence (20/min) while the window is focused, and stop
+          when it isn't — so the same element is a live preview when watched
+          and the latest capture when not. No separate preview loop. */}
       <div style={{
         flex: 1,
         minHeight: 0,
@@ -550,7 +558,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
               color: colors.badge.overlayText, background: colors.badge.overlayBg,
               padding: "2px 6px", borderRadius: radii.sm,
             }}>
-              Latest capture
+              {windowFocused && !isCamera ? "Live preview" : "Latest capture"}
             </span>
           </div>
         ) : (
@@ -558,9 +566,9 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
             <RecorderPreviewItem
               key={`${src.type}:${src.id}`}
               src={src}
-              isMain={false}
               captureUrl={null}
               isMulti={source.length > 1}
+              live={windowFocused && !isCamera}
             />
           ))
         )}

@@ -168,6 +168,30 @@ jobs:
         run: cargo test --lib
 
   # ──────────────────────────────────────────────────────────────────
+  # Windows type-check: the Media Foundation clip encoder is Windows-only
+  # cfg code that no other job compiles. A check (not full test run)
+  # catches API drift in the `windows` crate bindings.
+  # ──────────────────────────────────────────────────────────────────
+  desktop-rust-windows:
+    name: Desktop Rust check (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: "./clients/desktop/src-tauri -> target"
+          shared-key: rust-windows-check
+
+      - name: cargo check
+        working-directory: clients/desktop/src-tauri
+        run: cargo check
+
+  # ──────────────────────────────────────────────────────────────────
   # Type-check the rest of the workspace (React/web clients). Catches
   # regressions in the shared types or the credit-mode client wiring.
   # ──────────────────────────────────────────────────────────────────
