@@ -61,7 +61,7 @@ export interface CreateSessionRequest {
   name?: string;
   metadata?: Record<string, unknown>;
   /** Allow this session to receive clip uploads (per-minute videos of
-   *  ~20 frames) instead of one JPEG per minute. Default false.
+   *  ~15 frames) instead of one JPEG per minute. Default false.
    *  Immutable after creation. */
   clips?: boolean;
 }

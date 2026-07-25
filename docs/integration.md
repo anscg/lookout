@@ -62,14 +62,14 @@ Response:
 - `sessionId` — the server-side ID.
 - `sessionUrl` — a convenience URL you can redirect the user to.
 - `metadata` — any JSON you want to associate with the session (user info, project, etc.)
-- `clips` — opt this session into [clips](#clips-20-frames-per-minute) (~20 frames/min video capture instead of 1 JPEG/min → 20× smoother timelapses). Default `false`; immutable after creation.
+- `clips` — opt this session into [clips](#clips-15-frames-per-minute) (~15 frames/min video capture instead of 1 JPEG/min → 15× smoother timelapses). Default `false`; immutable after creation.
 
-### Clips (20 frames per minute)
+### Clips (15 frames per minute)
 
 Sessions created with `"clips": true` record **clips**: instead of one JPEG per
 minute, the recording client uploads one ~60s video file per minute containing
-~20 frames captured 3s apart. The compiled timelapse has the same length but is
-20× smoother, with motion from the very first second.
+~15 frames captured 4s apart. The compiled timelapse has the same length but is
+15× smoother, with motion from the very first second.
 
 What this means for your program:
 
