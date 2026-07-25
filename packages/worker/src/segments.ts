@@ -5,7 +5,6 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 const execFileAsync = promisify(execFile);
@@ -84,10 +83,12 @@ async function verifySegmentFrameCount(filePath: string): Promise<void> {
  *
  * - jpeg unit: the still is held for the full second — identical to the
  *   legacy one-frame-per-minute output.
- * - webm/mp4 clip: demuxed to frames first so the REAL frame count drives
- *   timing (clips are VFR — static screens legitimately emit few frames;
- *   the client's claimed frameCount is never trusted), then the N frames
- *   are spread evenly across the second.
+ * - webm/mp4 clip: transcoded in ONE ffmpeg pass — decode, retime the
+ *   REAL frame count evenly across the second (clips are VFR; the
+ *   client's claimed frameCount is never trusted, ffprobe counts), scale,
+ *   encode. No intermediate JPEG round-trip: that cost an extra encode+
+ *   decode generation (visible softness on top of the clip's own
+ *   compression) and an extra process per unit.
  *
  * Returns the segment path; throws if the unit is undecodable.
  */
@@ -102,53 +103,47 @@ export async function buildSegment(
     `segment_${String(index).padStart(5, "0")}.ts`,
   );
 
-  // Resolve the unit to an image-sequence input: pattern + frame count.
-  let inputPattern = unitPath;
-  let frameCount = 1;
-  if (format !== "jpeg") {
-    const framesDir = path.join(tmpDir, `unit_${index}`);
-    await fs.mkdir(framesDir, { recursive: true });
+  if (format === "jpeg") {
+    // -framerate 1 over one still = exactly one second of input; fps
+    // duplicates it onto the 30fps grid, -frames:v hard-caps the length.
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-framerate", "1",
+        "-i", unitPath,
+        "-vf", `${SCALE_FILTER},fps=${SEGMENT_FPS}`,
+        "-frames:v", String(SEGMENT_FPS),
+        ...SEGMENT_ENCODE_ARGS,
+        "-f", "mpegts",
+        "-y",
+        segmentPath,
+      ],
+      { timeout: SEGMENT_TIMEOUT_MS },
+    );
+  } else {
+    const frames = await probeFrameCount(unitPath);
+    if (!Number.isFinite(frames) || frames < 1) {
+      throw new Error("clip contained no decodable frames");
+    }
+    // setpts spreads the N decoded frames evenly across [0, 1s); fps
+    // resamples onto the 30fps grid; tpad clone-extends the last frame so
+    // PTS rounding can never come up a frame short; -frames:v caps at
+    // exactly one segment.
     await execFileAsync(
       "ffmpeg",
       [
         "-i", unitPath,
-        // Passthrough timing: dump each encoded frame once, no
-        // duplication to a target rate.
-        "-vsync", "0",
-        "-q:v", "2",
+        "-vf",
+        `setpts=N/(${frames}*TB),${SCALE_FILTER},fps=${SEGMENT_FPS},tpad=stop_mode=clone:stop=-1`,
+        "-frames:v", String(SEGMENT_FPS),
+        ...SEGMENT_ENCODE_ARGS,
+        "-f", "mpegts",
         "-y",
-        path.join(framesDir, "f_%04d.jpg"),
+        segmentPath,
       ],
       { timeout: SEGMENT_TIMEOUT_MS },
     );
-    const files = (await fs.readdir(framesDir))
-      .filter((f) => f.endsWith(".jpg"))
-      .sort();
-    if (files.length === 0) {
-      throw new Error("clip contained no decodable frames");
-    }
-    inputPattern = path.join(framesDir, "f_%04d.jpg");
-    frameCount = files.length;
   }
-
-  // -framerate N over N frames = exactly one second of input; the fps
-  // filter resamples that second onto the 30fps output grid (duplicating
-  // for sparse clips and stills, dropping if a clip somehow over-delivers),
-  // and -frames:v hard-caps the segment length.
-  await execFileAsync(
-    "ffmpeg",
-    [
-      "-framerate", String(frameCount),
-      "-i", inputPattern,
-      "-vf", `${SCALE_FILTER},fps=${SEGMENT_FPS}`,
-      "-frames:v", String(SEGMENT_FPS),
-      ...SEGMENT_ENCODE_ARGS,
-      "-f", "mpegts",
-      "-y",
-      segmentPath,
-    ],
-    { timeout: SEGMENT_TIMEOUT_MS },
-  );
 
   await verifySegmentFrameCount(segmentPath);
   return segmentPath;

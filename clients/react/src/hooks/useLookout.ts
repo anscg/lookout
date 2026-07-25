@@ -132,6 +132,10 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
             maxWidth: config.capture.maxWidth,
             maxHeight: config.capture.maxHeight,
             jpegQuality: config.capture.jpegQuality,
+            // Denser cadence for the short opening clip (cut at
+            // 2×frameIntervalMs) so the timelapse's first second is as
+            // smooth as the rest.
+            openingFrameIntervalMs: Math.max(500, Math.round(frameIntervalMs / 3)),
           });
           clipRecorder.start();
         } catch (err) {

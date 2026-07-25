@@ -81,9 +81,9 @@ What this means for your program:
   (≥0.4) detect the flag on the session and record clips; older clients and
   the desktop app keep uploading JPEGs to the same session, which stays fully
   valid (formats can even mix within one session).
-- **Network:** a clip is capped at 2 MB/min (encoder capped ~133 kbps ≈ 1
-  MB/min worst case); measured editor-like screens run ~30–50 KB/min — often
-  *smaller* than the single JPEG.
+- **Network:** a clip is capped at 4 MB/min (encoder capped ~400 kbps ≈ 3
+  MB/min worst case); static screen content lands far below that since the
+  encoders undershoot easy content.
 - **Frame quality trade-off:** mid-clip frames are bitrate-capped and softer
   than a q0.85 JPEG on very busy screens; each clip starts with a crisp
   keyframe. For review purposes you get 20× more moments per minute.

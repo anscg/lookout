@@ -55,6 +55,12 @@ export interface ClipRecorderOptions {
   maxWidth?: number;
   maxHeight?: number;
   jpegQuality?: number;
+  /** Faster cadence for the FIRST clip only. The opening clip is cut
+   *  after ~2 frame intervals (fast session activation), so at the normal
+   *  cadence it would hold just 2 frames — one near-still second at the
+   *  head of every timelapse. A denser opening cadence fixes that; after
+   *  the first cut the recorder reverts to `frameIntervalMs`. */
+  openingFrameIntervalMs?: number;
 }
 
 /**
@@ -74,6 +80,7 @@ export interface ClipRecorderOptions {
 export class ClipRecorder {
   private video: HTMLVideoElement;
   private frameIntervalMs: number;
+  private openingFrameIntervalMs: number | null;
   private canvas: HTMLCanvasElement | null = null;
   private stream: MediaStream | null = null;
   private recorder: MediaRecorder | null = null;
@@ -81,7 +88,9 @@ export class ClipRecorder {
   private frameCount = 0;
   private frameTimer: ReturnType<typeof setInterval> | null = null;
   private mime: MimeCandidate;
-  private opts: Required<ClipRecorderOptions>;
+  // Opening cadence lives in its own field (cleared after the first cut),
+  // so it's excluded from the always-resolved options.
+  private opts: Required<Omit<ClipRecorderOptions, "openingFrameIntervalMs">>;
 
   static isSupported(): boolean {
     return (
@@ -100,6 +109,7 @@ export class ClipRecorder {
     if (!mime) throw new Error("Clip recording not supported in this browser");
     this.video = video;
     this.frameIntervalMs = frameIntervalMs;
+    this.openingFrameIntervalMs = opts?.openingFrameIntervalMs ?? null;
     this.mime = mime;
     this.opts = {
       maxWidth: opts?.maxWidth ?? MAX_WIDTH,
@@ -156,7 +166,8 @@ export class ClipRecorder {
     recorder.start();
 
     this.drawFrame();
-    this.frameTimer = setInterval(() => this.drawFrame(), this.frameIntervalMs);
+    const cadence = this.openingFrameIntervalMs ?? this.frameIntervalMs;
+    this.frameTimer = setInterval(() => this.drawFrame(), cadence);
   }
 
   private streamHasRequestFrame(stream: MediaStream): boolean {
@@ -233,7 +244,9 @@ export class ClipRecorder {
       setTimeout(() => resolve(null), 5_000);
     });
 
-    // Tear down and restart for the next minute.
+    // Tear down and restart for the next minute. The opening cadence only
+    // ever applies to the first clip — every later interval is full-length.
+    this.openingFrameIntervalMs = null;
     this.teardown();
     try {
       this.start();

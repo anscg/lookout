@@ -134,7 +134,7 @@ A clip is still **one capture unit** — one `upload-url` request, one R2 PUT, o
 - **Capability discovery before the first upload.** `GET /api/sessions/:token` returns `clipsEnabled` and `frameIntervalMs`. A clip-capable client checks these on its session-recovery fetch and, when enabled, records clips from the very first upload — timelapses start with motion, not a still frame.
 - **Granted format is law.** The client requests a format with `?format=webm|mp4`; the response's `format` is what the server *granted* (clip requests on non-clips sessions silently downgrade to `jpeg`). The presigned URL is signed with the granted format's content type, so uploading anything else fails the signature. Confirm re-validates the stored object's content type against the granted format.
 - **Server-authoritative cadence.** `frameIntervalMs` (default 3000 = 20 frames/min) is dictated by the server; clients capture at exactly that rate and expose no override. Clips are VFR — a static screen legitimately produces fewer encoded frames, and the compiler derives real counts by demuxing (the confirm body's `frameCount` is telemetry only).
-- **Size cap:** clips are validated at ≤ 2 MB via HeadObject (clients cap their encoder at ~133 kbps ≈ 1 MB/min worst case; typical editor-like screens measure ~30–50 KB/min).
+- **Size cap:** clips are validated at ≤ 4 MB via HeadObject (clients cap their encoder at ~400 kbps ≈ 3 MB/min worst case; static screen content lands far below since VBR undershoots easy content).
 - **Mixed sessions are legal.** A clip client that hits an encoder hiccup falls back to a JPEG for that minute; the compiler handles formats per capture unit.
 
 Sessions without the flag — and every pre-clips client — behave exactly as before.
@@ -332,7 +332,7 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 `trackedSeconds` here is the **server's authoritative count after this capture has been credited (or not)**. Use this value to drive your timer display — see the [Tracking Modes](#tracking-modes) section for client display guidance. `nextExpectedAt` is the target for the next capture's `capturedAt`.
 
 **Errors:**
-- `400` — Content type doesn't match the granted format (`image/jpeg` / `video/webm` / `video/mp4`), file too large (max 2 MB), or object not found in R2
+- `400` — Content type doesn't match the granted format (`image/jpeg` / `video/webm` / `video/mp4`), file too large (2 MB for JPEG, 4 MB for clips), or object not found in R2
 - `404` — Session or screenshot not found
 - `409` — Session not in `pending` or `active` state
 - `429` — Rate limit exceeded, or max confirmed screenshots reached (720)

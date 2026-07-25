@@ -199,28 +199,37 @@ export async function compileTimelapse(sessionId: string): Promise<{
         .where(eq(schema.screenshots.id, id));
     }
 
-    // Step 2: Download sampled capture units from R2 (worker pool).
-    // A unit is either a legacy single JPEG or a per-minute clip
-    // (webm/mp4 holding ~20 frames captured seconds apart).
+    // Steps 2+3, pipelined: one worker pool downloads each unit and
+    // immediately builds its 1-second normalized segment — no barrier
+    // between the stages, so early units encode while later units are
+    // still downloading. Every unit — legacy JPEG or clip — becomes
+    // exactly one second of 30fps output with identical pinned encoder
+    // parameters, so the final timelapse is a stream-copy concatenation
+    // instead of one giant whole-session encode. Wall clock scales with
+    // units/SEGMENT_CONCURRENCY, and a corrupt unit is caught and skipped
+    // per-minute rather than poisoning the full encode.
     const total = sampledScreenshots.rows.length;
-    const DOWNLOAD_CONCURRENCY = 10;
-    const downloaded: boolean[] = new Array(total).fill(false);
     const unitExt = (format: string) => (format === "jpeg" ? "jpg" : format);
+    const segmentPaths: (string | null)[] = new Array(total).fill(null);
+    let downloadFailures = 0;
+    let buildFailures = 0;
     {
       let next = 0;
       const worker = async () => {
         while (next < total) {
           const i = next++;
           const ss = sampledScreenshots.rows[i];
-          const filePath = path.join(tmpDir, `dl_${i}.${unitExt(ss.format)}`);
+          const unitPath = path.join(tmpDir, `dl_${i}.${unitExt(ss.format)}`);
+
+          let downloadedUnit = false;
           for (let attempt = 0; attempt < 3; attempt++) {
             try {
               const response = await r2Client.send(
                 new GetObjectCommand({ Bucket: R2_BUCKET, Key: ss.r2_key }),
               );
               const body = await response.Body!.transformToByteArray();
-              await fs.writeFile(filePath, body);
-              downloaded[i] = true;
+              await fs.writeFile(unitPath, body);
+              downloadedUnit = true;
               break;
             } catch {
               if (attempt === 2) {
@@ -230,42 +239,15 @@ export async function compileTimelapse(sessionId: string): Promise<{
               }
             }
           }
-        }
-      };
-      await Promise.all(
-        Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, total) }, worker),
-      );
-    }
+          if (!downloadedUnit) {
+            downloadFailures++;
+            continue;
+          }
 
-    const failed = downloaded.filter((d) => !d).length;
-    if (failed > 5) {
-      throw new Error(
-        `Too many failed unit downloads: ${failed}/${total} failed`,
-      );
-    }
-    if (failed > 0) {
-      console.warn(`${failed}/${total} units failed to download, continuing`);
-    }
-
-    // Step 3: Build one normalized 1-second segment per unit, in parallel.
-    // Every unit — legacy JPEG or clip — becomes exactly one second of
-    // 30fps output with identical pinned encoder parameters, so the final
-    // timelapse is a stream-copy concatenation instead of one giant
-    // whole-session encode. Wall clock scales with units/SEGMENT_CONCURRENCY
-    // (~90s for a max-length 12h session) and a corrupt unit is caught and
-    // skipped here per-minute rather than poisoning the full encode.
-    const segmentPaths: (string | null)[] = new Array(total).fill(null);
-    {
-      let next = 0;
-      const builder = async () => {
-        while (next < total) {
-          const i = next++;
-          if (!downloaded[i]) continue;
-          const ss = sampledScreenshots.rows[i];
-          const unitPath = path.join(tmpDir, `dl_${i}.${unitExt(ss.format)}`);
           try {
             segmentPaths[i] = await buildSegment(tmpDir, i, unitPath, ss.format);
           } catch (err) {
+            buildFailures++;
             console.warn(
               `Skipping unit ${i + 1}: segment build failed (${ss.r2_key})`,
               err,
@@ -274,23 +256,29 @@ export async function compileTimelapse(sessionId: string): Promise<{
         }
       };
       await Promise.all(
-        Array.from({ length: Math.min(SEGMENT_CONCURRENCY, total) }, builder),
+        Array.from({ length: Math.min(SEGMENT_CONCURRENCY, total) }, worker),
       );
     }
 
     const segments = segmentPaths.filter((p): p is string => p !== null);
     const unitsIncluded = segments.length;
-    const buildFailures = total - failed - unitsIncluded;
+    if (downloadFailures > 5) {
+      throw new Error(
+        `Too many failed unit downloads: ${downloadFailures}/${total} failed`,
+      );
+    }
     if (unitsIncluded === 0) {
       throw new Error("No usable capture units after segment build");
     }
     if (buildFailures > 5) {
       throw new Error(
-        `Too many failed segment builds: ${buildFailures}/${total - failed} failed`,
+        `Too many failed segment builds: ${buildFailures}/${total - downloadFailures} failed`,
       );
     }
-    if (buildFailures > 0) {
-      console.warn(`${buildFailures} units failed segment build, continuing`);
+    if (downloadFailures + buildFailures > 0) {
+      console.warn(
+        `${downloadFailures} download / ${buildFailures} build failures out of ${total} units, continuing`,
+      );
     }
 
     // Step 4: Assemble — stream-copy concat of the segments, remuxed to MP4.
