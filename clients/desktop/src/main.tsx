@@ -8,6 +8,10 @@ import { App } from "./App.js";
 
 declare const __APP_VERSION__: string;
 
+// Boot timing — measured from the webview's navigation start. Shows up in
+// the console and the backtick debug log as [boot] lines.
+console.log(`[boot] main.tsx eval at ${Math.round(performance.now())}ms`);
+
 Sentry.init({
   dsn: import.meta.env.VITE_SENTRY_DSN,
   release: `lookout-desktop@${__APP_VERSION__}`,
