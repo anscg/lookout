@@ -1,0 +1,773 @@
+//! Per-minute clip recording: hardware H.264 encoding of capture-loop
+//! frames into MP4 clips — the `format=mp4` upload payload for sessions
+//! with clips enabled.
+//!
+//! One `ClipRecorder` lives per upload interval: the capture loop pushes a
+//! frame every `frameIntervalMs` (server-authoritative, 3s = 20/min), and
+//! at the upload tick `finish()` produces the MP4 bytes. Encoding is done
+//! by the OS hardware encoder on every platform — no bundled codecs:
+//!
+//! - macOS:   AVAssetWriter (VideoToolbox underneath), muxes MP4 itself
+//! - Windows: Media Foundation sink writer (hardware MFT when available)
+//! - Linux:   GStreamer (already a dependency for PipeWire capture)
+//!
+//! Every error is recoverable by design: the capture loop falls back to
+//! the legacy one-JPEG-per-minute upload for that interval, so a broken
+//! encoder degrades smoothness, never the recording.
+
+use image::DynamicImage;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Encoder bitrate cap (bits/second). Matches the web client's
+/// CLIP_VIDEO_BITS_PER_SECOND — ~3 MB per 60s clip worst case, far less on
+/// static screens (VBR undershoots easy content). The server rejects clips
+/// over 4 MB. 133 kbps was tried first and produced visibly soft H.264 at
+/// 1080p.
+pub const CLIP_BITS_PER_SECOND: u32 = 400_000;
+
+/// A finished clip ready for upload.
+pub struct FinishedClip {
+    pub mp4: Vec<u8>,
+    pub frame_count: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Unique-enough temp path for an in-progress clip container.
+fn clip_temp_path() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "lookout-clip-{}-{}.mp4",
+        std::process::id(),
+        n
+    ))
+}
+
+/// Records one clip: accepts RGBA frames, hands back MP4 bytes.
+pub struct ClipRecorder {
+    encoder: platform::Encoder,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    frame_interval_ms: u64,
+}
+
+impl ClipRecorder {
+    /// Start a new clip sized to the given frame dimensions (rounded down
+    /// to even — H.264 4:2:0 needs even dims). Later frames that arrive at
+    /// a different size (display change mid-clip) are scaled to fit.
+    pub fn new(width: u32, height: u32, frame_interval_ms: u64) -> Result<Self, String> {
+        let width = (width & !1).max(2);
+        let height = (height & !1).max(2);
+        let path = clip_temp_path();
+        let encoder = platform::Encoder::new(&path, width, height, CLIP_BITS_PER_SECOND)?;
+        Ok(Self {
+            encoder,
+            path,
+            width,
+            height,
+            frame_count: 0,
+            frame_interval_ms,
+        })
+    }
+
+    pub fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
+
+    /// Append one captured frame. Presentation time advances by the clip
+    /// frame interval per frame, so the clip plays back in real time.
+    pub fn push_frame(&mut self, frame: &DynamicImage) -> Result<(), String> {
+        // Normalize to the encoder's fixed dimensions. Cheap no-op clone
+        // path when dimensions already match (the common case).
+        let bgra = frame_to_bgra(frame, self.width, self.height);
+        let pts_ms = self.frame_count as u64 * self.frame_interval_ms;
+        self.encoder
+            .append_bgra_frame(&bgra, self.width, self.height, pts_ms)?;
+        self.frame_count += 1;
+        Ok(())
+    }
+
+    /// Finalize the container and return its bytes. Consumes the recorder;
+    /// the temp file is always removed.
+    pub fn finish(self) -> Result<FinishedClip, String> {
+        // Hold the final duration so the last frame isn't zero-length.
+        let duration_ms = self.frame_count as u64 * self.frame_interval_ms;
+        let result = self.encoder.finish(duration_ms);
+        let bytes = result.and_then(|()| {
+            std::fs::read(&self.path).map_err(|e| format!("failed to read clip file: {e}"))
+        });
+        let _ = std::fs::remove_file(&self.path);
+        let mp4 = bytes?;
+        if self.frame_count == 0 || mp4.is_empty() {
+            return Err("clip has no frames".into());
+        }
+        Ok(FinishedClip {
+            mp4,
+            frame_count: self.frame_count,
+            width: self.width,
+            height: self.height,
+        })
+    }
+
+    /// Abort and clean up without producing a clip (pause/stop mid-minute).
+    pub fn discard(self) {
+        let _ = self.encoder.finish(0);
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Convert a frame to tightly-packed BGRA at exactly (width, height),
+/// scaling (aspect-preserving pillarbox on black) when dimensions differ.
+fn frame_to_bgra(frame: &DynamicImage, width: u32, height: u32) -> Vec<u8> {
+    // Common case: dimensions match and the frame is already RGBA8
+    // (captures always are) — swizzle straight from the borrowed buffer
+    // into the output, one copy total.
+    if frame.width() == width && frame.height() == height {
+        if let Some(rgba) = frame.as_rgba8() {
+            let src = rgba.as_raw();
+            let mut bgra = Vec::with_capacity(src.len());
+            for px in src.chunks_exact(4) {
+                bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+            return bgra;
+        }
+    }
+
+    // Rare path: mid-clip display change — normalize to the clip's fixed
+    // dimensions with a pillarboxed canvas.
+    let rgba = if frame.width() == width && frame.height() == height {
+        frame.to_rgba8()
+    } else {
+        let scaled = frame.resize(width, height, image::imageops::FilterType::Triangle);
+        let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+        let x = (width - scaled.width()) / 2;
+        let y = (height - scaled.height()) / 2;
+        image::imageops::overlay(&mut canvas, &scaled.to_rgba8(), x as i64, y as i64);
+        canvas
+    };
+    let mut bgra = rgba.into_raw();
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    bgra
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Full round-trip through the real OS encoder: synthetic frames in,
+    /// container bytes out, then ffprobe (when installed) verifies the
+    /// frame count and that the stream decodes.
+    #[test]
+    fn encodes_frames_into_playable_mp4() {
+        let mut recorder = ClipRecorder::new(640, 360, 3000).expect("encoder init");
+        for i in 0u32..5 {
+            let mut img =
+                image::RgbaImage::from_pixel(640, 360, image::Rgba([20, 20, 40, 255]));
+            // Moving block so inter frames aren't empty.
+            for x in 0..80 {
+                for y in 0..80 {
+                    img.put_pixel(x + i * 60, y + 40, image::Rgba([220, 90, 40, 255]));
+                }
+            }
+            recorder
+                .push_frame(&DynamicImage::ImageRgba8(img))
+                .expect("push frame");
+        }
+        let clip = recorder.finish().expect("finish clip");
+
+        assert_eq!(clip.frame_count, 5);
+        assert_eq!(clip.width, 640);
+        assert_eq!(clip.height, 360);
+        assert!(clip.mp4.len() > 500, "suspiciously small mp4: {}B", clip.mp4.len());
+        assert_eq!(&clip.mp4[4..8], b"ftyp", "not an MP4 container");
+
+        // Deep verification when ffprobe is on the machine (dev boxes, CI).
+        let probe = std::process::Command::new("ffprobe").arg("-version").output();
+        if probe.is_ok() {
+            let path = clip_temp_path();
+            std::fs::write(&path, &clip.mp4).unwrap();
+            let out = std::process::Command::new("ffprobe")
+                .args([
+                    "-v", "error",
+                    "-count_packets",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=nb_read_packets,codec_name",
+                    "-of", "csv=p=0",
+                ])
+                .arg(&path)
+                .output()
+                .expect("ffprobe run");
+            let _ = std::fs::remove_file(&path);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("h264"),
+                "expected h264 stream, got: {stdout}"
+            );
+            assert!(
+                stdout.trim().ends_with(",5"),
+                "expected 5 packets, got: {stdout}"
+            );
+        } else {
+            eprintln!("ffprobe not found — container-level checks only");
+        }
+    }
+
+    /// A recorder with zero frames must fail, not produce an empty clip.
+    #[test]
+    fn empty_clip_errors() {
+        let recorder = ClipRecorder::new(640, 360, 3000).expect("encoder init");
+        assert!(recorder.finish().is_err());
+    }
+
+    /// Mid-clip resolution changes are normalized to the clip's dimensions.
+    #[test]
+    fn resized_frames_are_normalized() {
+        let mut recorder = ClipRecorder::new(640, 360, 3000).expect("encoder init");
+        let small = image::RgbaImage::from_pixel(320, 200, image::Rgba([255, 0, 0, 255]));
+        recorder
+            .push_frame(&DynamicImage::ImageRgba8(small))
+            .expect("push mismatched frame");
+        let big = image::RgbaImage::from_pixel(1920, 1080, image::Rgba([0, 255, 0, 255]));
+        recorder
+            .push_frame(&DynamicImage::ImageRgba8(big))
+            .expect("push mismatched frame");
+        let clip = recorder.finish().expect("finish clip");
+        assert_eq!(clip.frame_count, 2);
+        assert_eq!((clip.width, clip.height), (640, 360));
+    }
+}
+
+// ── macOS: AVAssetWriter (VideoToolbox) ─────────────────────────────
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use std::path::Path;
+    use std::ptr::NonNull;
+
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, ProtocolObject};
+    use objc2_av_foundation::{
+        AVAssetWriter, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor,
+        AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo, AVVideoAverageBitRateKey,
+        AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey,
+        AVVideoHeightKey, AVVideoWidthKey,
+    };
+    use objc2_core_media::CMTime;
+    use objc2_core_video::{
+        kCVPixelFormatType_32BGRA, CVPixelBuffer, CVPixelBufferCreate,
+        CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
+        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    };
+    use objc2_foundation::{NSMutableDictionary, NSNumber, NSString, NSURL};
+
+    fn ms_time(ms: u64) -> CMTime {
+        unsafe { CMTime::new(ms as i64, 1000) }
+    }
+
+    pub struct Encoder {
+        writer: Retained<AVAssetWriter>,
+        input: Retained<AVAssetWriterInput>,
+        adaptor: Retained<AVAssetWriterInputPixelBufferAdaptor>,
+        started: bool,
+    }
+
+    // AVAssetWriter and friends are documented thread-safe for this usage
+    // pattern (single writer thread); the recorder is driven from one loop.
+    unsafe impl Send for Encoder {}
+
+    impl Encoder {
+        pub fn new(path: &Path, width: u32, height: u32, bitrate: u32) -> Result<Self, String> {
+            unsafe {
+                let url = NSURL::fileURLWithPath(&NSString::from_str(
+                    path.to_str().ok_or("non-utf8 temp path")?,
+                ));
+
+                // Weak-linked framework constants come through as Options.
+                let file_type = AVFileTypeMPEG4.ok_or("AVFileTypeMPEG4 unavailable")?;
+                let media_video = AVMediaTypeVideo.ok_or("AVMediaTypeVideo unavailable")?;
+                let codec_h264 = AVVideoCodecTypeH264.ok_or("AVVideoCodecTypeH264 unavailable")?;
+                let key_codec = AVVideoCodecKey.ok_or("AVVideoCodecKey unavailable")?;
+                let key_width = AVVideoWidthKey.ok_or("AVVideoWidthKey unavailable")?;
+                let key_height = AVVideoHeightKey.ok_or("AVVideoHeightKey unavailable")?;
+                let key_compression =
+                    AVVideoCompressionPropertiesKey.ok_or("AVVideoCompressionPropertiesKey unavailable")?;
+                let key_bitrate =
+                    AVVideoAverageBitRateKey.ok_or("AVVideoAverageBitRateKey unavailable")?;
+
+                let writer = AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type)
+                    .map_err(|e| format!("AVAssetWriter init failed: {e}"))?;
+
+                // {AVVideoCodecKey: h264, AVVideoWidthKey, AVVideoHeightKey,
+                //  AVVideoCompressionPropertiesKey: {AVVideoAverageBitRateKey}}
+                let compression: Retained<NSMutableDictionary<NSString, AnyObject>> =
+                    NSMutableDictionary::new();
+                compression.setObject_forKey(
+                    NSNumber::new_u32(bitrate).as_ref(),
+                    ProtocolObject::from_ref(key_bitrate),
+                );
+
+                let settings: Retained<NSMutableDictionary<NSString, AnyObject>> =
+                    NSMutableDictionary::new();
+                settings.setObject_forKey(
+                    codec_h264.as_ref(),
+                    ProtocolObject::from_ref(key_codec),
+                );
+                settings.setObject_forKey(
+                    NSNumber::new_u32(width).as_ref(),
+                    ProtocolObject::from_ref(key_width),
+                );
+                settings.setObject_forKey(
+                    NSNumber::new_u32(height).as_ref(),
+                    ProtocolObject::from_ref(key_height),
+                );
+                settings.setObject_forKey(
+                    compression.as_ref(),
+                    ProtocolObject::from_ref(key_compression),
+                );
+
+                let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+                    media_video,
+                    Some(&*settings),
+                );
+                // Live source: encode as frames arrive instead of buffering.
+                input.setExpectsMediaDataInRealTime(true);
+
+                if !writer.canAddInput(&input) {
+                    return Err("AVAssetWriter rejected video input".into());
+                }
+                writer.addInput(&input);
+
+                let adaptor = AVAssetWriterInputPixelBufferAdaptor::assetWriterInputPixelBufferAdaptorWithAssetWriterInput_sourcePixelBufferAttributes(&input, None);
+
+                Ok(Self {
+                    writer,
+                    input,
+                    adaptor,
+                    started: false,
+                })
+            }
+        }
+
+        pub fn append_bgra_frame(
+            &mut self,
+            bgra: &[u8],
+            width: u32,
+            height: u32,
+            pts_ms: u64,
+        ) -> Result<(), String> {
+            unsafe {
+                if !self.started {
+                    if !self.writer.startWriting() {
+                        return Err(format!(
+                            "AVAssetWriter startWriting failed: {:?}",
+                            self.writer.error()
+                        ));
+                    }
+                    self.writer.startSessionAtSourceTime(ms_time(0));
+                    self.started = true;
+                }
+
+                // Wait (bounded) for the encoder to drain. With realtime
+                // input and 3s between frames this is virtually always
+                // immediate.
+                let mut waited_ms = 0u64;
+                while !self.input.isReadyForMoreMediaData() {
+                    if waited_ms > 2_000 {
+                        return Err("encoder not ready after 2s".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    waited_ms += 10;
+                }
+
+                // BGRA CVPixelBuffer, row-by-row copy (CV row stride may
+                // exceed width*4).
+                let mut pb_out: *mut CVPixelBuffer = std::ptr::null_mut();
+                let ret = CVPixelBufferCreate(
+                    None,
+                    width as usize,
+                    height as usize,
+                    kCVPixelFormatType_32BGRA,
+                    None,
+                    NonNull::from(&mut pb_out),
+                );
+                if ret != 0 || pb_out.is_null() {
+                    return Err(format!("CVPixelBufferCreate failed: {ret}"));
+                }
+                // Take ownership so the buffer is released on all paths.
+                let pb = Retained::from_raw(pb_out).ok_or("null pixel buffer")?;
+
+                CVPixelBufferLockBaseAddress(&pb, CVPixelBufferLockFlags::empty());
+                let base = CVPixelBufferGetBaseAddress(&pb) as *mut u8;
+                let dst_stride = CVPixelBufferGetBytesPerRow(&pb);
+                let src_stride = (width * 4) as usize;
+                for row in 0..height as usize {
+                    std::ptr::copy_nonoverlapping(
+                        bgra.as_ptr().add(row * src_stride),
+                        base.add(row * dst_stride),
+                        src_stride,
+                    );
+                }
+                CVPixelBufferUnlockBaseAddress(&pb, CVPixelBufferLockFlags::empty());
+
+                if !self
+                    .adaptor
+                    .appendPixelBuffer_withPresentationTime(&pb, ms_time(pts_ms))
+                {
+                    return Err(format!(
+                        "appendPixelBuffer failed: {:?}",
+                        self.writer.error()
+                    ));
+                }
+                Ok(())
+            }
+        }
+
+        pub fn finish(self, duration_ms: u64) -> Result<(), String> {
+            unsafe {
+                if !self.started {
+                    // Nothing was written; cancel to avoid a zero-byte file
+                    // error from finishWriting.
+                    self.writer.cancelWriting();
+                    return Err("no frames written".into());
+                }
+                self.input.markAsFinished();
+                self.writer.endSessionAtSourceTime(ms_time(duration_ms));
+
+                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                let block = RcBlock::new(move || {
+                    let _ = tx.send(());
+                });
+                self.writer.finishWritingWithCompletionHandler(&block);
+                rx.recv_timeout(std::time::Duration::from_secs(15))
+                    .map_err(|_| "finishWriting timed out".to_string())?;
+
+                if self.writer.status() != AVAssetWriterStatus::Completed {
+                    return Err(format!(
+                        "AVAssetWriter finished with status {:?}: {:?}",
+                        self.writer.status(),
+                        self.writer.error()
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+// ── Windows: Media Foundation sink writer ───────────────────────────
+
+#[cfg(target_os = "windows")]
+mod platform {
+    use std::path::Path;
+
+    use windows::core::HSTRING;
+    use windows::Win32::Media::MediaFoundation::{
+        IMFMediaType, IMFSample, IMFSinkWriter, MFCreateMediaType, MFCreateMemoryBuffer,
+        MFCreateSample, MFCreateSinkWriterFromURL, MFShutdown, MFStartup, MFSTARTUP_FULL,
+        MFVideoFormat_H264, MFVideoFormat_RGB32, MFVideoInterlace_Progressive,
+        MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+        MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFMediaType_Video,
+    };
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+    /// Media Foundation needs COM initialized on the calling thread, and the
+    /// capture loop's calls land on tokio worker threads that never did so.
+    /// Refcounted and idempotent per thread; S_FALSE (already initialized)
+    /// and RPC_E_CHANGED_MODE (thread is STA) are both fine for the sink
+    /// writer, so the result is deliberately ignored. Called at the top of
+    /// every encoder entry point because consecutive async calls may run on
+    /// different pool threads.
+    fn ensure_com() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+    }
+
+    /// Pack two u32s into the u64 layout MF uses for SIZE/RATIO attributes.
+    fn pack_u64(hi: u32, lo: u32) -> u64 {
+        ((hi as u64) << 32) | lo as u64
+    }
+
+    pub struct Encoder {
+        writer: IMFSinkWriter,
+        stream_index: u32,
+        width: u32,
+        height: u32,
+    }
+
+    // Single-threaded use from the capture loop.
+    unsafe impl Send for Encoder {}
+
+    impl Encoder {
+        pub fn new(path: &Path, width: u32, height: u32, bitrate: u32) -> Result<Self, String> {
+            ensure_com();
+            unsafe {
+                // Idempotent per-process init (returns S_OK on repeat calls).
+                MFStartup(MF_VERSION, MFSTARTUP_FULL)
+                    .map_err(|e| format!("MFStartup failed: {e}"))?;
+
+                let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(
+                    &HSTRING::from(path.to_string_lossy().as_ref()),
+                    None,
+                    None,
+                )
+                .map_err(|e| format!("MFCreateSinkWriterFromURL failed: {e}"))?;
+
+                // Output: H.264 at the clip bitrate. ~1 fps nominal rate —
+                // frame timing is carried per-sample, the rate attribute
+                // only seeds the encoder's rate control.
+                let out_type: IMFMediaType =
+                    MFCreateMediaType().map_err(|e| format!("MFCreateMediaType: {e}"))?;
+                out_type
+                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                    .map_err(|e| e.to_string())?;
+                out_type
+                    .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+                    .map_err(|e| e.to_string())?;
+                out_type
+                    .SetUINT32(&MF_MT_AVG_BITRATE, bitrate)
+                    .map_err(|e| e.to_string())?;
+                out_type
+                    .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                    .map_err(|e| e.to_string())?;
+                out_type
+                    .SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(width, height))
+                    .map_err(|e| e.to_string())?;
+                out_type
+                    .SetUINT64(&MF_MT_FRAME_RATE, pack_u64(1, 1))
+                    .map_err(|e| e.to_string())?;
+                let stream_index = writer
+                    .AddStream(&out_type)
+                    .map_err(|e| format!("AddStream failed: {e}"))?;
+
+                // Input: BGRA (MF calls it RGB32); the sink writer inserts
+                // the color converter to the encoder's NV12 automatically.
+                let in_type: IMFMediaType =
+                    MFCreateMediaType().map_err(|e| format!("MFCreateMediaType: {e}"))?;
+                in_type
+                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                    .map_err(|e| e.to_string())?;
+                in_type
+                    .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
+                    .map_err(|e| e.to_string())?;
+                in_type
+                    .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                    .map_err(|e| e.to_string())?;
+                in_type
+                    .SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(width, height))
+                    .map_err(|e| e.to_string())?;
+                in_type
+                    .SetUINT64(&MF_MT_FRAME_RATE, pack_u64(1, 1))
+                    .map_err(|e| e.to_string())?;
+                writer
+                    .SetInputMediaType(stream_index, &in_type, None)
+                    .map_err(|e| format!("SetInputMediaType failed: {e}"))?;
+
+                writer
+                    .BeginWriting()
+                    .map_err(|e| format!("BeginWriting failed: {e}"))?;
+
+                Ok(Self {
+                    writer,
+                    stream_index,
+                    width,
+                    height,
+                })
+            }
+        }
+
+        pub fn append_bgra_frame(
+            &mut self,
+            bgra: &[u8],
+            width: u32,
+            height: u32,
+            pts_ms: u64,
+        ) -> Result<(), String> {
+            debug_assert_eq!((width, height), (self.width, self.height));
+            ensure_com();
+            unsafe {
+                let byte_len = (width * height * 4) as u32;
+                let buffer = MFCreateMemoryBuffer(byte_len)
+                    .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
+
+                let mut data_ptr: *mut u8 = std::ptr::null_mut();
+                buffer
+                    .Lock(&mut data_ptr, None, None)
+                    .map_err(|e| e.to_string())?;
+                // MF RGB32 with positive stride is bottom-up; flip rows so
+                // the frame is right side up.
+                let stride = (width * 4) as usize;
+                for row in 0..height as usize {
+                    let src = bgra.as_ptr().add(row * stride);
+                    let dst = data_ptr.add((height as usize - 1 - row) * stride);
+                    std::ptr::copy_nonoverlapping(src, dst, stride);
+                }
+                buffer.Unlock().map_err(|e| e.to_string())?;
+                buffer
+                    .SetCurrentLength(byte_len)
+                    .map_err(|e| e.to_string())?;
+
+                let sample: IMFSample =
+                    MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
+                sample.AddBuffer(&buffer).map_err(|e| e.to_string())?;
+                // MF time units: 100ns.
+                sample
+                    .SetSampleTime((pts_ms * 10_000) as i64)
+                    .map_err(|e| e.to_string())?;
+                sample
+                    .SetSampleDuration(3_000i64 * 10_000)
+                    .map_err(|e| e.to_string())?;
+
+                self.writer
+                    .WriteSample(self.stream_index, &sample)
+                    .map_err(|e| format!("WriteSample failed: {e}"))
+            }
+        }
+
+        pub fn finish(self, _duration_ms: u64) -> Result<(), String> {
+            ensure_com();
+            unsafe {
+                let result = self
+                    .writer
+                    .Finalize()
+                    .map_err(|e| format!("sink writer Finalize failed: {e}"));
+                // Balance MFStartup from new() on BOTH paths — an early
+                // return here would leak a startup refcount per failed clip.
+                let _ = MFShutdown();
+                result
+            }
+        }
+    }
+}
+
+// ── Linux: GStreamer (already a dependency for PipeWire capture) ────
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::path::Path;
+
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use gstreamer_app::AppSrc;
+
+    /// Encoders in preference order: VA-API hardware first, then software
+    /// fallbacks. Availability differs per distro/GPU; first that exists
+    /// wins.
+    const ENCODER_CANDIDATES: &[&str] = &["vah264enc", "vaapih264enc", "x264enc", "openh264enc"];
+
+    pub struct Encoder {
+        pipeline: gst::Pipeline,
+        appsrc: AppSrc,
+        width: u32,
+        height: u32,
+    }
+
+    unsafe impl Send for Encoder {}
+
+    impl Encoder {
+        pub fn new(path: &Path, width: u32, height: u32, bitrate: u32) -> Result<Self, String> {
+            gst::init().map_err(|e| format!("gst init failed: {e}"))?;
+
+            let encoder_name = ENCODER_CANDIDATES
+                .iter()
+                .find(|name| gst::ElementFactory::find(name).is_some())
+                .ok_or("no H.264 encoder element available")?;
+
+            // x264enc wants kbit/s; the VA encoders take kbps too;
+            // openh264enc uses bps. x264enc's default `medium` preset burns
+            // 5-10x the CPU this job needs — superfast + zerolatency keeps
+            // the software fallback cheap at screen-recording quality.
+            let encoder_props = match *encoder_name {
+                "openh264enc" => format!("bitrate={bitrate}"),
+                "x264enc" => format!(
+                    "bitrate={} speed-preset=superfast tune=zerolatency",
+                    (bitrate / 1000).max(1)
+                ),
+                _ => format!("bitrate={}", (bitrate / 1000).max(1)),
+            };
+
+            let desc = format!(
+                "appsrc name=src is-live=false format=time \
+                 caps=video/x-raw,format=BGRA,width={width},height={height},framerate=0/1 \
+                 ! videoconvert ! {encoder_name} {encoder_props} \
+                 ! h264parse ! mp4mux ! filesink location=\"{}\"",
+                path.to_string_lossy()
+            );
+            let pipeline = gst::parse::launch(&desc)
+                .map_err(|e| format!("gst pipeline parse failed: {e}"))?
+                .downcast::<gst::Pipeline>()
+                .map_err(|_| "not a pipeline".to_string())?;
+
+            let appsrc = pipeline
+                .by_name("src")
+                .ok_or("appsrc missing")?
+                .downcast::<AppSrc>()
+                .map_err(|_| "appsrc cast failed".to_string())?;
+
+            pipeline
+                .set_state(gst::State::Playing)
+                .map_err(|e| format!("gst set_state failed: {e}"))?;
+
+            Ok(Self {
+                pipeline,
+                appsrc,
+                width,
+                height,
+            })
+        }
+
+        pub fn append_bgra_frame(
+            &mut self,
+            bgra: &[u8],
+            width: u32,
+            height: u32,
+            pts_ms: u64,
+        ) -> Result<(), String> {
+            debug_assert_eq!((width, height), (self.width, self.height));
+            let mut buffer = gst::Buffer::with_size(bgra.len())
+                .map_err(|e| format!("gst buffer alloc failed: {e}"))?;
+            {
+                let buffer_mut = buffer.get_mut().ok_or("buffer not writable")?;
+                buffer_mut.set_pts(gst::ClockTime::from_mseconds(pts_ms));
+                let mut map = buffer_mut
+                    .map_writable()
+                    .map_err(|e| format!("gst buffer map failed: {e}"))?;
+                map.copy_from_slice(bgra);
+            }
+            self.appsrc
+                .push_buffer(buffer)
+                .map_err(|e| format!("gst push_buffer failed: {e}"))?;
+            Ok(())
+        }
+
+        pub fn finish(self, _duration_ms: u64) -> Result<(), String> {
+            self.appsrc
+                .end_of_stream()
+                .map_err(|e| format!("gst EOS failed: {e}"))?;
+            // Wait for the muxer to flush the moov atom.
+            let bus = self.pipeline.bus().ok_or("no gst bus")?;
+            let result = (|| {
+                for msg in bus.iter_timed(gst::ClockTime::from_seconds(15)) {
+                    use gst::MessageView;
+                    match msg.view() {
+                        MessageView::Eos(_) => return Ok(()),
+                        MessageView::Error(e) => {
+                            return Err(format!("gst error: {}", e.error()));
+                        }
+                        _ => {}
+                    }
+                }
+                Err("gst EOS timed out".to_string())
+            })();
+            let _ = self.pipeline.set_state(gst::State::Null);
+            result
+        }
+    }
+}

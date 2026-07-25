@@ -1,4 +1,5 @@
 mod capture;
+mod clips;
 mod crop;
 mod pipewire;
 mod screencast;
@@ -558,6 +559,11 @@ pub struct UploadUrlResponse {
     /// Sticky tracking mode for the session. Absent on pre-credit-mode servers.
     #[serde(rename = "trackingMode", default)]
     pub tracking_mode: Option<String>,
+    /// GRANTED payload format — may differ from the requested one (the
+    /// server downgrades clip formats to "jpeg" on sessions without clips).
+    /// Absent on pre-clips servers.
+    #[serde(rename = "format", default)]
+    pub format: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1574,16 +1580,55 @@ macro_rules! retry_upload_step {
 /// no full-buffer copy per attempt) plus its base64 form, which is only
 /// carried through for the JS preview. Callers that capture natively encode
 /// base64 exactly once; nothing here decodes it back.
-async fn upload_and_confirm(
-    jpeg_bytes: bytes::Bytes,
-    jpeg_base64: String,
+/// One capture unit ready for upload: the legacy single JPEG or an H.264
+/// MP4 clip. The content type must match the granted format — the
+/// presigned URL is signed with it.
+struct UploadPayload {
+    bytes: bytes::Bytes,
+    content_type: &'static str,
+    /// `format` query value for upload-url. None = legacy JPEG request.
+    format: Option<&'static str>,
+    /// Frames inside a clip (confirm-body telemetry). None for JPEG.
+    frame_count: Option<u32>,
     width: u32,
     height: u32,
+    /// JPEG preview (base64) of the unit's last frame, for the UI event.
+    preview_base64: String,
+}
+
+impl UploadPayload {
+    fn jpeg(bytes: bytes::Bytes, base64: String, width: u32, height: u32) -> Self {
+        Self {
+            bytes,
+            content_type: "image/jpeg",
+            format: None,
+            frame_count: None,
+            width,
+            height,
+            preview_base64: base64,
+        }
+    }
+
+    fn mp4(clip: clips::FinishedClip, preview_base64: String) -> Self {
+        Self {
+            bytes: bytes::Bytes::from(clip.mp4),
+            content_type: "video/mp4",
+            format: Some("mp4"),
+            frame_count: Some(clip.frame_count),
+            width: clip.width,
+            height: clip.height,
+            preview_base64,
+        }
+    }
+}
+
+async fn upload_and_confirm(
+    payload: UploadPayload,
     captured_at: Option<&str>,
     config: &SessionConfig,
     app: &AppHandle,
 ) -> Result<CaptureUploadResult, String> {
-    let size_bytes = jpeg_bytes.len();
+    let size_bytes = payload.bytes.len();
     const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     // Step 1: Get presigned URL from server
@@ -1598,6 +1643,9 @@ async fn upload_and_confirm(
     let mut query: Vec<(&str, &str)> = vec![("clientInfo", client_info())];
     if let Some(c) = captured_at {
         query.push(("capturedAt", c));
+    }
+    if let Some(f) = payload.format {
+        query.push(("format", f));
     }
     // Each attempt re-requests a FRESH presigned URL (it has a 120s expiry).
     let upload_url_resp: UploadUrlResponse = retry_upload_step!("upload-url", {
@@ -1627,6 +1675,20 @@ async fn upload_and_confirm(
         ),
     );
 
+    // The presigned URL is signed for the GRANTED format's content type —
+    // uploading a clip against a jpeg grant would fail the signature. A
+    // downgrade here (clips disabled server-side, pre-clips server) is a
+    // terminal error for this payload; the capture loop retries the tick
+    // with its JPEG fallback.
+    if let Some(requested) = payload.format {
+        let granted = upload_url_resp.format.as_deref().unwrap_or("jpeg");
+        if granted != requested {
+            return Err(format!(
+                "server granted \"{granted}\" for a \"{requested}\" clip upload"
+            ));
+        }
+    }
+
     // Step 2: Upload JPEG to R2
     let _ = app.emit(
         "capture-progress",
@@ -1643,9 +1705,9 @@ async fn upload_and_confirm(
     retry_upload_step!(r2_label, {
         client
             .put(upload_url_resp.upload_url.as_str())
-            .header("Content-Type", "image/jpeg")
+            .header("Content-Type", payload.content_type)
             // Bytes::clone is a refcount bump, not a buffer copy.
-            .body(jpeg_bytes.clone())
+            .body(payload.bytes.clone())
             .timeout(STEP_TIMEOUT)
             .send()
             .await
@@ -1658,18 +1720,22 @@ async fn upload_and_confirm(
 
     // Step 3: Confirm upload with server
     let _ = app.emit("capture-progress", "confirming upload with server...");
+    let mut confirm_body = serde_json::json!({
+        "screenshotId": upload_url_resp.screenshot_id,
+        "width": payload.width,
+        "height": payload.height,
+        "fileSize": size_bytes,
+    });
+    if let Some(fc) = payload.frame_count {
+        confirm_body["frameCount"] = fc.into();
+    }
     let confirm_resp: ConfirmResponse = retry_upload_step!("confirm", {
         let confirm_response = client
             .post(format!(
                 "{}/api/sessions/{}/screenshots",
                 config.api_base_url, config.token
             ))
-            .json(&serde_json::json!({
-                "screenshotId": upload_url_resp.screenshot_id,
-                "width": width,
-                "height": height,
-                "fileSize": size_bytes,
-            }))
+            .json(&confirm_body)
             .timeout(STEP_TIMEOUT)
             .send()
             .await
@@ -1697,9 +1763,9 @@ async fn upload_and_confirm(
         confirmed: confirm_resp.confirmed,
         tracked_seconds: confirm_resp.tracked_seconds,
         next_expected_at: confirm_resp.next_expected_at,
-        preview_base64: jpeg_base64,
-        preview_width: width,
-        preview_height: height,
+        preview_base64: payload.preview_base64,
+        preview_width: payload.width,
+        preview_height: payload.height,
     })
 }
 
@@ -1953,10 +2019,12 @@ async fn capture_and_upload(
     };
     let jpeg_base64 = base64_encode(&screenshot.data);
     upload_and_confirm(
-        bytes::Bytes::from(screenshot.data),
-        jpeg_base64,
-        screenshot.width,
-        screenshot.height,
+        UploadPayload::jpeg(
+            bytes::Bytes::from(screenshot.data),
+            jpeg_base64,
+            screenshot.width,
+            screenshot.height,
+        ),
         captured_at.as_deref(),
         &config,
         &app,
@@ -1992,8 +2060,13 @@ async fn upload_frame(
         None
     };
     let jpeg_bytes = bytes::Bytes::from(base64_decode(&base64)?);
-    upload_and_confirm(jpeg_bytes, base64, width, height, captured_at.as_deref(), &config, &app)
-        .await
+    upload_and_confirm(
+        UploadPayload::jpeg(jpeg_bytes, base64, width, height),
+        captured_at.as_deref(),
+        &config,
+        &app,
+    )
+    .await
 }
 
 // ── Capture-loop interval (seconds) ─────────────────────────────
@@ -2001,6 +2074,13 @@ const CAPTURE_INTERVAL_SECS: u64 = 60;
 /// If the wall-clock gap between ticks exceeds this, the machine
 /// probably slept (or the WebView was throttled hard).
 const SLEEP_THRESHOLD_SECS: u64 = CAPTURE_INTERVAL_SECS * 2 + 30; // 150s
+/// Fallback frame cadence when the server doesn't advertise one (pre-clips
+/// servers): every 3s = 20 frames/min. When the server sends
+/// `frameIntervalMs` on the session GET, that value wins — the cadence is
+/// server-authoritative. Frames go through the identical redaction-aware
+/// capture path as uploads; in clips mode they're recorded into the clip,
+/// and the JPEG preview side is only produced while the window is focused.
+const DEFAULT_FRAME_INTERVAL_MS: u64 = 3_000;
 
 /// Format seconds into the same tray title format as the JS side:
 /// >0h: "{h}h {m}m", 0m: "< 1m", else: "{m}m"
@@ -2192,6 +2272,16 @@ struct CaptureTickError {
     message: String,
 }
 
+/// Event payload for an in-between live-preview frame from the capture
+/// loop (one per frame interval while the window is focused).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapturePreviewFrame {
+    preview_base64: String,
+    preview_width: u32,
+    preview_height: u32,
+}
+
 /// Event payload emitted when the capture loop detects a terminal session state.
 #[derive(Clone, Serialize)]
 struct CaptureSessionTerminated {
@@ -2205,6 +2295,145 @@ struct SessionStatusResponse {
     status: String,
     #[serde(default)]
     tracked_seconds: Option<i64>,
+}
+
+/// What JPEG (if any) a frame grab should produce alongside the raw image.
+#[derive(Clone, Copy, PartialEq)]
+enum GrabJpeg {
+    /// No JPEG — clip frame while the window is unfocused.
+    None,
+    /// Preview-sized (≤854x480, q65) — matches the resolution the live
+    /// preview always used, and keeps the per-frame IPC payload ~5x
+    /// smaller than a full-res frame would be.
+    Preview,
+    /// Full capture resolution at upload quality — the tick frame, which
+    /// doubles as the JPEG upload/fallback payload.
+    Full,
+}
+
+/// Downscale bounds + quality for preview JPEGs (mirrors the values the
+/// dedicated preview protocol always served).
+const PREVIEW_MAX_W: u32 = 854;
+const PREVIEW_MAX_H: u32 = 480;
+const PREVIEW_JPEG_QUALITY: u8 = 65;
+
+/// One frame off the capture pipeline: the raw (redacted, scaled) image
+/// plus, when requested, its JPEG encoding.
+struct FrameGrab {
+    image: image::DynamicImage,
+    jpeg: Option<capture::RawCaptureResult>,
+}
+
+/// Read the current blacklist (+ Linux PipeWire fds) and capture one
+/// redaction-aware stitched frame on the blocking pool. Shared by the
+/// upload tick, the clip frames, and the live preview, so everything goes
+/// through the exact same capture path — Filtered Apps redaction included.
+async fn grab_frame(
+    app: &AppHandle,
+    sources: &[CaptureSource],
+    max_width: u32,
+    max_height: u32,
+    jpeg_quality: u8,
+    jpeg: GrabJpeg,
+) -> Result<FrameGrab, String> {
+    let blacklisted = {
+        let state = app.state::<AppState>();
+        state
+            .blacklisted_apps
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    };
+
+    #[allow(unused_mut, unused_assignments)]
+    let mut pipewire_fds = std::collections::HashMap::new();
+    #[cfg(target_os = "linux")]
+    {
+        let state = app.state::<AppState>();
+        if let Ok(guard) = state.pipewire_fds.lock() {
+            pipewire_fds = guard.clone();
+        };
+    }
+
+    let sources_clone = sources.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let image = capture::take_stitched_screenshots_image_with_blacklist(
+            &sources_clone,
+            max_width,
+            max_height,
+            &pipewire_fds,
+            &blacklisted,
+        )?;
+        let encoded = match jpeg {
+            GrabJpeg::None => None,
+            GrabJpeg::Full => Some(capture::encode_frame_jpeg(&image, jpeg_quality)?),
+            GrabJpeg::Preview => {
+                let (w, h) = (image.width(), image.height());
+                if w > PREVIEW_MAX_W || h > PREVIEW_MAX_H {
+                    let scale =
+                        f64::min(PREVIEW_MAX_W as f64 / w as f64, PREVIEW_MAX_H as f64 / h as f64);
+                    let pw = ((w as f64 * scale).round() as u32).max(2);
+                    let ph = ((h as f64 * scale).round() as u32).max(2);
+                    // Borrowing resize: the full-res frame stays untouched
+                    // for the clip encoder.
+                    image
+                        .as_rgba8()
+                        .and_then(|rgba| capture::fast_resize_buffer(rgba, pw, ph))
+                        .map(|small| {
+                            capture::encode_frame_jpeg(
+                                &image::DynamicImage::ImageRgba8(small),
+                                PREVIEW_JPEG_QUALITY,
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    Some(capture::encode_frame_jpeg(&image, PREVIEW_JPEG_QUALITY)?)
+                }
+            }
+        };
+        Ok(FrameGrab {
+            image,
+            jpeg: encoded,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking panicked: {e}"))
+    .and_then(|r| r)
+}
+
+/// Clip capability the server advertises for a session (on the session
+/// GET). Fetched once at capture-loop start; any failure means clips off,
+/// i.e. legacy one-JPEG-per-minute behavior.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SessionClipCapabilities {
+    #[serde(default)]
+    clips_enabled: bool,
+    #[serde(default)]
+    frame_interval_ms: Option<u64>,
+}
+
+async fn fetch_clip_capabilities(config: &SessionConfig) -> SessionClipCapabilities {
+    let url = format!("{}/api/sessions/{}", config.api_base_url, config.token);
+    match http_client()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(res) if res.status().is_success() => res.json().await.unwrap_or_default(),
+        Ok(res) => {
+            eprintln!(
+                "[capture-loop] capability fetch returned HTTP {} — clips off",
+                res.status()
+            );
+            SessionClipCapabilities::default()
+        }
+        Err(e) => {
+            eprintln!("[capture-loop] capability fetch failed ({e}) — clips off");
+            SessionClipCapabilities::default()
+        }
+    }
 }
 
 /// The core capture loop, runs on a tokio task. Captures screenshots at
@@ -2282,12 +2511,141 @@ async fn capture_loop_task(
         Ok(true)
     }
 
-    loop {
-        // ── First capture fires immediately; subsequent ones wait for the interval tick ──
-        // (We already consumed the first tick above, so this select waits for either
-        // the next 60s tick or cancellation.)
+    // Clip capability comes from the server, once per loop run. Any fetch
+    // failure (or clips off) means legacy JPEG mode, bit-for-bit.
+    let initial_config = {
+        let state = app.state::<AppState>();
+        let guard = state.config.lock().unwrap();
+        guard.clone()
+    };
+    let caps = match &initial_config {
+        Some(c) => fetch_clip_capabilities(c).await,
+        None => SessionClipCapabilities::default(),
+    };
+    let clips_mode = caps.clips_enabled;
+    // Server-authoritative cadence, clamped defensively against a
+    // misbehaving server so the loop can't spin or stall.
+    let frame_interval_ms = caps
+        .frame_interval_ms
+        .unwrap_or(DEFAULT_FRAME_INTERVAL_MS)
+        .clamp(500, 30_000);
+    let frame_dur = Duration::from_millis(frame_interval_ms);
+    let mut recorder: Option<clips::ClipRecorder> = None;
+    if clips_mode {
+        eprintln!("[capture-loop] clips enabled (frame every {frame_interval_ms}ms)");
+    }
 
-        // Run one capture tick
+    // Clips: delay the first upload by two frame intervals so the opening
+    // clip carries motion instead of a single still. JPEG mode keeps the
+    // legacy immediate first tick.
+    next_fire = TokioInstant::now()
+        + if clips_mode {
+            2 * frame_dur
+        } else {
+            Duration::ZERO
+        };
+
+    // The opening window is only ~2 frame intervals long, so at the normal
+    // cadence the first clip would hold just 2 frames — rendered as one
+    // near-still second at the head of every timelapse. Capture the opening
+    // window ~3x faster so the first clip is as visually dense as the rest;
+    // after the first upload the cadence returns to the server's value.
+    let opening_frame_dur = Duration::from_millis((frame_interval_ms / 3).max(500));
+    let mut first_upload_done = false;
+
+    'outer: loop {
+        // ── Wait until next_fire, collecting frames along the way ──
+        // Frames run at the clip cadence (20/min) through the SAME
+        // redaction-aware capture path as uploads. In clips mode every
+        // frame is recorded into the current clip; the JPEG preview side
+        // is focus-gated either way (nobody can see it unfocused).
+        // sleep_until returns immediately when next_fire is already past
+        // (catch-up), which also skips frame collection.
+        let cadence = if first_upload_done {
+            frame_dur
+        } else {
+            opening_frame_dur
+        };
+        loop {
+            let now = TokioInstant::now();
+            if now >= next_fire {
+                break;
+            }
+            let wake = std::cmp::min(now + cadence, next_fire);
+            tokio::select! {
+                _ = sleep_until(wake) => {}
+                _ = cancel_rx.changed() => {
+                    eprintln!("[capture-loop] cancelled");
+                    break 'outer;
+                }
+            }
+            // Woke for the upload tick, not a frame.
+            if TokioInstant::now() >= next_fire {
+                break;
+            }
+
+            let focused = app
+                .get_webview_window("main")
+                .map(|w| w.is_focused().unwrap_or(false))
+                .unwrap_or(false);
+            if !clips_mode && !focused {
+                continue;
+            }
+
+            let jpeg_mode = if focused {
+                GrabJpeg::Preview
+            } else {
+                GrabJpeg::None
+            };
+            match grab_frame(&app, &sources, max_width, max_height, jpeg_quality, jpeg_mode).await
+            {
+                Ok(grab) => {
+                    if clips_mode {
+                        if recorder.is_none() {
+                            match clips::ClipRecorder::new(
+                                grab.image.width(),
+                                grab.image.height(),
+                                frame_interval_ms,
+                            ) {
+                                Ok(r) => recorder = Some(r),
+                                Err(e) => eprintln!(
+                                    "[capture-loop] clip encoder init failed: {e} — JPEG fallback this interval"
+                                ),
+                            }
+                        }
+                        if let Some(r) = recorder.as_mut() {
+                            if let Err(e) = r.push_frame(&grab.image) {
+                                eprintln!(
+                                    "[capture-loop] clip frame append failed: {e} — dropping clip, JPEG fallback"
+                                );
+                                if let Some(r) = recorder.take() {
+                                    r.discard();
+                                }
+                            }
+                        }
+                    }
+                    if focused {
+                        if let Some(jpeg) = grab.jpeg {
+                            let _ = app.emit(
+                                "capture-preview-frame",
+                                CapturePreviewFrame {
+                                    preview_base64: base64_encode(&jpeg.data),
+                                    preview_width: jpeg.width,
+                                    preview_height: jpeg.height,
+                                },
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Frame-level failure: log and keep going — the upload
+                    // tick has its own error handling and retry cadence.
+                    eprintln!("[capture-loop] frame capture failed: {e}");
+                }
+            }
+        }
+
+        // ── Upload tick ──
         let now = StdInstant::now();
         let elapsed_secs = now.duration_since(last_tick).as_secs();
         last_tick = now;
@@ -2316,6 +2674,11 @@ async fn capture_loop_task(
                 "[capture-loop] detected sleep (gap: {}s), checking session status...",
                 elapsed_secs
             );
+            // A clip spanning a sleep gap would carry an hours-long hole —
+            // drop it and start fresh after recovery.
+            if let Some(r) = recorder.take() {
+                r.discard();
+            }
             match handle_sleep_recovery(&app, &config).await {
                 Ok(true) => { /* continue capturing */ }
                 Ok(false) => break,
@@ -2323,42 +2686,11 @@ async fn capture_loop_task(
             }
         }
 
-        // Take screenshot (blocking I/O via xcap — run on blocking threadpool)
-        let blacklisted = {
-            let state = app.state::<AppState>();
-            state
-                .blacklisted_apps
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default()
-        };
-
-        #[allow(unused_mut, unused_assignments)]
-        let mut pipewire_fds = std::collections::HashMap::new();
-        #[cfg(target_os = "linux")]
-        {
-            let state = app.state::<AppState>();
-            if let Ok(guard) = state.pipewire_fds.lock() {
-                pipewire_fds = guard.clone();
-            };
-        }
-
-        let sources_clone = sources.clone();
-        let bl = blacklisted;
-        let pw_fds = pipewire_fds;
-        let screenshot_result = tokio::task::spawn_blocking(move || {
-            capture::take_stitched_screenshots_raw_with_blacklist(
-                &sources_clone,
-                max_width,
-                max_height,
-                jpeg_quality,
-                &pw_fds,
-                &bl,
-            )
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking panicked: {e}"))
-        .and_then(|r| r);
+        // Grab the tick frame — the clip's final frame, the UI preview,
+        // and the JPEG fallback, all from one capture. Full-size JPEG:
+        // this one may be uploaded.
+        let grab_result =
+            grab_frame(&app, &sources, max_width, max_height, jpeg_quality, GrabJpeg::Full).await;
 
         // Capture the wall-clock moment NOW — that's the value we'll send
         // as `capturedAt`, not when the upload eventually reaches the server.
@@ -2368,20 +2700,96 @@ async fn capture_loop_task(
             None
         };
 
-        match screenshot_result {
-            Ok(screenshot) => {
-                let jpeg_base64 = base64_encode(&screenshot.data);
-                match upload_and_confirm(
-                    bytes::Bytes::from(screenshot.data),
-                    jpeg_base64,
-                    screenshot.width,
-                    screenshot.height,
-                    captured_at.as_deref(),
-                    &config,
-                    &app,
-                )
-                .await
-                {
+        match grab_result {
+            Ok(grab) => {
+                let capture::RawCaptureResult {
+                    data: jpeg_data,
+                    width: jpeg_w,
+                    height: jpeg_h,
+                } = grab.jpeg.expect("tick grab always requests jpeg");
+                let jpeg_base64 = base64_encode(&jpeg_data);
+                let jpeg_bytes = bytes::Bytes::from(jpeg_data);
+
+                // Clips: append the final frame and cut this interval's clip.
+                let clip = if clips_mode {
+                    if recorder.is_none() {
+                        recorder = clips::ClipRecorder::new(
+                            grab.image.width(),
+                            grab.image.height(),
+                            frame_interval_ms,
+                        )
+                        .map_err(|e| {
+                            eprintln!("[capture-loop] clip encoder init failed: {e}")
+                        })
+                        .ok();
+                    }
+                    if let Some(r) = recorder.as_mut() {
+                        if let Err(e) = r.push_frame(&grab.image) {
+                            eprintln!("[capture-loop] clip frame append failed: {e}");
+                            if let Some(r) = recorder.take() {
+                                r.discard();
+                            }
+                        }
+                    }
+                    match recorder.take().map(|r| r.finish()) {
+                        Some(Ok(c)) => Some(c),
+                        Some(Err(e)) => {
+                            eprintln!(
+                                "[capture-loop] clip finalize failed: {e} — uploading JPEG instead"
+                            );
+                            None
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+
+                // Clip first; ANY clip-upload failure (size cap, server
+                // downgrade, transient) retries the tick as a JPEG so the
+                // credit streak never skips a beat.
+                let upload_result = match clip {
+                    Some(c) => {
+                        match upload_and_confirm(
+                            UploadPayload::mp4(c, jpeg_base64.clone()),
+                            captured_at.as_deref(),
+                            &config,
+                            &app,
+                        )
+                        .await
+                        {
+                            Ok(r) => Ok(r),
+                            Err(e) => {
+                                eprintln!(
+                                    "[capture-loop] clip upload failed ({e}) — retrying tick as JPEG"
+                                );
+                                upload_and_confirm(
+                                    UploadPayload::jpeg(
+                                        jpeg_bytes.clone(),
+                                        jpeg_base64.clone(),
+                                        jpeg_w,
+                                        jpeg_h,
+                                    ),
+                                    captured_at.as_deref(),
+                                    &config,
+                                    &app,
+                                )
+                                .await
+                            }
+                        }
+                    }
+                    None => {
+                        upload_and_confirm(
+                            UploadPayload::jpeg(jpeg_bytes, jpeg_base64, jpeg_w, jpeg_h),
+                            captured_at.as_deref(),
+                            &config,
+                            &app,
+                        )
+                        .await
+                    }
+                };
+
+                match upload_result {
                     Ok(result) => {
                         // Sync tray timer to authoritative server time
                         {
@@ -2435,15 +2843,16 @@ async fn capture_loop_task(
             }
         }
 
-        // Wait until next_fire or cancellation. sleep_until returns
-        // immediately if next_fire is already in the past (catch-up).
-        tokio::select! {
-            _ = sleep_until(next_fire) => {}
-            _ = cancel_rx.changed() => {
-                eprintln!("[capture-loop] cancelled");
-                break;
-            }
-        }
+        // Whatever happened, the opening window is over — later intervals
+        // are full-length, so the normal cadence applies (a failed first
+        // upload must not run the fast cadence across a 60s retry window).
+        first_upload_done = true;
+    }
+
+    // Never leave a half-recorded clip (or its temp file) behind on
+    // pause/stop/cancel.
+    if let Some(r) = recorder.take() {
+        r.discard();
     }
 
     eprintln!("[capture-loop] stopped");

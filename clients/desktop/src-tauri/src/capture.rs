@@ -237,14 +237,78 @@ pub struct RawCaptureResult {
     pub height: u32,
 }
 
-pub fn take_screenshot_raw_with_blacklist(
+/// SIMD resize (fast_image_resize: SSE4/AVX2/NEON) — ~4x faster than the
+/// `image` crate's scalar filters at screen sizes (measured 29ms → 7ms for
+/// a 5K→1080p downscale). Box for downscales (area average: the correct
+/// filter for heavy downscaling AND the cheapest), bilinear when upscaling
+/// (box upscales look blocky). Falls back to the scalar Triangle path if
+/// the SIMD buffers can't be built — unreachable in practice, but capture
+/// must never die on a resize.
+pub fn fast_resize_rgba(dynamic: DynamicImage, new_w: u32, new_h: u32) -> DynamicImage {
+    // Captures are always RGBA8 — into_rgba8 is a move, not a copy.
+    let rgba = dynamic.into_rgba8();
+    match fast_resize_buffer(&rgba, new_w, new_h) {
+        Some(out) => DynamicImage::ImageRgba8(out),
+        // Unreachable in practice; the scalar path keeps capture alive.
+        None => DynamicImage::ImageRgba8(rgba).resize_exact(
+            new_w,
+            new_h,
+            image::imageops::FilterType::Triangle,
+        ),
+    }
+}
+
+/// Borrowing core of {@link fast_resize_rgba} — resizes without consuming
+/// the source, for callers that still need the original frame (e.g. the
+/// preview downscale next to the clip encoder).
+pub fn fast_resize_buffer(
+    rgba: &image::RgbaImage,
+    new_w: u32,
+    new_h: u32,
+) -> Option<image::RgbaImage> {
+    use fast_image_resize as fir;
+
+    let (w, h) = (rgba.width(), rgba.height());
+    let alg = if new_w <= w && new_h <= h {
+        fir::ResizeAlg::Convolution(fir::FilterType::Box)
+    } else {
+        fir::ResizeAlg::Convolution(fir::FilterType::Bilinear)
+    };
+    let src = fir::images::ImageRef::new(w, h, rgba.as_raw(), fir::PixelType::U8x4).ok()?;
+    let mut dst = fir::images::Image::new(new_w, new_h, fir::PixelType::U8x4);
+    let opts = fir::ResizeOptions::new().resize_alg(alg);
+    fir::Resizer::new().resize(&src, &mut dst, &opts).ok()?;
+    image::RgbaImage::from_raw(new_w, new_h, dst.into_vec())
+}
+
+/// Encode a captured (already redacted + scaled) frame as JPEG.
+pub fn encode_frame_jpeg(
+    dynamic: &DynamicImage,
+    jpeg_quality: u8,
+) -> Result<RawCaptureResult, String> {
+    let rgb = dynamic.to_rgb8();
+    let mut jpeg_buf = Cursor::new(Vec::new());
+    let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, jpeg_quality);
+    encoder
+        .encode_image(&rgb)
+        .map_err(|e| format!("JPEG encoding failed: {e}"))?;
+    Ok(RawCaptureResult {
+        data: jpeg_buf.into_inner(),
+        width: dynamic.width(),
+        height: dynamic.height(),
+    })
+}
+
+/// Capture a single source, redact, and scale to fit — returning the raw
+/// RGBA frame (no JPEG encode). Base primitive shared by the JPEG upload
+/// path, the live preview, and the clip encoder.
+pub fn take_screenshot_image_with_blacklist(
     source: CaptureSource,
     max_width: u32,
     max_height: u32,
-    jpeg_quality: u8,
     pipewire_fds: &std::collections::HashMap<u32, i32>,
     blacklisted_apps: &[String],
-) -> Result<RawCaptureResult, String> {
+) -> Result<DynamicImage, String> {
     let mut dynamic =
         capture_to_dynamic_image_with_blacklist(&source, pipewire_fds, blacklisted_apps)?;
 
@@ -258,24 +322,28 @@ pub fn take_screenshot_raw_with_blacklist(
         let scale = f64::min(max_width as f64 / w as f64, max_height as f64 / h as f64);
         let new_w = (w as f64 * scale).round() as u32;
         let new_h = (h as f64 * scale).round() as u32;
-        dynamic = dynamic.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle);
+        dynamic = fast_resize_rgba(dynamic, new_w, new_h);
     }
 
-    let (final_w, final_h) = (dynamic.width(), dynamic.height());
+    Ok(dynamic)
+}
 
-    // Encode as JPEG
-    let rgb = dynamic.to_rgb8();
-    let mut jpeg_buf = Cursor::new(Vec::new());
-    let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, jpeg_quality);
-    encoder
-        .encode_image(&rgb)
-        .map_err(|e| format!("JPEG encoding failed: {e}"))?;
-
-    Ok(RawCaptureResult {
-        data: jpeg_buf.into_inner(),
-        width: final_w,
-        height: final_h,
-    })
+pub fn take_screenshot_raw_with_blacklist(
+    source: CaptureSource,
+    max_width: u32,
+    max_height: u32,
+    jpeg_quality: u8,
+    pipewire_fds: &std::collections::HashMap<u32, i32>,
+    blacklisted_apps: &[String],
+) -> Result<RawCaptureResult, String> {
+    let dynamic = take_screenshot_image_with_blacklist(
+        source,
+        max_width,
+        max_height,
+        pipewire_fds,
+        blacklisted_apps,
+    )?;
+    encode_frame_jpeg(&dynamic, jpeg_quality)
 }
 
 /// Capture a specific source (monitor or window), scale to fit, encode as JPEG.
@@ -307,27 +375,25 @@ pub fn take_screenshot(
     })
 }
 
-/// Capture one or more sources side-by-side and encode as a single JPEG.
-/// Returns raw JPEG bytes — callers that need base64 (e.g. for the preview
-/// event) encode it themselves, so the upload path never has to decode.
-pub fn take_stitched_screenshots_raw_with_blacklist(
+/// Capture one or more sources side-by-side, redact, and scale to fit —
+/// returning the composed raw RGBA frame (no JPEG encode). Base primitive
+/// shared by the JPEG upload path, the live preview, and the clip encoder.
+pub fn take_stitched_screenshots_image_with_blacklist(
     sources: &[CaptureSource],
     max_width: u32,
     max_height: u32,
-    jpeg_quality: u8,
     pipewire_fds: &std::collections::HashMap<u32, i32>,
     blacklisted_apps: &[String],
-) -> Result<RawCaptureResult, String> {
+) -> Result<DynamicImage, String> {
     if sources.is_empty() {
         return Err("No sources provided".to_string());
     }
 
     if sources.len() == 1 {
-        return take_screenshot_raw_with_blacklist(
+        return take_screenshot_image_with_blacklist(
             sources[0].clone(),
             max_width,
             max_height,
-            jpeg_quality,
             pipewire_fds,
             blacklisted_apps,
         );
@@ -362,9 +428,7 @@ pub fn take_stitched_screenshots_raw_with_blacklist(
         if h != target_h && h > 0 {
             let scale = target_h as f64 / h as f64;
             let new_w = (w as f64 * scale).round() as u32;
-            // Triangle matches the single-source path — Lanczos3 here cost
-            // several times the CPU for a difference invisible at 60s/frame.
-            let scaled = img.resize_exact(new_w, target_h, image::imageops::FilterType::Triangle);
+            let scaled = fast_resize_rgba(img, new_w, target_h);
             total_w += scaled.width();
             scaled_images.push(scaled);
         } else {
@@ -398,24 +462,31 @@ pub fn take_stitched_screenshots_raw_with_blacklist(
         );
         let new_w = (w as f64 * scale).round() as u32;
         let new_h = (h as f64 * scale).round() as u32;
-        dynamic = dynamic.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle);
+        dynamic = fast_resize_rgba(dynamic, new_w, new_h);
     }
 
-    let (final_w, final_h) = (dynamic.width(), dynamic.height());
+    Ok(dynamic)
+}
 
-    // Encode as JPEG
-    let rgb = dynamic.to_rgb8();
-    let mut jpeg_buf = Cursor::new(Vec::new());
-    let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, jpeg_quality);
-    encoder
-        .encode_image(&rgb)
-        .map_err(|e| format!("JPEG encoding failed: {e}"))?;
-
-    Ok(RawCaptureResult {
-        data: jpeg_buf.into_inner(),
-        width: final_w,
-        height: final_h,
-    })
+/// Capture one or more sources side-by-side and encode as a single JPEG.
+/// Returns raw JPEG bytes — callers that need base64 (e.g. for the preview
+/// event) encode it themselves, so the upload path never has to decode.
+pub fn take_stitched_screenshots_raw_with_blacklist(
+    sources: &[CaptureSource],
+    max_width: u32,
+    max_height: u32,
+    jpeg_quality: u8,
+    pipewire_fds: &std::collections::HashMap<u32, i32>,
+    blacklisted_apps: &[String],
+) -> Result<RawCaptureResult, String> {
+    let dynamic = take_stitched_screenshots_image_with_blacklist(
+        sources,
+        max_width,
+        max_height,
+        pipewire_fds,
+        blacklisted_apps,
+    )?;
+    encode_frame_jpeg(&dynamic, jpeg_quality)
 }
 
 #[cfg(target_os = "macos")]

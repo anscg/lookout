@@ -285,6 +285,16 @@ export function useNativeCapture(
         setError(null);
         updatePreview(result.previewBase64);
       }),
+      // In-between live-preview frames from the capture loop (20/min while
+      // the window is focused). Same redaction-aware capture path as the
+      // uploads, delivered through the same preview pipeline — so
+      // lastScreenshotUrl is simply live whenever someone's looking.
+      listen<{ previewBase64: string; previewWidth: number; previewHeight: number }>(
+        "capture-preview-frame",
+        (event) => {
+          updatePreview(event.payload.previewBase64);
+        },
+      ),
       listen<{ message: string }>("capture-tick-error", (event) => {
         console.error(`[capture] Rust capture error: ${event.payload.message}`);
         setError(event.payload.message);
