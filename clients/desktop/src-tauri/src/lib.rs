@@ -2511,6 +2511,58 @@ async fn capture_loop_task(
         Ok(true)
     }
 
+    /// Apply a finished upload's outcome: sync the tray timer, refine the
+    /// next tick target from the server's `nextExpectedAt`, emit the UI
+    /// events, and run pause/termination recovery on failure. Returns false
+    /// when the capture loop should stop (terminal session state).
+    async fn apply_upload_result(
+        app: &AppHandle,
+        config: &SessionConfig,
+        result: Result<CaptureUploadResult, String>,
+        next_fire: &mut tokio::time::Instant,
+        interval_dur: tokio::time::Duration,
+    ) -> bool {
+        match result {
+            Ok(result) => {
+                // Sync tray timer to authoritative server time
+                {
+                    let state = app.state::<AppState>();
+                    sync_tray_timer(&state, result.tracked_seconds);
+                }
+                // Compute next fire from the server-provided nextExpectedAt.
+                // If parsing fails or the target is in the past, default to
+                // "fire now" (catch-up). Upper-bounded at 2x interval as a
+                // guard against malformed responses.
+                let parsed_target_ms = parse_iso_to_unix_ms(&result.next_expected_at);
+                let now_ms = current_unix_ms();
+                let delay_ms = match parsed_target_ms {
+                    Some(target) => (target - now_ms).max(0) as u64,
+                    None => CAPTURE_INTERVAL_SECS * 1000,
+                };
+                let delay_ms = delay_ms.min(CAPTURE_INTERVAL_SECS * 2 * 1000);
+                *next_fire =
+                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(delay_ms);
+                let _ = app.emit("capture-tick-result", CaptureTickResult::from(result));
+                true
+            }
+            Err(e) => {
+                eprintln!("[capture-loop] upload failed: {e}");
+                let _ = app.emit(
+                    "capture-tick-error",
+                    CaptureTickError { message: e.clone() },
+                );
+                // No server target available — fall back to a full interval.
+                *next_fire = tokio::time::Instant::now() + interval_dur;
+                // Check if the server paused/stopped the session
+                match handle_sleep_recovery(app, config).await {
+                    Ok(true) => true,
+                    Ok(false) => false,
+                    Err(_) => true,
+                }
+            }
+        }
+    }
+
     // Clip capability comes from the server, once per loop run. Any fetch
     // failure (or clips off) means legacy JPEG mode, bit-for-bit.
     let initial_config = {
@@ -2553,6 +2605,16 @@ async fn capture_loop_task(
     let opening_frame_dur = Duration::from_millis((frame_interval_ms / 3).max(500));
     let mut first_upload_done = false;
 
+    // The in-flight upload, if any. Uploads run CONCURRENTLY with frame
+    // capture: a multi-second clip finalize+upload must not punch a hole in
+    // the recording every minute — serially that compounds to minutes of
+    // missing screen time per hour. Strictly one upload at a time: the next
+    // tick settles the previous one before cutting, which preserves
+    // capturedAt monotonicity and the per-session rate-limit assumptions.
+    let mut upload_handle: Option<tokio::task::JoinHandle<Result<CaptureUploadResult, String>>> =
+        None;
+    let mut upload_cfg: Option<SessionConfig> = None;
+
     'outer: loop {
         // ── Wait until next_fire, collecting frames along the way ──
         // Frames run at the clip cadence (server-set, 15/min) through the
@@ -2572,12 +2634,37 @@ async fn capture_loop_task(
                 break;
             }
             let wake = std::cmp::min(now + cadence, next_fire);
+            // Third arm: the in-flight upload finishing mid-wait. Its body
+            // only records the outcome — applying it (which needs mutable
+            // access to upload_handle/next_fire) happens after the select.
+            let mut upload_outcome: Option<Result<CaptureUploadResult, String>> = None;
             tokio::select! {
                 _ = sleep_until(wake) => {}
                 _ = cancel_rx.changed() => {
                     eprintln!("[capture-loop] cancelled");
                     break 'outer;
                 }
+                res = async {
+                    match upload_handle.as_mut() {
+                        Some(h) => match h.await {
+                            Ok(r) => r,
+                            Err(e) => Err(format!("upload task panicked: {e}")),
+                        },
+                        None => unreachable!("guarded by select condition"),
+                    }
+                }, if upload_handle.is_some() => {
+                    upload_outcome = Some(res);
+                }
+            }
+            if let Some(res) = upload_outcome {
+                upload_handle = None;
+                let cfg = upload_cfg.take().expect("cfg tracks upload_handle");
+                if !apply_upload_result(&app, &cfg, res, &mut next_fire, interval_dur).await {
+                    break 'outer;
+                }
+                // next_fire was just refined by the confirm — recompute the
+                // wake target instead of falling through with a stale one.
+                continue;
             }
             // Woke for the upload tick, not a frame.
             if TokioInstant::now() >= next_fire {
@@ -2686,6 +2773,21 @@ async fn capture_loop_task(
             }
         }
 
+        // A previous upload still in flight (very slow network): settle it
+        // before cutting the next clip so uploads stay strictly ordered —
+        // capturedAt monotonicity and the per-session rate limits both
+        // assume order.
+        if let Some(handle) = upload_handle.take() {
+            let cfg = upload_cfg.take().expect("cfg tracks upload_handle");
+            let res = match handle.await {
+                Ok(r) => r,
+                Err(e) => Err(format!("upload task panicked: {e}")),
+            };
+            if !apply_upload_result(&app, &cfg, res, &mut next_fire, interval_dur).await {
+                break;
+            }
+        }
+
         // Grab the tick frame — the clip's final frame, the UI preview,
         // and the JPEG fallback, all from one capture. Full-size JPEG:
         // this one may be uploaded.
@@ -2745,90 +2847,60 @@ async fn capture_loop_task(
                     None
                 };
 
-                // Clip first; ANY clip-upload failure (size cap, server
-                // downgrade, transient) retries the tick as a JPEG so the
-                // credit streak never skips a beat.
-                let upload_result = match clip {
-                    Some(c) => {
-                        match upload_and_confirm(
-                            UploadPayload::mp4(c, jpeg_base64.clone()),
-                            captured_at.as_deref(),
-                            &config,
-                            &app,
-                        )
-                        .await
-                        {
-                            Ok(r) => Ok(r),
-                            Err(e) => {
-                                eprintln!(
-                                    "[capture-loop] clip upload failed ({e}) — retrying tick as JPEG"
-                                );
-                                upload_and_confirm(
-                                    UploadPayload::jpeg(
-                                        jpeg_bytes.clone(),
-                                        jpeg_base64.clone(),
-                                        jpeg_w,
-                                        jpeg_h,
-                                    ),
-                                    captured_at.as_deref(),
-                                    &config,
-                                    &app,
-                                )
-                                .await
+                // Spawn the upload as a background task — frame capture for
+                // the NEXT clip resumes immediately instead of stalling for
+                // the finalize+upload round trip (which would put a hole in
+                // the recording every minute). Clip first; ANY clip-upload
+                // failure (size cap, server downgrade, transient) retries
+                // the tick as a JPEG so the credit streak never skips a
+                // beat.
+                let task_app = app.clone();
+                let task_config = config.clone();
+                let task_captured_at = captured_at.clone();
+                upload_handle = Some(tokio::spawn(async move {
+                    let jpeg_fallback =
+                        UploadPayload::jpeg(jpeg_bytes, jpeg_base64.clone(), jpeg_w, jpeg_h);
+                    match clip {
+                        Some(c) => {
+                            match upload_and_confirm(
+                                UploadPayload::mp4(c, jpeg_base64),
+                                task_captured_at.as_deref(),
+                                &task_config,
+                                &task_app,
+                            )
+                            .await
+                            {
+                                Ok(r) => Ok(r),
+                                Err(e) => {
+                                    eprintln!(
+                                        "[capture-loop] clip upload failed ({e}) — retrying tick as JPEG"
+                                    );
+                                    upload_and_confirm(
+                                        jpeg_fallback,
+                                        task_captured_at.as_deref(),
+                                        &task_config,
+                                        &task_app,
+                                    )
+                                    .await
+                                }
                             }
                         }
-                    }
-                    None => {
-                        upload_and_confirm(
-                            UploadPayload::jpeg(jpeg_bytes, jpeg_base64, jpeg_w, jpeg_h),
-                            captured_at.as_deref(),
-                            &config,
-                            &app,
-                        )
-                        .await
-                    }
-                };
-
-                match upload_result {
-                    Ok(result) => {
-                        // Sync tray timer to authoritative server time
-                        {
-                            let state = app.state::<AppState>();
-                            sync_tray_timer(&state, result.tracked_seconds);
-                        }
-                        // Compute next fire from the server-provided
-                        // nextExpectedAt. If parsing fails or the target is
-                        // in the past, default to "fire now" (catch-up).
-                        let parsed_target_ms = parse_iso_to_unix_ms(&result.next_expected_at);
-                        let now_ms = current_unix_ms();
-                        let delay_ms = match parsed_target_ms {
-                            Some(target) => (target - now_ms).max(0) as u64,
-                            None => CAPTURE_INTERVAL_SECS * 1000,
-                        };
-                        // Safety upper-bound: never sleep longer than 2x interval,
-                        // protects against malformed responses.
-                        let delay_ms = delay_ms.min(CAPTURE_INTERVAL_SECS * 2 * 1000);
-                        next_fire = TokioInstant::now() + Duration::from_millis(delay_ms);
-                        let _ = app.emit("capture-tick-result", CaptureTickResult::from(result));
-                    }
-                    Err(e) => {
-                        eprintln!("[capture-loop] upload failed: {e}");
-                        let _ = app.emit(
-                            "capture-tick-error",
-                            CaptureTickError {
-                                message: e.clone(),
-                            },
-                        );
-                        // No server target available — fall back to interval.
-                        next_fire = TokioInstant::now() + interval_dur;
-                        // Check if server paused the session
-                        match handle_sleep_recovery(&app, &config).await {
-                            Ok(true) => { /* continue */ }
-                            Ok(false) => break,
-                            Err(_) => {}
+                        None => {
+                            upload_and_confirm(
+                                jpeg_fallback,
+                                task_captured_at.as_deref(),
+                                &task_config,
+                                &task_app,
+                            )
+                            .await
                         }
                     }
-                }
+                }));
+                upload_cfg = Some(config.clone());
+                // Provisional next tick one interval out; refined to the
+                // server's nextExpectedAt when the confirm lands mid-wait
+                // (see the wait-loop's third select arm).
+                next_fire = TokioInstant::now() + interval_dur;
             }
             Err(e) => {
                 eprintln!("[capture-loop] screenshot failed: {e}");
