@@ -35,6 +35,9 @@ export { useLookout } from "./hooks/useLookout.js";
 export { useScreenCapture } from "./hooks/useScreenCapture.js";
 export { useCameraCapture } from "./hooks/useCameraCapture.js";
 export { useUploader } from "./hooks/useUploader.js";
+export type { UploadPayload } from "./hooks/useUploader.js";
+export { ClipRecorder } from "./hooks/clipRecorder.js";
+export type { ClipCaptureResult, ClipRecorderOptions } from "./hooks/clipRecorder.js";
 export { useSession } from "./hooks/useSession.js";
 export { useSessionTimer, formatTime, formatTrackedTime } from "./hooks/useSessionTimer.js";
 

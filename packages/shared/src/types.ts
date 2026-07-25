@@ -1,4 +1,4 @@
-import type { SessionStatus } from "./constants.js";
+import type { CaptureFormat, SessionStatus } from "./constants.js";
 
 export interface Session {
   id: string;
@@ -31,6 +31,12 @@ export interface Screenshot {
   height: number | null;
   fileSizeBytes: number | null;
   sampled: boolean;
+  /** Payload format of this capture unit. "jpeg" = legacy single frame;
+   *  "webm"/"mp4" = per-minute clip. */
+  format: CaptureFormat;
+  /** Client-reported frame count inside a clip. Informational only —
+   *  the worker derives the real count by demuxing. NULL for jpeg rows. */
+  frameCount: number | null;
   createdAt: string;
 }
 
@@ -54,6 +60,10 @@ export type ClientInfo = string;
 export interface CreateSessionRequest {
   name?: string;
   metadata?: Record<string, unknown>;
+  /** Allow this session to receive clip uploads (per-minute videos of
+   *  ~20 frames) instead of one JPEG per minute. Default false.
+   *  Immutable after creation. */
+  clips?: boolean;
 }
 
 export interface CreateSessionResponse {
@@ -79,6 +89,14 @@ export interface SessionResponse {
   clientInfo?: ClientInfo | null;
   /** First recorded JA4 TLS fingerprint (edge-observed); `null` if none. */
   ja4?: string | null;
+  /** Whether this session accepts clip uploads. Clients read this BEFORE
+   *  the first capture (this endpoint is the session-recovery fetch) so
+   *  the very first upload can already be a clip. Absent on pre-clips
+   *  servers — treat as false. */
+  clipsEnabled?: boolean;
+  /** Server-authoritative clip cadence (ms between frames). Absent on
+   *  pre-clips servers. */
+  frameIntervalMs?: number;
   metadata: Record<string, unknown>;
 }
 
@@ -108,6 +126,19 @@ export interface UploadUrlResponse {
   serverTime?: string;
   /** Sticky tracking mode for the session. Optional for backwards compat. */
   trackingMode?: TrackingMode;
+  /** Echo of the GRANTED capture format — may differ from the requested
+   *  one (the server downgrades clip formats to "jpeg" on sessions where
+   *  clips are disabled). Absent on pre-clips servers — clients MUST
+   *  treat absence as "server only supports jpeg". The client must
+   *  upload exactly this format. */
+  format?: CaptureFormat;
+  /** Whether this session accepts clip uploads. Absent on pre-clips
+   *  servers (treat as false). */
+  clipsEnabled?: boolean;
+  /** Server-authoritative clip cadence (ms between frames inside a
+   *  clip). Absent on pre-clips servers. Clients must capture at exactly
+   *  this rate — there is deliberately no client-side override. */
+  frameIntervalMs?: number;
 }
 
 export interface ConfirmScreenshotRequest {
@@ -115,6 +146,8 @@ export interface ConfirmScreenshotRequest {
   width: number;
   height: number;
   fileSize: number;
+  /** Frames inside the uploaded clip. Omit for jpeg captures. */
+  frameCount?: number;
 }
 
 export interface ConfirmScreenshotResponse {

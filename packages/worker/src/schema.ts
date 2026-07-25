@@ -74,6 +74,10 @@ export const screenshots = pgTable(
     height: integer("height"),
     fileSizeBytes: integer("file_size_bytes"),
     sampled: boolean("sampled").notNull().default(false),
+    // 'jpeg' (legacy single frame) or 'webm'/'mp4' (per-minute clip).
+    format: text("format").notNull().default("jpeg"),
+    // Client-reported frames per clip; the compiler demuxes for the truth.
+    frameCount: integer("frame_count"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

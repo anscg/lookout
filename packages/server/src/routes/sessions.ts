@@ -17,11 +17,16 @@ import { now } from "../lib/clock.js";
 import { extractJa4 } from "../lib/ja4.js";
 import {
   SCREENSHOT_INTERVAL_MS,
+  CLIP_FRAME_INTERVAL_MS,
   PRESIGNED_URL_EXPIRY_SECONDS,
   MAX_SCREENSHOT_BYTES,
+  MAX_CLIP_BYTES,
   MAX_SCREENSHOTS_PER_SESSION,
   MAX_UPLOAD_REQUESTS_PER_SESSION,
   CLIENT_INFO_MAX_BYTES,
+  CAPTURE_FORMATS,
+  CAPTURE_FORMAT_CONTENT_TYPES,
+  type CaptureFormat,
 } from "@lookout/shared";
 
 /** Tracked-seconds dispatcher. Routes to bucket-count math for legacy
@@ -191,6 +196,12 @@ export async function sessionRoutes(app: FastifyInstance) {
         // Backwards compat: legacy clients keyed off this. Points at a static
         // "please update" video when the session is otherwise playable.
         videoWebmUrl: session.videoR2Key ? `${baseUrl}/please-update.webm` : null,
+        // Clip capability, surfaced on the session-recovery fetch so clients
+        // know BEFORE their first capture whether to record clips — the very
+        // first upload of a clips session is already a clip (no static
+        // opening frame in the timelapse). Old clients ignore these.
+        clipsEnabled: session.clipsEnabled,
+        frameIntervalMs: CLIP_FRAME_INTERVAL_MS,
         metadata: session.metadata ?? {},
       };
     },
@@ -243,7 +254,7 @@ export async function sessionRoutes(app: FastifyInstance) {
   // is sticky thereafter. See plan doc for details.
   app.get<{
     Params: { token: string };
-    Querystring: { capturedAt?: string; clientInfo?: string };
+    Querystring: { capturedAt?: string; clientInfo?: string; format?: CaptureFormat };
   }>(
     "/api/sessions/:token/upload-url",
     {
@@ -257,6 +268,12 @@ export async function sessionRoutes(app: FastifyInstance) {
             // Intentionally NOT length-capped here — schema validation failure
             // would 400 the whole upload. Best-effort: truncated in the handler.
             clientInfo: { type: "string" as const },
+            // Payload format. Omitted = 'jpeg' (legacy single frame). Clip
+            // clients pass 'webm'/'mp4' for per-minute video clips. The
+            // response echoes back the GRANTED format — requests for clip
+            // formats on sessions without clips enabled are silently
+            // downgraded to 'jpeg', and clients must upload what was granted.
+            format: { type: "string" as const, enum: CAPTURE_FORMATS },
           },
           additionalProperties: false,
         },
@@ -451,7 +468,20 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const minuteBucket = computeMinuteBucket(serverNow, startedAt);
       const screenshotId = randomUUID();
-      const r2Key = `screenshots/${session.id}/${screenshotId}.jpg`;
+      // Payload format for this capture unit. A clip is still ONE unit per
+      // minute — identical cadence, credit math, and rate limits as jpeg.
+      // The clips gate is enforced HERE, per upload: sessions without
+      // clips_enabled get clip-format requests silently downgraded to jpeg
+      // (the presign + granted-format echo both say jpeg, so a conforming
+      // client falls back without an error round-trip).
+      const requestedFormat: CaptureFormat = request.query.format ?? "jpeg";
+      const format: CaptureFormat =
+        requestedFormat !== "jpeg" && !session.clipsEnabled
+          ? "jpeg"
+          : requestedFormat;
+      const contentType = CAPTURE_FORMAT_CONTENT_TYPES[format];
+      const ext = format === "jpeg" ? "jpg" : format;
+      const r2Key = `screenshots/${session.id}/${screenshotId}.${ext}`;
 
       // Optional client telemetry from the query param. Stored opaquely and
       // never parsed. Truncate (don't reject) so a malformed/oversized value
@@ -476,6 +506,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         capturedAt: rowCapturedAt,
         clientInfo,
         ja4,
+        format,
       });
 
       // Generate presigned PUT URL
@@ -485,7 +516,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       const command = new PutObjectCommand({
         Bucket: R2_BUCKET,
         Key: r2Key,
-        ContentType: "image/jpeg",
+        ContentType: contentType,
       });
 
       const uploadUrl = await getSignedUrl(r2Client, command, {
@@ -500,6 +531,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         nextExpectedAt: nextExpectedAt.toISOString(),
         serverTime: serverNow.toISOString(),
         trackingMode,
+        format,
+        clipsEnabled: session.clipsEnabled,
+        frameIntervalMs: CLIP_FRAME_INTERVAL_MS,
       };
     },
   );
@@ -512,6 +546,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       width: number;
       height: number;
       fileSize: number;
+      frameCount?: number;
     };
   }>(
     "/api/sessions/:token/screenshots",
@@ -526,6 +561,9 @@ export async function sessionRoutes(app: FastifyInstance) {
             width: { type: "integer" as const, minimum: 1 },
             height: { type: "integer" as const, minimum: 1 },
             fileSize: { type: "integer" as const, minimum: 1 },
+            // Frames inside an uploaded clip. Informational (the worker
+            // demuxes for the real count); omitted for jpeg captures.
+            frameCount: { type: "integer" as const, minimum: 1, maximum: 600 },
           },
           additionalProperties: false,
         },
@@ -558,7 +596,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           .send({ error: `Session is ${session.status}, cannot confirm` });
       }
 
-      const { screenshotId, width, height, fileSize } = request.body;
+      const { screenshotId, width, height, fileSize, frameCount } = request.body;
 
       // Validate screenshot belongs to this session and isn't already confirmed
       const screenshot = await db.query.screenshots.findFirst({
@@ -604,15 +642,22 @@ export async function sessionRoutes(app: FastifyInstance) {
           new HeadObjectCommand({ Bucket: R2_BUCKET, Key: screenshot.r2Key }),
         );
 
-        // Validate ContentType is image/jpeg
-        if (head.ContentType !== "image/jpeg") {
+        // Validate ContentType matches the format the upload-url granted.
+        // The presigned PUT was signed with this content type, so a mismatch
+        // means the object was not uploaded through the granted URL.
+        const rowFormat = (screenshot.format ?? "jpeg") as CaptureFormat;
+        const expectedContentType = CAPTURE_FORMAT_CONTENT_TYPES[rowFormat];
+        if (head.ContentType !== expectedContentType) {
           return reply
             .code(400)
-            .send({ error: "Invalid content type — expected image/jpeg" });
+            .send({ error: `Invalid content type — expected ${expectedContentType}` });
         }
 
-        // Validate file size is within limits
-        if (head.ContentLength && head.ContentLength > MAX_SCREENSHOT_BYTES) {
+        // Validate file size is within the per-format limit. Clips get a
+        // larger budget than single frames, bounded by the client bitrate cap.
+        const maxBytes =
+          rowFormat === "jpeg" ? MAX_SCREENSHOT_BYTES : MAX_CLIP_BYTES;
+        if (head.ContentLength && head.ContentLength > maxBytes) {
           return reply.code(400).send({ error: "Uploaded object is too large" });
         }
       } catch {
@@ -675,6 +720,7 @@ export async function sessionRoutes(app: FastifyInstance) {
               width,
               height,
               fileSizeBytes: fileSize,
+              frameCount: frameCount ?? null,
               creditedSeconds: decision.credit,
               expectedAt: decision.expectedAt,
             })
@@ -720,6 +766,7 @@ export async function sessionRoutes(app: FastifyInstance) {
             width,
             height,
             fileSizeBytes: fileSize,
+            frameCount: frameCount ?? null,
           })
           .where(eq(schema.screenshots.id, screenshotId));
 

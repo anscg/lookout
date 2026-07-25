@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CLIP_FRAME_INTERVAL_MS } from "@lookout/shared";
 import { useLookoutContext } from "../LookoutProvider.js";
 import { useScreenCapture } from "./useScreenCapture.js";
 import { useCameraCapture } from "./useCameraCapture.js";
-import { useUploader } from "./useUploader.js";
+import { useUploader, type UploadPayload } from "./useUploader.js";
 import { useSession } from "./useSession.js";
 import { useSessionTimer } from "./useSessionTimer.js";
 import { useSilentAudioKeepAlive } from "./useSilentAudioKeepAlive.js";
 import { computeBestTrackedSeconds } from "./computeBestTracked.js";
+import { ClipRecorder } from "./clipRecorder.js";
 import type { LookoutState, LookoutActions, RecorderStatus } from "../types.js";
 
 /**
@@ -49,6 +51,9 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   // Holds either a setInterval ID (legacy bucket-mode fallback) or
   // setTimeout ID (credit-mode self-scheduling chain). Cleared on unmount.
   const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Clip recorder for sessions with clips enabled (screen mode only).
+  // Null = classic one-JPEG-per-minute captures.
+  const clipRecorderRef = useRef<ClipRecorder | null>(null);
   const capturingRef = useRef(false);
   const prevStatusRef = useRef<RecorderStatus>(session.status);
   const intentionalPauseRef = useRef(false);
@@ -108,11 +113,44 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     capturingRef.current = true;
     let cancelled = false;
 
+    // Clip mode: the session accepts clips (known from the session fetch,
+    // BEFORE any upload), this browser can encode them, and we're capturing
+    // the screen (camera mode stays on JPEG). The recorder starts grabbing
+    // frames immediately so the very first upload is already a clip — the
+    // compiled timelapse has motion from second zero, never a still.
+    const frameIntervalMs = session.frameIntervalMs ?? CLIP_FRAME_INTERVAL_MS;
+    let clipRecorder: ClipRecorder | null = null;
+    if (
+      captureMode !== "camera" &&
+      session.clipsEnabled &&
+      ClipRecorder.isSupported()
+    ) {
+      const video = screenCapture.getVideo();
+      if (video) {
+        try {
+          clipRecorder = new ClipRecorder(video, frameIntervalMs, {
+            maxWidth: config.capture.maxWidth,
+            maxHeight: config.capture.maxHeight,
+            jpegQuality: config.capture.jpegQuality,
+          });
+          clipRecorder.start();
+        } catch (err) {
+          console.warn(
+            "[lookout] clip recorder unavailable, using JPEG captures:",
+            err,
+          );
+          clipRecorder = null;
+        }
+      }
+    }
+    clipRecorderRef.current = clipRecorder;
+
     // Serial capture-upload chain — matches the desktop Rust loop in
     // `clients/desktop/src-tauri/src/lib.rs::capture_loop_task`. Each
-    // tick takes a screenshot, awaits the full upload+confirm round
-    // trip, and reads the FRESH `nextExpectedAt` from THIS capture's
-    // own confirm response. No shared ref, no race.
+    // tick produces one capture unit (a clip cut, or a JPEG screenshot),
+    // awaits the full upload+confirm round trip, and reads the FRESH
+    // `nextExpectedAt` from THIS capture's own confirm response. No
+    // shared ref, no race.
     //
     // As long as the round trip stays under config.capture.intervalMs,
     // captures land exactly on the server's authoritative schedule. If
@@ -122,10 +160,18 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       if (cancelled) return;
       let nextExpectedAt: string | null = null;
       try {
-        const captureResult = await takeScreenshotRef.current();
-        if (captureResult) {
-          callbacksRef.current.onCapture?.(captureResult);
-          const result = await captureUploadConfirmRef.current(captureResult);
+        // cut() finalizes the last interval's clip and immediately starts
+        // recording the next one. A null cut (empty clip, encoder hiccup)
+        // falls back to a single JPEG so the tick — and the session's
+        // credit streak — never skips a beat.
+        let payload: UploadPayload | null =
+          (await clipRecorderRef.current?.cut()) ?? null;
+        if (!payload) {
+          payload = await takeScreenshotRef.current();
+        }
+        if (payload) {
+          callbacksRef.current.onCapture?.(payload);
+          const result = await captureUploadConfirmRef.current(payload);
           nextExpectedAt = result.nextExpectedAt;
         }
       } catch (err) {
@@ -148,7 +194,13 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       intervalRef.current = setTimeout(tick, delay);
     };
 
-    tick();
+    if (clipRecorder) {
+      // Give the opening clip a couple of frames before the first cut so
+      // the timelapse's first second shows motion, not a single still.
+      intervalRef.current = setTimeout(tick, frameIntervalMs * 2);
+    } else {
+      tick();
+    }
 
     return () => {
       capturingRef.current = false;
@@ -157,8 +209,21 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
         clearTimeout(intervalRef.current);
         intervalRef.current = null;
       }
+      clipRecorderRef.current?.stop();
+      clipRecorderRef.current = null;
     };
-  }, [capture.isSharing, isActive, config.capture.intervalMs]);
+  }, [
+    capture.isSharing,
+    isActive,
+    config.capture.intervalMs,
+    config.capture.maxWidth,
+    config.capture.maxHeight,
+    config.capture.jpegQuality,
+    captureMode,
+    session.clipsEnabled,
+    session.frameIntervalMs,
+    screenCapture.getVideo,
+  ]);
 
   // Auto-resume when screen sharing *starts* while session is paused
   // (e.g., user clicked "Share Screen & Resume" after a reload).
@@ -190,6 +255,8 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
           clearInterval(intervalRef.current);
           intervalRef.current = null;
         }
+        clipRecorderRef.current?.stop();
+        clipRecorderRef.current = null;
         callbacksRef.current.onShareStop?.();
       }
       // Both cases: pause the server session so it doesn't accumulate dead time
@@ -264,6 +331,10 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
+    // Discard the in-progress clip right away — don't keep grabbing
+    // frames while the pause request is in flight.
+    clipRecorderRef.current?.stop();
+    clipRecorderRef.current = null;
     capturingRef.current = false;
     try {
       await session.pause();
@@ -292,6 +363,8 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
+    clipRecorderRef.current?.stop();
+    clipRecorderRef.current = null;
     capturingRef.current = false;
     capture.stopSharing();
     try {

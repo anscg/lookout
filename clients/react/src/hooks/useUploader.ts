@@ -1,7 +1,8 @@
 import { useCallback, useState } from "react";
+import { CAPTURE_FORMAT_CONTENT_TYPES, type CaptureFormat } from "@lookout/shared";
 import { useLookoutContext } from "../LookoutProvider.js";
 import { HttpError } from "../api/client.js";
-import type { CaptureResult, UploadState } from "../types.js";
+import type { UploadState } from "../types.js";
 
 /** Whether to opt into credit-mode tracking by sending `capturedAt` to the
  *  server on every upload. The new desktop / web build enables this on new
@@ -26,6 +27,20 @@ async function retry<T>(
   throw new Error("Unreachable");
 }
 
+/** Unified upload payload: a single JPEG frame (format omitted/"jpeg")
+ *  or a per-minute clip ("webm"/"mp4" from the ClipRecorder). */
+export interface UploadPayload {
+  blob: Blob;
+  width: number;
+  height: number;
+  capturedAtMs?: number;
+  format?: CaptureFormat;
+  /** Frames inside a clip. Omitted for JPEG captures. */
+  frameCount?: number;
+  /** JPEG used for the UI preview when `blob` isn't an image. */
+  previewBlob?: Blob | null;
+}
+
 export interface UploadConfirmResult {
   trackedSeconds: number;
   nextExpectedAt: string;
@@ -36,7 +51,7 @@ export interface UploaderResult {
    *  fresh `nextExpectedAt` from THIS capture's confirm response.
    *  Throws on failure (after retries) — the caller (the capture-loop
    *  scheduler) catches and falls back to a local interval. */
-  captureUploadConfirm: (capture: CaptureResult) => Promise<UploadConfirmResult>;
+  captureUploadConfirm: (capture: UploadPayload) => Promise<UploadConfirmResult>;
   /** Current upload state. */
   uploads: UploadState;
   /** Server-reported tracked seconds after latest confirmation. */
@@ -81,21 +96,42 @@ export function useUploader(): UploaderResult {
   const resetConflict = useCallback(() => setSessionConflict(false), []);
 
   const captureUploadConfirm = useCallback(
-    async (capture: CaptureResult): Promise<UploadConfirmResult> => {
+    async (capture: UploadPayload): Promise<UploadConfirmResult> => {
       setUploads((s) => ({ ...s, pending: s.pending + 1 }));
       try {
         const capturedAt = ENABLE_CREDIT_MODE
           ? new Date(capture.capturedAtMs ?? Date.now()).toISOString()
           : undefined;
+        const format: CaptureFormat = capture.format ?? "jpeg";
 
-        const { uploadUrl, screenshotId } = await retry(
-          () => client.getUploadUrl({ capturedAt }),
+        const urlResponse = await retry(
+          () =>
+            client.getUploadUrl({
+              capturedAt,
+              format: format === "jpeg" ? undefined : format,
+            }),
           maxRetries,
           retryDelays,
         );
+        const { uploadUrl, screenshotId } = urlResponse;
+        // Defense-in-depth: the capture loop only records clips when the
+        // session said clipsEnabled, so a downgrade here (granted format ≠
+        // requested) means server state changed under us. The presigned URL
+        // is signed for the granted content type — uploading the clip
+        // against it would fail the signature, so fail fast instead.
+        if (format !== "jpeg" && urlResponse.format !== format) {
+          throw new Error(
+            `Server granted "${urlResponse.format ?? "jpeg"}" for a "${format}" clip — falling back to JPEG captures`,
+          );
+        }
 
         await retry(
-          () => client.uploadToR2(uploadUrl, capture.blob),
+          () =>
+            client.uploadToR2(
+              uploadUrl,
+              capture.blob,
+              CAPTURE_FORMAT_CONTENT_TYPES[format],
+            ),
           maxRetries,
           retryDelays,
         );
@@ -107,16 +143,23 @@ export function useUploader(): UploaderResult {
               width: capture.width,
               height: capture.height,
               fileSize: capture.blob.size,
+              ...(capture.frameCount ? { frameCount: capture.frameCount } : {}),
             }),
           maxRetries,
           retryDelays,
         );
 
         setTrackedSeconds(result.trackedSeconds);
-        setLastScreenshotUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return URL.createObjectURL(capture.blob);
-        });
+        // Clips aren't <img>-renderable — preview with the cut-time JPEG
+        // snapshot instead, and keep the previous preview if none came.
+        const previewBlob =
+          format === "jpeg" ? capture.blob : capture.previewBlob ?? null;
+        if (previewBlob) {
+          setLastScreenshotUrl((prev) => {
+            if (prev) URL.revokeObjectURL(prev);
+            return URL.createObjectURL(previewBlob);
+          });
+        }
         setUploads((s) => ({
           ...s,
           pending: s.pending - 1,

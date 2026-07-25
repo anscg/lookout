@@ -19,7 +19,7 @@ export async function internalRoutes(app: FastifyInstance) {
 
   // Create a new session
   app.post<{
-    Body: { name?: string; metadata?: Record<string, unknown> };
+    Body: { name?: string; metadata?: Record<string, unknown>; clips?: boolean };
   }>(
     "/api/internal/sessions",
     {
@@ -29,19 +29,24 @@ export async function internalRoutes(app: FastifyInstance) {
           properties: {
             name: { type: "string" as const, minLength: 1, maxLength: 255 },
             metadata: { type: "object" as const, maxProperties: 50 },
+            // Opt this session into clip uploads (per-minute videos of ~20
+            // frames). Default false = legacy 1 JPEG/min. Immutable after
+            // creation — a session's capture character never changes.
+            clips: { type: "boolean" as const },
           },
           additionalProperties: false,
         },
       },
     },
     async (request, reply) => {
-      const { name, metadata } = request.body || {};
+      const { name, metadata, clips } = request.body || {};
 
       const [session] = await db
         .insert(schema.sessions)
         .values({
           ...(name ? { name } : {}),
           metadata: metadata ?? {},
+          clipsEnabled: clips ?? false,
           // Attribution: tag with the creating program (null for global key).
           // `program` (name) is dual-written for backward compatibility;
           // `programId` is the canonical attribution.

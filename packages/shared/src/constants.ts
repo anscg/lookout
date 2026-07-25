@@ -58,6 +58,58 @@ export const STREAK_WINDOW_MS = 30_000;
 export const CREDIT_PER_CAPTURE_S = 60;
 
 // ──────────────────────────────────────────────────────────
+// Clips (20 frames/minute via per-minute video uploads)
+// ──────────────────────────────────────────────────────────
+
+/** Upload payload formats the server accepts on upload-url.
+ *  "jpeg" is the legacy single-screenshot-per-minute payload.
+ *  "webm"/"mp4" are per-minute video clips holding ~20 frames captured
+ *  seconds apart (webm from Chromium/Firefox MediaRecorder; mp4 from
+ *  Safari MediaRecorder and the future desktop hardware encoder). The
+ *  per-minute request cadence, credit math, and rate limits are
+ *  identical in all formats — a clip is still ONE capture unit.
+ *  Clips are gated per session by `sessions.clips_enabled`, set at
+ *  creation via the internal API and immutable thereafter. */
+export const CAPTURE_FORMATS = ["jpeg", "webm", "mp4"] as const;
+export type CaptureFormat = (typeof CAPTURE_FORMATS)[number];
+
+/** R2/HTTP content type for each capture format. The presigned PUT is
+ *  signed with this content type and confirm re-validates it via
+ *  HeadObject, so client and server must agree exactly. */
+export const CAPTURE_FORMAT_CONTENT_TYPES: Record<CaptureFormat, string> = {
+  jpeg: "image/jpeg",
+  webm: "video/webm",
+  mp4: "video/mp4",
+};
+
+/** How often a clip-recording client grabs a frame into the current
+ *  clip. 3000ms = 20 frames per SCREENSHOT_INTERVAL_MS. The cadence is
+ *  server-authoritative: it's sent to clients as `frameIntervalMs` on
+ *  the session GET and upload-url responses, clients capture at exactly
+ *  that rate, and no client exposes an override.
+ *  Default: 3000 (3 seconds) */
+export const CLIP_FRAME_INTERVAL_MS = 3_000;
+
+/** Nominal frames per clip (SCREENSHOT_INTERVAL_MS / CLIP_FRAME_INTERVAL_MS).
+ *  Informational — clips are VFR and static screens legitimately emit
+ *  fewer encoded frames. The worker derives real counts by demuxing.
+ *  Default: 20 */
+export const FRAMES_PER_CLIP = 20;
+
+/** Client-side encoder bitrate cap for clips (bits/second).
+ *  ~133 kbps ≈ 1 MB per 60s clip worst case; measured editor-like
+ *  screen content lands around 30-50 KB/min. Keeps network usage in
+ *  the same band as the legacy ~200 KB JPEG-per-minute.
+ *  Default: 133000 */
+export const CLIP_VIDEO_BITS_PER_SECOND = 133_000;
+
+/** Max clip file size in bytes, validated server-side via HeadObject
+ *  after upload. Sized ~2x the bitrate budget (133 kbps × 60s ≈ 1 MB)
+ *  to absorb encoder overshoot and container overhead.
+ *  Default: 2097152 (2 MB) */
+export const MAX_CLIP_BYTES = 2 * 1024 * 1024;
+
+// ──────────────────────────────────────────────────────────
 // Auto-timeout thresholds
 // ──────────────────────────────────────────────────────────
 

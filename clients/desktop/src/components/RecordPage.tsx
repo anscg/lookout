@@ -16,7 +16,10 @@ import { DesktopRecorder } from "./DesktopRecorder.js";
 import { NamingModal } from "./NamingModal.js";
 import { PageLayout, cardButtonStyle } from "./PageLayout.js";
 
-const API_BASE = "https://lookout.hackclub.com";
+import { getApiBase } from "../serverConfig.js";
+
+// Read once per webview load; Settings → Server reloads the view on change.
+const API_BASE = getApiBase();
 
 interface RecordPageProps {
   token: string;
