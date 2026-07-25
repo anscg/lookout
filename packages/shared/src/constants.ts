@@ -63,9 +63,9 @@ export const CREDIT_PER_CAPTURE_S = 60;
 
 /** Upload payload formats the server accepts on upload-url.
  *  "jpeg" is the legacy single-screenshot-per-minute payload.
- *  "webm"/"mp4" are per-minute video clips holding ~20 frames captured
+ *  "webm"/"mp4" are per-minute video clips holding ~15 frames captured
  *  seconds apart (webm from Chromium/Firefox MediaRecorder; mp4 from
- *  Safari MediaRecorder and the future desktop hardware encoder). The
+ *  Safari MediaRecorder and the desktop hardware encoder). The
  *  per-minute request cadence, credit math, and rate limits are
  *  identical in all formats — a clip is still ONE capture unit.
  *  Clips are gated per session by `sessions.clips_enabled`, set at
@@ -83,33 +83,36 @@ export const CAPTURE_FORMAT_CONTENT_TYPES: Record<CaptureFormat, string> = {
 };
 
 /** How often a clip-recording client grabs a frame into the current
- *  clip. 3000ms = 20 frames per SCREENSHOT_INTERVAL_MS. The cadence is
+ *  clip. 4000ms = 15 frames per SCREENSHOT_INTERVAL_MS. The cadence is
  *  server-authoritative: it's sent to clients as `frameIntervalMs` on
  *  the session GET and upload-url responses, clients capture at exactly
- *  that rate, and no client exposes an override.
- *  Default: 3000 (3 seconds) */
-export const CLIP_FRAME_INTERVAL_MS = 3_000;
+ *  that rate, and no client exposes an override. 15/min trades a hair
+ *  of smoothness for ~33% more bitrate budget per frame — text
+ *  legibility wins.
+ *  Default: 4000 (4 seconds) */
+export const CLIP_FRAME_INTERVAL_MS = 4_000;
 
 /** Nominal frames per clip (SCREENSHOT_INTERVAL_MS / CLIP_FRAME_INTERVAL_MS).
  *  Informational — clips are VFR and static screens legitimately emit
  *  fewer encoded frames. The worker derives real counts by demuxing.
- *  Default: 20 */
-export const FRAMES_PER_CLIP = 20;
+ *  Default: 15 */
+export const FRAMES_PER_CLIP = 15;
 
 /** Client-side encoder bitrate cap for clips (bits/second).
- *  400 kbps ≈ 3 MB per 60s clip worst case; static screen content lands
- *  far below (VBR undershoots easy content). 133 kbps was tried first
- *  and produced visibly soft H.264 at 1080p — hardware encoders need
- *  more budget than VP9 for the same quality, and the compiled
- *  timelapse re-encodes this once more, so source softness compounds.
- *  Default: 400000 */
-export const CLIP_VIDEO_BITS_PER_SECOND = 400_000;
+ *  Sized for TEXT LEGIBILITY: at 15 frames/min, 800 kbps allows ~400 KB
+ *  per 4s frame — JPEG-q85-class keyframes at 1080p, the bar the legacy
+ *  single-screenshot pipeline set. This is a VBR ceiling, not a floor:
+ *  static screen content undershoots it heavily (measured 133 kbps-era
+ *  clips landed at ~400 KB/min total). 133k and 400k were tried first
+ *  and produced visibly soft H.264.
+ *  Default: 800000 */
+export const CLIP_VIDEO_BITS_PER_SECOND = 800_000;
 
 /** Max clip file size in bytes, validated server-side via HeadObject
- *  after upload. Sized above the bitrate budget (400 kbps × 60s ≈ 3 MB)
+ *  after upload. Sized above the bitrate budget (800 kbps × 60s ≈ 6 MB)
  *  to absorb encoder overshoot and container overhead.
- *  Default: 4194304 (4 MB) */
-export const MAX_CLIP_BYTES = 4 * 1024 * 1024;
+ *  Default: 8388608 (8 MB) */
+export const MAX_CLIP_BYTES = 8 * 1024 * 1024;
 
 // ──────────────────────────────────────────────────────────
 // Auto-timeout thresholds

@@ -2075,12 +2075,12 @@ const CAPTURE_INTERVAL_SECS: u64 = 60;
 /// probably slept (or the WebView was throttled hard).
 const SLEEP_THRESHOLD_SECS: u64 = CAPTURE_INTERVAL_SECS * 2 + 30; // 150s
 /// Fallback frame cadence when the server doesn't advertise one (pre-clips
-/// servers): every 3s = 20 frames/min. When the server sends
+/// servers): every 4s = 15 frames/min. When the server sends
 /// `frameIntervalMs` on the session GET, that value wins — the cadence is
 /// server-authoritative. Frames go through the identical redaction-aware
 /// capture path as uploads; in clips mode they're recorded into the clip,
 /// and the JPEG preview side is only produced while the window is focused.
-const DEFAULT_FRAME_INTERVAL_MS: u64 = 3_000;
+const DEFAULT_FRAME_INTERVAL_MS: u64 = 4_000;
 
 /// Format seconds into the same tray title format as the JS side:
 /// >0h: "{h}h {m}m", 0m: "< 1m", else: "{m}m"
@@ -2555,8 +2555,8 @@ async fn capture_loop_task(
 
     'outer: loop {
         // ── Wait until next_fire, collecting frames along the way ──
-        // Frames run at the clip cadence (20/min) through the SAME
-        // redaction-aware capture path as uploads. In clips mode every
+        // Frames run at the clip cadence (server-set, 15/min) through the
+        // SAME redaction-aware capture path as uploads. In clips mode every
         // frame is recorded into the current clip; the JPEG preview side
         // is focus-gated either way (nobody can see it unfocused).
         // sleep_until returns immediately when next_fire is already past

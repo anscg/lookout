@@ -3,7 +3,7 @@
 //! with clips enabled.
 //!
 //! One `ClipRecorder` lives per upload interval: the capture loop pushes a
-//! frame every `frameIntervalMs` (server-authoritative, 3s = 20/min), and
+//! frame every `frameIntervalMs` (server-authoritative, 4s = 15/min), and
 //! at the upload tick `finish()` produces the MP4 bytes. Encoding is done
 //! by the OS hardware encoder on every platform — no bundled codecs:
 //!
@@ -20,11 +20,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Encoder bitrate cap (bits/second). Matches the web client's
-/// CLIP_VIDEO_BITS_PER_SECOND — ~3 MB per 60s clip worst case, far less on
-/// static screens (VBR undershoots easy content). The server rejects clips
-/// over 4 MB. 133 kbps was tried first and produced visibly soft H.264 at
-/// 1080p.
-pub const CLIP_BITS_PER_SECOND: u32 = 400_000;
+/// CLIP_VIDEO_BITS_PER_SECOND. Sized for text legibility: ~300 KB per 3s
+/// frame allows JPEG-q85-class keyframes at 1080p. VBR ceiling, not a
+/// floor — static screens undershoot heavily. The server rejects clips
+/// over 8 MB. 133k/400k were tried first and produced soft H.264.
+pub const CLIP_BITS_PER_SECOND: u32 = 800_000;
 
 /// A finished clip ready for upload.
 pub struct FinishedClip {
@@ -213,6 +213,34 @@ mod tests {
                 stdout.trim().ends_with(",5"),
                 "expected 5 packets, got: {stdout}"
             );
+
+            // GOP shape: exactly ONE keyframe. Frames are seconds apart in
+            // media time, so a default max-keyframe-interval-duration makes
+            // the encoder emit ALL-keyframe clips — which rations the
+            // bitrate budget across 20 I-frames and produces uniformly soft
+            // output (~20KB/frame). One IDR + cheap P-frames is the shape
+            // that lets the keyframe stay crisp.
+            let path2 = clip_temp_path();
+            std::fs::write(&path2, &clip.mp4).unwrap();
+            let frames_out = std::process::Command::new("ffprobe")
+                .args([
+                    "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "frame=key_frame",
+                    "-of", "csv=p=0",
+                ])
+                .arg(&path2)
+                .output()
+                .expect("ffprobe frames run");
+            let _ = std::fs::remove_file(&path2);
+            let keyframes = String::from_utf8_lossy(&frames_out.stdout)
+                .lines()
+                .filter(|l| l.trim_end_matches(',') == "1")
+                .count();
+            assert_eq!(
+                keyframes, 1,
+                "expected exactly 1 keyframe in the clip, got {keyframes}"
+            );
         } else {
             eprintln!("ffprobe not found — container-level checks only");
         }
@@ -255,9 +283,11 @@ mod platform {
     use objc2::runtime::{AnyObject, ProtocolObject};
     use objc2_av_foundation::{
         AVAssetWriter, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor,
-        AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo, AVVideoAverageBitRateKey,
-        AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey,
-        AVVideoHeightKey, AVVideoWidthKey,
+        AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo,
+        AVVideoAllowFrameReorderingKey, AVVideoAverageBitRateKey, AVVideoCodecKey,
+        AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey,
+        AVVideoExpectedSourceFrameRateKey, AVVideoHeightKey,
+        AVVideoMaxKeyFrameIntervalKey, AVVideoWidthKey,
     };
     use objc2_core_media::CMTime;
     use objc2_core_video::{
@@ -300,6 +330,12 @@ mod platform {
                     AVVideoCompressionPropertiesKey.ok_or("AVVideoCompressionPropertiesKey unavailable")?;
                 let key_bitrate =
                     AVVideoAverageBitRateKey.ok_or("AVVideoAverageBitRateKey unavailable")?;
+                let key_max_kf =
+                    AVVideoMaxKeyFrameIntervalKey.ok_or("AVVideoMaxKeyFrameIntervalKey unavailable")?;
+                let key_reorder = AVVideoAllowFrameReorderingKey
+                    .ok_or("AVVideoAllowFrameReorderingKey unavailable")?;
+                let key_expected_fps = AVVideoExpectedSourceFrameRateKey
+                    .ok_or("AVVideoExpectedSourceFrameRateKey unavailable")?;
 
                 let writer = AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type)
                     .map_err(|e| format!("AVAssetWriter init failed: {e}"))?;
@@ -311,6 +347,27 @@ mod platform {
                 compression.setObject_forKey(
                     NSNumber::new_u32(bitrate).as_ref(),
                     ProtocolObject::from_ref(key_bitrate),
+                );
+                // One IDR per clip: frames sit seconds apart in media time,
+                // so any keyframe-interval default expressed in seconds
+                // would turn the whole clip into rationed I-frames —
+                // uniformly soft. One crisp keyframe + cheap P-frames is
+                // the intended shape.
+                compression.setObject_forKey(
+                    NSNumber::new_u32(1200).as_ref(),
+                    ProtocolObject::from_ref(key_max_kf),
+                );
+                // No B-frames: pointless at this cadence and they add
+                // reorder latency/complexity.
+                compression.setObject_forKey(
+                    NSNumber::new_bool(false).as_ref(),
+                    ProtocolObject::from_ref(key_reorder),
+                );
+                // Rate-control hint: the source is ~1 frame/interval, not
+                // 30fps — lets the encoder budget bits per frame correctly.
+                compression.setObject_forKey(
+                    NSNumber::new_u32(1).as_ref(),
+                    ProtocolObject::from_ref(key_expected_fps),
                 );
 
                 let settings: Retained<NSMutableDictionary<NSString, AnyObject>> =
@@ -473,7 +530,8 @@ mod platform {
         MFCreateSample, MFCreateSinkWriterFromURL, MFShutdown, MFStartup, MFSTARTUP_FULL,
         MFVideoFormat_H264, MFVideoFormat_RGB32, MFVideoInterlace_Progressive,
         MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-        MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFMediaType_Video,
+        MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_SUBTYPE, MF_VERSION,
+        MFMediaType_Video,
     };
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
@@ -542,6 +600,10 @@ mod platform {
                     .map_err(|e| e.to_string())?;
                 out_type
                     .SetUINT64(&MF_MT_FRAME_RATE, pack_u64(1, 1))
+                    .map_err(|e| e.to_string())?;
+                // One IDR per clip (see the macOS encoder for rationale).
+                out_type
+                    .SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 10_000)
                     .map_err(|e| e.to_string())?;
                 let stream_index = writer
                     .AddStream(&out_type)

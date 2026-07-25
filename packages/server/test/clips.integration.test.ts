@@ -236,7 +236,7 @@ describe("per-format confirm validation", () => {
     const up = await getUploadUrl(s.token, { capturedAt: nowIso(), format: "webm" });
     (globalThis as any).__r2HeadObjectOverride = {
       ContentType: "video/webm",
-      ContentLength: 5 * 1024 * 1024,
+      ContentLength: 9 * 1024 * 1024,
     };
     const confirm = await confirmUpload(s.token, up.body.screenshotId, {
       frameCount: 20,
