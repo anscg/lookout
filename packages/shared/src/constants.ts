@@ -97,17 +97,19 @@ export const CLIP_FRAME_INTERVAL_MS = 3_000;
 export const FRAMES_PER_CLIP = 20;
 
 /** Client-side encoder bitrate cap for clips (bits/second).
- *  ~133 kbps ≈ 1 MB per 60s clip worst case; measured editor-like
- *  screen content lands around 30-50 KB/min. Keeps network usage in
- *  the same band as the legacy ~200 KB JPEG-per-minute.
- *  Default: 133000 */
-export const CLIP_VIDEO_BITS_PER_SECOND = 133_000;
+ *  400 kbps ≈ 3 MB per 60s clip worst case; static screen content lands
+ *  far below (VBR undershoots easy content). 133 kbps was tried first
+ *  and produced visibly soft H.264 at 1080p — hardware encoders need
+ *  more budget than VP9 for the same quality, and the compiled
+ *  timelapse re-encodes this once more, so source softness compounds.
+ *  Default: 400000 */
+export const CLIP_VIDEO_BITS_PER_SECOND = 400_000;
 
 /** Max clip file size in bytes, validated server-side via HeadObject
- *  after upload. Sized ~2x the bitrate budget (133 kbps × 60s ≈ 1 MB)
+ *  after upload. Sized above the bitrate budget (400 kbps × 60s ≈ 3 MB)
  *  to absorb encoder overshoot and container overhead.
- *  Default: 2097152 (2 MB) */
-export const MAX_CLIP_BYTES = 2 * 1024 * 1024;
+ *  Default: 4194304 (4 MB) */
+export const MAX_CLIP_BYTES = 4 * 1024 * 1024;
 
 // ──────────────────────────────────────────────────────────
 // Auto-timeout thresholds
