@@ -15,9 +15,39 @@ export interface UseGallery {
 
 interface CachedSession {
   summary: SessionSummary;
-  thumbnailUrlFetchedAt: number;
+  fetchedAt: number;
 }
-const globalSessionsCache: Record<string, CachedSession> = {};
+
+// Persisted across app restarts so the gallery paints instantly from the
+// last known state (and thumbnails come out of the HTTP cache) while a
+// background refresh runs.
+const CACHE_STORAGE_KEY = "lookout:gallery-cache:v2";
+const CACHE_MAX_ENTRIES = 500;
+
+function loadPersistedCache(): Record<string, CachedSession> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(CACHE_STORAGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, CachedSession>) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistCache(cache: Record<string, CachedSession>): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const entries = Object.entries(cache)
+      .sort(([, a], [, b]) => b.fetchedAt - a.fetchedAt)
+      .slice(0, CACHE_MAX_ENTRIES);
+    localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // Quota exceeded or storage unavailable — cache is best-effort.
+  }
+}
+
+const globalSessionsCache: Record<string, CachedSession> = loadPersistedCache();
 
 export function useGallery({ apiBaseUrl, tokens }: UseGalleryOptions): UseGallery {
   const validTokens = tokens.filter((t) => /^[a-f0-9]{64}$/i.test(t));
@@ -83,33 +113,17 @@ export function useGallery({ apiBaseUrl, tokens }: UseGalleryOptions): UseGaller
       .then((results) => ({ sessions: results.flatMap((r) => r.sessions ?? []) }))
       .then((data: { sessions: SessionSummary[] }) => {
         if (!cancelled) {
+          // Thumbnail URLs are permanent (/api/media/:id/thumbnail.jpg) and
+          // the endpoint serves proper cache headers, so the browser HTTP
+          // cache handles image reuse — just store the latest summaries.
           const now = Date.now();
-          const THUMBNAIL_EXPIRY = 45 * 60 * 1000; // 45 mins
-          
-          const mergedSessions = (data.sessions ?? []).map(newSession => {
-            const cached = globalSessionsCache[newSession.token];
-            let thumbnailUrl = newSession.thumbnailUrl;
-            let fetchedAt = now;
-            
-            if (cached && cached.summary.thumbnailUrl) {
-              const isImageSame = newSession.screenshotCount === cached.summary.screenshotCount;
-              const isFresh = now - cached.thumbnailUrlFetchedAt < THUMBNAIL_EXPIRY;
-              
-              if (isImageSame && isFresh) {
-                thumbnailUrl = cached.summary.thumbnailUrl;
-                fetchedAt = cached.thumbnailUrlFetchedAt;
-              }
-            }
-            
-            const resultSession = { ...newSession, thumbnailUrl };
-            globalSessionsCache[newSession.token] = {
-              summary: resultSession,
-              thumbnailUrlFetchedAt: fetchedAt
-            };
-            return resultSession;
-          });
-          
-          setSessions(mergedSessions);
+          const newSessions = data.sessions ?? [];
+          for (const session of newSessions) {
+            globalSessionsCache[session.token] = { summary: session, fetchedAt: now };
+          }
+          persistCache(globalSessionsCache);
+
+          setSessions(newSessions);
           setError(null);
         }
       })

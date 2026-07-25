@@ -1331,14 +1331,40 @@ export async function sessionRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Thumbnail not available" });
       }
 
+      // Stream the bytes instead of redirecting to a presigned URL: the
+      // presigned URL changes on every request, which defeats the browser
+      // HTTP cache entirely. Thumbnails are the session's first frame, so
+      // they almost never change — a stable URL + ETag makes repeat app
+      // opens a disk-cache hit or a 304.
+      const cacheControl = "public, max-age=86400, stale-while-revalidate=604800";
       const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-      const url = await getSignedUrl(r2Client, new GetObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: session.thumbnailR2Key,
-      }), { expiresIn: 3600 });
-
-      reply.header("Cache-Control", "public, max-age=1800");
-      return reply.redirect(url);
+      const ifNoneMatch = request.headers["if-none-match"];
+      try {
+        const obj = await r2Client.send(new GetObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: session.thumbnailR2Key,
+          IfNoneMatch: ifNoneMatch,
+        }));
+        reply.header("Cache-Control", cacheControl);
+        reply.header("Content-Type", "image/jpeg");
+        if (obj.ETag) reply.header("ETag", obj.ETag);
+        if (obj.ContentLength !== undefined) {
+          reply.header("Content-Length", String(obj.ContentLength));
+        }
+        return reply.send(obj.Body);
+      } catch (err) {
+        const status = (err as { $metadata?: { httpStatusCode?: number } })
+          .$metadata?.httpStatusCode;
+        if (status === 304) {
+          reply.header("Cache-Control", cacheControl);
+          if (ifNoneMatch) reply.header("ETag", ifNoneMatch);
+          return reply.code(304).send();
+        }
+        if (status === 404) {
+          return reply.code(404).send({ error: "Thumbnail not available" });
+        }
+        throw err;
+      }
     },
   );
 
