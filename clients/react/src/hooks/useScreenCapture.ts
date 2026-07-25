@@ -107,5 +107,10 @@ export function useScreenCapture(overrides?: CaptureSettings) {
     setIsSharing(false);
   }, []);
 
-  return { isSharing, startSharing, takeScreenshot, stopSharing };
+  // Stable accessor for the live capture <video> — for consumers (like the
+  // clip recorder) that need the current element inside effects/callbacks
+  // without re-render staleness.
+  const getVideo = useCallback(() => videoRef.current, []);
+
+  return { isSharing, startSharing, takeScreenshot, stopSharing, getVideo };
 }

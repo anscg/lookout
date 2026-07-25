@@ -13,6 +13,12 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, and, sql } from "drizzle-orm";
 import * as schema from "./schema.js";
+import {
+  buildSegment,
+  SEGMENT_CONCURRENCY,
+  SEGMENT_FPS,
+  ASSEMBLE_TIMEOUT_MS,
+} from "./segments.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,10 +47,6 @@ const R2_PUBLIC_DOMAIN = process.env.R2_PUBLIC_DOMAIN || "";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Shared video filter: scale to 1920x1080 with pillarboxing. */
-const SCALE_FILTER =
-  "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2";
 
 /** Verify a video file with ffprobe: check file size > 0 and frame count within tolerance. */
 async function verifyVideo(
@@ -161,8 +163,9 @@ export async function compileTimelapse(sessionId: string): Promise<{
       r2_key: string;
       minute_bucket: number;
       requested_at: Date;
+      format: string;
     }>(sql`
-      SELECT DISTINCT ON (minute_bucket) id, r2_key, minute_bucket, requested_at
+      SELECT DISTINCT ON (minute_bucket) id, r2_key, minute_bucket, requested_at, format
       FROM screenshots
       WHERE session_id = ${sessionId} AND confirmed = true
       ORDER BY minute_bucket,
@@ -196,17 +199,20 @@ export async function compileTimelapse(sessionId: string): Promise<{
         .where(eq(schema.screenshots.id, id));
     }
 
-    // Step 2: Download sampled screenshots from R2 (worker pool)
+    // Step 2: Download sampled capture units from R2 (worker pool).
+    // A unit is either a legacy single JPEG or a per-minute clip
+    // (webm/mp4 holding ~20 frames captured seconds apart).
     const total = sampledScreenshots.rows.length;
     const DOWNLOAD_CONCURRENCY = 10;
     const downloaded: boolean[] = new Array(total).fill(false);
+    const unitExt = (format: string) => (format === "jpeg" ? "jpg" : format);
     {
       let next = 0;
       const worker = async () => {
         while (next < total) {
           const i = next++;
           const ss = sampledScreenshots.rows[i];
-          const filePath = path.join(tmpDir, `dl_${i}.jpg`);
+          const filePath = path.join(tmpDir, `dl_${i}.${unitExt(ss.format)}`);
           for (let attempt = 0; attempt < 3; attempt++) {
             try {
               const response = await r2Client.send(
@@ -219,7 +225,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
             } catch {
               if (attempt === 2) {
                 console.warn(
-                  `Skipping frame ${i + 1}: download failed after 3 attempts (${ss.r2_key})`,
+                  `Skipping unit ${i + 1}: download failed after 3 attempts (${ss.r2_key})`,
                 );
               }
             }
@@ -231,61 +237,119 @@ export async function compileTimelapse(sessionId: string): Promise<{
       );
     }
 
-    // Renumber successfully downloaded frames sequentially for ffmpeg
     const failed = downloaded.filter((d) => !d).length;
     if (failed > 5) {
       throw new Error(
-        `Too many failed frame downloads: ${failed}/${total} failed`,
+        `Too many failed unit downloads: ${failed}/${total} failed`,
       );
     }
     if (failed > 0) {
-      console.warn(`${failed}/${total} frames failed to download, continuing`);
+      console.warn(`${failed}/${total} units failed to download, continuing`);
     }
-    let seq = 1;
-    for (let i = 0; i < total; i++) {
-      if (downloaded[i]) {
-        await fs.rename(
-          path.join(tmpDir, `dl_${i}.jpg`),
-          path.join(tmpDir, `${String(seq).padStart(5, "0")}.jpg`),
-        );
-        seq++;
-      }
+
+    // Step 3: Build one normalized 1-second segment per unit, in parallel.
+    // Every unit — legacy JPEG or clip — becomes exactly one second of
+    // 30fps output with identical pinned encoder parameters, so the final
+    // timelapse is a stream-copy concatenation instead of one giant
+    // whole-session encode. Wall clock scales with units/SEGMENT_CONCURRENCY
+    // (~90s for a max-length 12h session) and a corrupt unit is caught and
+    // skipped here per-minute rather than poisoning the full encode.
+    const segmentPaths: (string | null)[] = new Array(total).fill(null);
+    {
+      let next = 0;
+      const builder = async () => {
+        while (next < total) {
+          const i = next++;
+          if (!downloaded[i]) continue;
+          const ss = sampledScreenshots.rows[i];
+          const unitPath = path.join(tmpDir, `dl_${i}.${unitExt(ss.format)}`);
+          try {
+            segmentPaths[i] = await buildSegment(tmpDir, i, unitPath, ss.format);
+          } catch (err) {
+            console.warn(
+              `Skipping unit ${i + 1}: segment build failed (${ss.r2_key})`,
+              err,
+            );
+          }
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(SEGMENT_CONCURRENCY, total) }, builder),
+      );
     }
-    const actualFrames = seq - 1;
 
-    // Step 3: Run ffmpeg — MP4 only (H.264)
-    const mp4Path = path.join(tmpDir, "timelapse.mp4");
-    const inputPattern = path.join(tmpDir, "%05d.jpg");
+    const segments = segmentPaths.filter((p): p is string => p !== null);
+    const unitsIncluded = segments.length;
+    const buildFailures = total - failed - unitsIncluded;
+    if (unitsIncluded === 0) {
+      throw new Error("No usable capture units after segment build");
+    }
+    if (buildFailures > 5) {
+      throw new Error(
+        `Too many failed segment builds: ${buildFailures}/${total - failed} failed`,
+      );
+    }
+    if (buildFailures > 0) {
+      console.warn(`${buildFailures} units failed segment build, continuing`);
+    }
 
-    await execFileAsync(
-      "ffmpeg",
-      [
-        "-framerate",
-        "1",
-        "-i",
-        inputPattern,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "28",
-        "-r",
-        "30",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        "-vf",
-        SCALE_FILTER,
-        "-y",
-        mp4Path,
-      ],
-      { timeout: 600_000 },
+    // Step 4: Assemble — stream-copy concat of the segments, remuxed to MP4.
+    // No re-encoding on the happy path: segments share pinned parameters and
+    // each starts on an IDR frame, so this is I/O-bound (seconds, even for a
+    // 12-hour session).
+    const concatListPath = path.join(tmpDir, "segments.txt");
+    await fs.writeFile(
+      concatListPath,
+      segments.map((p) => `file '${p}'`).join("\n") + "\n",
     );
 
-    // Step 4: Verify output
-    const mp4Size = await verifyVideo(mp4Path, actualFrames, 30, "MP4");
+    const mp4Path = path.join(tmpDir, "timelapse.mp4");
+    let mp4Size: number;
+    try {
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-f", "concat",
+          "-safe", "0",
+          "-i", concatListPath,
+          "-c", "copy",
+          "-movflags", "+faststart",
+          "-y",
+          mp4Path,
+        ],
+        { timeout: ASSEMBLE_TIMEOUT_MS },
+      );
+      mp4Size = await verifyVideo(mp4Path, unitsIncluded, SEGMENT_FPS, "MP4");
+    } catch (err) {
+      // Safety net: if the copied stream doesn't verify (e.g. an encoder
+      // parameter drifted between segments), re-encode the already-built
+      // segments into one uniform stream. One extra ffmpeg pass over 1s
+      // segments — not a second pipeline.
+      console.warn("Stream-copy assembly failed, re-encoding segments:", err);
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-f", "concat",
+          "-safe", "0",
+          "-i", concatListPath,
+          "-c:v", "libx264",
+          "-preset", "fast",
+          "-crf", "28",
+          "-pix_fmt", "yuv420p",
+          "-r", String(SEGMENT_FPS),
+          "-movflags", "+faststart",
+          "-y",
+          mp4Path,
+        ],
+        { timeout: ASSEMBLE_TIMEOUT_MS },
+      );
+      mp4Size = await verifyVideo(
+        mp4Path,
+        unitsIncluded,
+        SEGMENT_FPS,
+        "MP4 (re-encoded)",
+      );
+    }
 
     // Step 4.5: Extract thumbnail from first frame
     const thumbnailPath = path.join(tmpDir, "thumbnail.jpg");

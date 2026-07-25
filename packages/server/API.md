@@ -122,6 +122,25 @@ Pre-0.2.1 the bucket count caused timer jump-back when two captures arrived in t
 
 ---
 
+## Clips
+
+By default, each capture unit is one JPEG per minute. Sessions created with `"clips": true` on the [internal create endpoint](#create-session) instead accept **clips**: per-minute video files (~20 frames captured 3s apart, WebM from Chromium/Firefox MediaRecorder, MP4 from Safari) that compile into a 20×-smoother timelapse.
+
+A clip is still **one capture unit** — one `upload-url` request, one R2 PUT, one confirm per minute. Nothing about rate limits, session caps, credit/bucket tracking math, `trackedSeconds`, `screenshotCount`, or the `/timings` endpoint changes with clips: one confirmed unit per minute, one timestamp per minute.
+
+**Contract:**
+
+- **Session-level, immutable opt-in.** `clips_enabled` is set at creation and enforced server-side on every `upload-url`. It cannot be changed later — a session's capture character never changes mid-recording.
+- **Capability discovery before the first upload.** `GET /api/sessions/:token` returns `clipsEnabled` and `frameIntervalMs`. A clip-capable client checks these on its session-recovery fetch and, when enabled, records clips from the very first upload — timelapses start with motion, not a still frame.
+- **Granted format is law.** The client requests a format with `?format=webm|mp4`; the response's `format` is what the server *granted* (clip requests on non-clips sessions silently downgrade to `jpeg`). The presigned URL is signed with the granted format's content type, so uploading anything else fails the signature. Confirm re-validates the stored object's content type against the granted format.
+- **Server-authoritative cadence.** `frameIntervalMs` (default 3000 = 20 frames/min) is dictated by the server; clients capture at exactly that rate and expose no override. Clips are VFR — a static screen legitimately produces fewer encoded frames, and the compiler derives real counts by demuxing (the confirm body's `frameCount` is telemetry only).
+- **Size cap:** clips are validated at ≤ 2 MB via HeadObject (clients cap their encoder at ~133 kbps ≈ 1 MB/min worst case; typical editor-like screens measure ~30–50 KB/min).
+- **Mixed sessions are legal.** A clip client that hits an encoder hiccup falls back to a JPEG for that minute; the compiler handles formats per capture unit.
+
+Sessions without the flag — and every pre-clips client — behave exactly as before.
+
+---
+
 ## Client Info
 
 Recording clients report a free-form **client telemetry string** on every `upload-url` request (query param `clientInfo`). It is **not** the HTTP `User-Agent` — it's explicit info the Lookout client builds for telemetry/debugging. The server stores it opaquely per screenshot (**never parses it**) and surfaces the session's first recorded value on session-info endpoints (`GET /api/sessions/:token`, `GET /api/sessions/:token/timings`, internal admin).
@@ -170,11 +189,15 @@ Returns the current state of a session.
   "createdAt": "2024-01-01T11:50:00.000Z",
   "thumbnailUrl": "https://...",
   "videoUrl": "https://...",
+  "clipsEnabled": false,
+  "frameIntervalMs": 3000,
   "metadata": {}
 }
 ```
 
 `clientInfo` is the [client telemetry string](#client-info) recorded on the session's **first** screenshot upload. It is `null` for sessions recorded before this was added, or where the client sent none.
+
+`clipsEnabled` / `frameIntervalMs` are the [clips](#clips) capability signal. This endpoint is the session-recovery fetch clients make before recording, so a clip-capable client knows **before its first capture** whether to record clips (and at what cadence) — the very first upload of a clips session is already a clip.
 
 ---
 
@@ -230,6 +253,7 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
 |------|------|-------------|
 | `capturedAt` | ISO-8601 (optional) | Client-attested moment the frame was grabbed. Presence on the **first** upload of a session sticks it to **credit mode** for life; absence sticks it to **bucket mode**. Subsequent uploads on a credit-mode session **must** include it. Must fall within ±5 min of server time and must be strictly monotonic across uploads. |
 | `clientInfo` | string (optional) | [Client telemetry string](#client-info) (User-Agent-like). Stored opaquely per screenshot; the session's first non-empty value is surfaced on session-info endpoints. Best-effort — never parsed or validated, silently truncated to 1024 chars; an invalid/oversized value never fails the upload. |
+| `format` | `jpeg` \| `webm` \| `mp4` (optional) | Payload format for this capture unit. Omitted = `jpeg` (legacy single frame). `webm`/`mp4` request a [clip](#clips) upload. The response's `format` is the **granted** format — clip requests on sessions without clips enabled are silently downgraded to `jpeg`, and the client must upload exactly what was granted (the presigned URL is signed with that content type). |
 
 **Response `200 OK`:**
 ```json
@@ -240,11 +264,14 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
   "minuteBucket": 1,
   "nextExpectedAt": "2024-01-01T12:01:00.000Z",
   "serverTime": "2024-01-01T12:00:00.000Z",
-  "trackingMode": "credit"
+  "trackingMode": "credit",
+  "format": "jpeg",
+  "clipsEnabled": false,
+  "frameIntervalMs": 3000
 }
 ```
 
-`nextExpectedAt` is the server's authoritative target for the **next** capture's `capturedAt` — clients should schedule from it (see Tracking Modes below).
+`nextExpectedAt` is the server's authoritative target for the **next** capture's `capturedAt` — clients should schedule from it (see Tracking Modes below). `format` is the granted payload format (see [Clips](#clips)); `r2Key` carries the matching extension (`.jpg`/`.webm`/`.mp4`).
 
 **Errors:**
 - `400` — `captured_at_future`, `captured_at_too_old`, `captured_at_before_session_start`, `captured_at_not_monotonic`, `captured_at_invalid`, or `credit_mode_requires_captured_at`
@@ -254,9 +281,9 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
 
 **Notes:**
 - Presigned URL expires after 2 minutes
-- Client should PUT the JPEG image directly to `uploadUrl`
+- Client should PUT the image/clip directly to `uploadUrl` with the granted format's content type
 - Max 4320 upload requests per session
-- Pre-0.2.1 binaries that don't send `capturedAt` continue to receive a usable response — additive fields (`serverTime`, `trackingMode`) are gracefully ignored
+- Pre-0.2.1 binaries that don't send `capturedAt` continue to receive a usable response — additive fields (`serverTime`, `trackingMode`, `format`, `clipsEnabled`, `frameIntervalMs`) are gracefully ignored
 
 ---
 
@@ -279,7 +306,8 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
   "screenshotId": "uuid",
   "width": 1920,
   "height": 1080,
-  "fileSize": 125000
+  "fileSize": 125000,
+  "frameCount": 20
 }
 ```
 
@@ -289,6 +317,7 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 | `width` | integer | yes | ≥ 1 |
 | `height` | integer | yes | ≥ 1 |
 | `fileSize` | integer | yes | ≥ 1 |
+| `frameCount` | integer | no | 1–600. Frames inside an uploaded [clip](#clips); informational (the compiler demuxes for the real count). Omit for JPEG captures. |
 
 **Response `200 OK`:**
 ```json
@@ -303,7 +332,7 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 `trackedSeconds` here is the **server's authoritative count after this capture has been credited (or not)**. Use this value to drive your timer display — see the [Tracking Modes](#tracking-modes) section for client display guidance. `nextExpectedAt` is the target for the next capture's `capturedAt`.
 
 **Errors:**
-- `400` — Invalid content type (must be `image/jpeg`), file too large (max 2 MB), or object not found in R2
+- `400` — Content type doesn't match the granted format (`image/jpeg` / `video/webm` / `video/mp4`), file too large (max 2 MB), or object not found in R2
 - `404` — Session or screenshot not found
 - `409` — Session not in `pending` or `active` state
 - `429` — Rate limit exceeded, or max confirmed screenshots reached (720)
@@ -629,7 +658,8 @@ Creates a new session in `pending` state.
 **Request Body:**
 ```json
 {
-  "metadata": {}
+  "metadata": {},
+  "clips": false
 }
 ```
 
@@ -637,6 +667,7 @@ Creates a new session in `pending` state.
 |-------|------|----------|-------------|
 | `name` | string | no | Session name (1-255 chars) |
 | `metadata` | object | no | Arbitrary JSON metadata to attach to the session (max 50 properties) |
+| `clips` | boolean | no | Allow [clip uploads](#clips) (~20 frames/min video) for this session. Default `false` = legacy 1 JPEG/min. **Immutable after creation.** |
 
 **Response `201 Created`:**
 ```json
@@ -677,6 +708,7 @@ Returns full session details including internal fields.
     "lastScreenshotAt": "...",
     "resumedAt": "...",
     "totalActiveSeconds": 123,
+    "clipsEnabled": false,
     "videoUrl": null,
     "thumbnailUrl": null,
     "createdAt": "...",

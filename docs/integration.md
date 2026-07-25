@@ -46,7 +46,7 @@ API calls require the `X-API-Key` header.
 curl -X POST https://lookout.hackclub.com/api/internal/sessions \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
-  -d '{"metadata": {"userId": "user_123", "projectId": "proj_456"}}'
+  -d '{"metadata": {"userId": "user_123", "projectId": "proj_456"}, "clips": true}'
 ```
 
 Response:
@@ -62,6 +62,33 @@ Response:
 - `sessionId` — the server-side ID.
 - `sessionUrl` — a convenience URL you can redirect the user to.
 - `metadata` — any JSON you want to associate with the session (user info, project, etc.)
+- `clips` — opt this session into [clips](#clips-20-frames-per-minute) (~20 frames/min video capture instead of 1 JPEG/min → 20× smoother timelapses). Default `false`; immutable after creation.
+
+### Clips (20 frames per minute)
+
+Sessions created with `"clips": true` record **clips**: instead of one JPEG per
+minute, the recording client uploads one ~60s video file per minute containing
+~20 frames captured 3s apart. The compiled timelapse has the same length but is
+20× smoother, with motion from the very first second.
+
+What this means for your program:
+
+- **Nothing in your integration changes.** A clip is still one capture unit
+  per minute — `trackedSeconds`, `screenshotCount`, `/timings` (still one
+  timestamp per minute → Hackatime forwarding unchanged), `videoUrl`, and
+  every response shape are identical between clips and non-clips sessions.
+- **Clients negotiate automatically.** The hosted web recorder and React SDK
+  (≥0.4) detect the flag on the session and record clips; older clients and
+  the desktop app keep uploading JPEGs to the same session, which stays fully
+  valid (formats can even mix within one session).
+- **Network:** a clip is capped at 2 MB/min (encoder capped ~133 kbps ≈ 1
+  MB/min worst case); measured editor-like screens run ~30–50 KB/min — often
+  *smaller* than the single JPEG.
+- **Frame quality trade-off:** mid-clip frames are bitrate-capped and softer
+  than a q0.85 JPEG on very busy screens; each clip starts with a crisp
+  keyframe. For review purposes you get 20× more moments per minute.
+- Roll it out gradually if you like — the flag is per session, so you can
+  enable it for a fraction of new sessions and compare.
 
 ### Get session info
 

@@ -33,7 +33,19 @@ vi.mock("@aws-sdk/client-s3", async (orig) => {
     async send(command: any) {
       const name = command?.constructor?.name ?? "";
       if (name === "HeadObjectCommand") {
-        return { ContentType: "image/jpeg", ContentLength: 1024 };
+        // Per-test override for simulating mismatched/oversized uploads.
+        const override = (globalThis as any).__r2HeadObjectOverride;
+        if (override) return override;
+        // Derive ContentType from the key extension — mirrors a client
+        // that uploaded through the presigned URL (which is signed with
+        // the format's content type).
+        const key: string = command?.input?.Key ?? "";
+        const contentType = key.endsWith(".webm")
+          ? "video/webm"
+          : key.endsWith(".mp4")
+            ? "video/mp4"
+            : "image/jpeg";
+        return { ContentType: contentType, ContentLength: 1024 };
       }
       if (name === "PutObjectCommand" || name === "DeleteObjectCommand" || name === "GetObjectCommand") {
         return {};

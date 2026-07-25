@@ -3162,6 +3162,7 @@ dependencies = [
  "gstreamer-video",
  "image",
  "objc2",
+ "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",
@@ -3187,6 +3188,7 @@ dependencies = [
  "url",
  "webview2-com",
  "window-vibrancy 0.7.1",
+ "windows 0.62.2",
  "xcap",
 ]
 

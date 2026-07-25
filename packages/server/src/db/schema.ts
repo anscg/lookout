@@ -112,6 +112,12 @@ export const sessions = pgTable(
     trackingMode: text("tracking_mode").notNull().default("bucket"),
     streakAnchorAt: timestamp("streak_anchor_at", { withTimezone: true }),
     streakCreditedCount: integer("streak_credited_count").notNull().default(0),
+    // Whether this session accepts per-minute video clip uploads (~20
+    // frames/min) instead of single JPEGs. Set at creation by the program's
+    // backend (internal API `clips: true`), enforced on every upload-url
+    // (disallowed formats are downgraded to jpeg), and immutable thereafter —
+    // a session's capture character never changes mid-recording.
+    clipsEnabled: boolean("clips_enabled").notNull().default(false),
     // Set when the retention job has deleted this session's screenshot R2
     // objects (after SCREENSHOT_RETENTION_DAYS). The screenshot *rows* are
     // kept so capture timings stay queryable; this flag stops the job from
@@ -154,6 +160,15 @@ export const screenshots = pgTable(
     height: integer("height"),
     fileSizeBytes: integer("file_size_bytes"),
     sampled: boolean("sampled").notNull().default(false),
+    // Payload format of this capture unit: 'jpeg' (legacy single frame) or
+    // 'webm'/'mp4' (per-minute clip of ~20 frames). Decided per upload by the
+    // client's `format` query param, gated by sessions.clips_enabled —
+    // sessions may mix formats (e.g. a clip client falling back to jpeg
+    // mid-session); the compiler handles both per row.
+    format: text("format").notNull().default("jpeg"),
+    // Client-reported frame count inside a clip. Informational/telemetry —
+    // the compiler derives the real count by demuxing. NULL for jpeg rows.
+    frameCount: integer("frame_count"),
     // Client-attested (or server-fallback) capture time. Populated for ALL
     // new rows post-migration 0007 regardless of mode — credit-mode rows use
     // it for streak math, bucket-mode rows store it as debug-only data.

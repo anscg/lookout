@@ -11,6 +11,14 @@ interface SessionState {
   startedAt: string | null;
   createdAt: string | null;
   totalActiveSeconds: number;
+  /** Whether this session accepts clip uploads (~20 frames/min video).
+   *  Known BEFORE the first capture — this fetch is the session-recovery
+   *  load — so the very first upload can already be a clip. False when
+   *  the server predates clips. */
+  clipsEnabled: boolean;
+  /** Server-authoritative clip cadence (ms between frames). Null when the
+   *  server predates clips. */
+  frameIntervalMs: number | null;
   error: string | null;
 }
 
@@ -26,6 +34,8 @@ export function useSession() {
     startedAt: null,
     createdAt: null,
     totalActiveSeconds: 0,
+    clipsEnabled: false,
+    frameIntervalMs: null,
     error: null,
   });
 
@@ -54,6 +64,8 @@ export function useSession() {
         startedAt: data.startedAt,
         createdAt: data.createdAt,
         totalActiveSeconds: data.totalActiveSeconds,
+        clipsEnabled: data.clipsEnabled === true,
+        frameIntervalMs: data.frameIntervalMs ?? null,
         error: null,
       });
 

@@ -83,6 +83,43 @@ jobs:
         run: npx vitest run
 
   # ──────────────────────────────────────────────────────────────────
+  # Worker: ffmpeg segment pipeline. Proves the clip-compile contract —
+  # every capture unit (JPEG still, VP8 webm clip, H.264 mp4 clip, any
+  # resolution) normalizes to exactly one second of 30fps video with
+  # pinned parameters, and the segments stream-copy concatenate into a
+  # decodable MP4. Runs real ffmpeg on synthetic inputs; no DB/R2.
+  # ──────────────────────────────────────────────────────────────────
+  worker:
+    name: Worker tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w packages/shared
+
+      - name: Type-check worker
+        working-directory: packages/worker
+        run: npx tsc --noEmit
+
+      - name: Vitest (segment pipeline)
+        run: npm test -w packages/worker
+
+  # ──────────────────────────────────────────────────────────────────
   # Desktop client: Rust unit + serde compat tests.
   # The 4-way matrix (legacy/new struct × legacy/new JSON) here is the
   # load-bearing proof that the currently-shipped binary can still

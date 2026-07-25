@@ -1,4 +1,5 @@
 import type {
+  CaptureFormat,
   SessionResponse,
   UploadUrlResponse,
   ConfirmScreenshotRequest,
@@ -17,10 +18,16 @@ export interface LookoutClient {
   getSession(): Promise<SessionResponse>;
   /** `capturedAt` is optional. Sending it on the first request of a new
    *  session opts the session into credit-mode tracking; subsequent
-   *  requests must keep sending it. Omit for legacy bucket-count behavior. */
-  getUploadUrl(opts?: { capturedAt?: string }): Promise<UploadUrlResponse>;
+   *  requests must keep sending it. Omit for legacy bucket-count behavior.
+   *  `format` requests a clip upload ('webm'/'mp4'); omit for a single
+   *  JPEG. The response's `format` is the GRANTED format — the caller
+   *  must upload exactly that. */
+  getUploadUrl(opts?: {
+    capturedAt?: string;
+    format?: CaptureFormat;
+  }): Promise<UploadUrlResponse>;
   confirmScreenshot(body: ConfirmScreenshotRequest): Promise<ConfirmScreenshotResponse>;
-  uploadToR2(uploadUrl: string, blob: Blob): Promise<void>;
+  uploadToR2(uploadUrl: string, blob: Blob, contentType?: string): Promise<void>;
   pause(): Promise<PauseResponse>;
   resume(): Promise<ResumeResponse>;
   stop(): Promise<StopResponse>;
@@ -104,6 +111,7 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
       const base = await sessionUrl("/upload-url");
       const params = new URLSearchParams();
       if (opts?.capturedAt) params.set("capturedAt", opts.capturedAt);
+      if (opts?.format) params.set("format", opts.format);
       if (clientInfo) params.set("clientInfo", clientInfo);
       const qs = params.toString();
       return fetchJson<UploadUrlResponse>(qs ? `${base}?${qs}` : base);
@@ -116,7 +124,7 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
       });
     },
 
-    async uploadToR2(uploadUrl, blob) {
+    async uploadToR2(uploadUrl, blob, contentType = "image/jpeg") {
       if (!uploadUrl.startsWith("https://") && !uploadUrl.startsWith("/")) {
         throw new Error("Invalid upload URL: must be HTTPS or a relative path.");
       }
@@ -125,7 +133,8 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
         res = await fetch(uploadUrl, {
           method: "PUT",
           body: blob,
-          headers: { "Content-Type": "image/jpeg" },
+          // Must match the content type the presigned URL was signed with.
+          headers: { "Content-Type": contentType },
         });
       } catch (err) {
         if (err instanceof TypeError) {

@@ -32,7 +32,10 @@ interface DesktopRecorderProps {
   onViewSession: (token: string) => void;
 }
 
-const API_BASE = "https://lookout.hackclub.com";
+import { getApiBase } from "../serverConfig.js";
+
+// Read once per webview load; Settings → Server reloads the view on change.
+const API_BASE = getApiBase();
 
 function RecorderPreviewItem({ 
   src, 
