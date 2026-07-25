@@ -11,24 +11,28 @@ import {
   useTokenStore,
   useGallery,
   useHashRouter,
-  spacing,
 } from "@lookout/react";
 import { getVersion } from "@tauri-apps/api/app";
 import { isValidToken, extractToken } from "./utils.js";
-import { PermissionScreen } from "./components/PermissionScreen.js";
+import {
+  checkCameraPermission,
+  checkScreenRecordingPermission,
+} from "tauri-plugin-macos-permissions-api";
+import { PermissionScreen, permCacheKey } from "./components/PermissionScreen.js";
 import { RecordPage } from "./components/RecordPage.js";
 import { AddSessionPage } from "./components/AddSessionPage.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { TrayApp } from "./components/TrayApp.js";
 import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
-import { useUpdateCheck } from "./hooks/useUpdateCheck.js";
-import { useBackgroundUpdate } from "./hooks/useBackgroundUpdate.js";
+import { useAppUpdate } from "./hooks/useAppUpdate.js";
 import { useAnnouncement } from "./hooks/useAnnouncement.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
-import { UpdateBanner } from "./components/UpdateBanner.js";
+import { UpdatePill } from "./components/UpdatePill.js";
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
+import { getApiBase } from "./serverConfig.js";
 
-const API_BASE = "https://lookout.hackclub.com";
+// Read once per webview load; Settings → Server reloads the view on change.
+const API_BASE = getApiBase();
 
 /** Pause a session by token. Fire-and-forget, logs errors. */
 async function pauseSession(token: string): Promise<void> {
@@ -63,12 +67,38 @@ export function App() {
 
 function MainWindowApp() {
   const isMacOS = navigator.userAgent.includes("Mac");
-  const [screenPermGranted, setScreenPermGranted] = useState(!isMacOS);
-  const [cameraPermGranted, setCameraPermGranted] = useState(!isMacOS);
+  // A cached grant skips the permission gate (no boot flicker); a background
+  // re-check below yanks it back if the permission was revoked since.
+  const [screenPermGranted, setScreenPermGranted] = useState(
+    () => !isMacOS || localStorage.getItem(permCacheKey("screen")) === "1",
+  );
+  const [cameraPermGranted, setCameraPermGranted] = useState(
+    () => !isMacOS || localStorage.getItem(permCacheKey("camera")) === "1",
+  );
+
+  useEffect(() => {
+    if (!isMacOS) return;
+    (async () => {
+      try {
+        if (localStorage.getItem(permCacheKey("screen")) === "1" && !(await checkScreenRecordingPermission())) {
+          console.warn("[permissions] screen recording revoked — regating");
+          localStorage.removeItem(permCacheKey("screen"));
+          setScreenPermGranted(false);
+        }
+        if (localStorage.getItem(permCacheKey("camera")) === "1" && !(await checkCameraPermission())) {
+          console.warn("[permissions] camera revoked — regating");
+          localStorage.removeItem(permCacheKey("camera"));
+          setCameraPermGranted(false);
+        }
+      } catch {
+        // Plugin unavailable — leave the cached grants alone
+      }
+    })();
+  }, [isMacOS]);
   const [isWayland, setIsWayland] = useState(false);
   const { route, navigate } = useHashRouter();
   const tokenStore = useTokenStore();
-  const updateStatus = useUpdateCheck();
+  const appUpdate = useAppUpdate();
   const gallery = useGallery({
     apiBaseUrl: API_BASE,
     tokens: tokenStore.getAllTokenValues(),
@@ -77,16 +107,18 @@ function MainWindowApp() {
   // Initialize blacklisted apps sync from localStorage to Rust backend
   useBlacklistedApps();
 
-  // Request notification permission as soon as the app is past the update
-  // gate — so the OS prompt appears at launch, not deferred to recording start.
-  const updateSettled = updateStatus.state === "idle";
+  // Boot timing: first React commit and the frame after it (≈ first paint).
   useEffect(() => {
-    if (updateSettled) void ensureNotificationPermission();
-  }, [updateSettled]);
+    console.log(`[boot] app mounted at ${Math.round(performance.now())}ms`);
+    requestAnimationFrame(() =>
+      console.log(`[boot] first frame at ${Math.round(performance.now())}ms`),
+    );
+  }, []);
 
-  // Poll the update server in the background once past the launch update gate;
-  // surfaces a "restart to update" banner on the gallery when a build ships.
-  const backgroundUpdate = useBackgroundUpdate(updateSettled);
+  // Request notification permission at launch, not deferred to recording start.
+  useEffect(() => {
+    void ensureNotificationPermission();
+  }, []);
 
   // Admin-authored announcement banner; checked on open and every 15 min.
   const announcement = useAnnouncement();
@@ -325,22 +357,10 @@ function MainWindowApp() {
               }
             }}
             onAdd={() => navigate({ page: "add" })}
-            onSettings={isWayland ? undefined : () => navigate({ page: "settings" })}
-            banner={
-              announcement || backgroundUpdate.availableVersion ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
-                  {/* Announcement sits above the update banner. */}
-                  {announcement && <AnnouncementBanner announcement={announcement} />}
-                  {backgroundUpdate.availableVersion && (
-                    <UpdateBanner
-                      version={backgroundUpdate.availableVersion}
-                      restarting={backgroundUpdate.restarting}
-                      onRestart={backgroundUpdate.restart}
-                    />
-                  )}
-                </div>
-              ) : undefined
-            }
+            // Always available: the Server subpage works everywhere; only the
+            // Filtered Apps subpage is Wayland-restricted (it shows a notice).
+            onSettings={() => navigate({ page: "settings" })}
+            banner={announcement ? <AnnouncementBanner announcement={announcement} /> : undefined}
           />
         );
       case "settings":
@@ -431,43 +451,24 @@ function MainWindowApp() {
 
   const routeKey = `${route.page}:${(route as { token?: string }).token ?? ""}`;
 
-  if (updateStatus.state !== "idle") {
-    return (
-      <div style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        height: "100vh",
-        gap: 12,
-        fontFamily: "inherit",
-      }}>
-        {isMacOS && (
-          <div
-            data-tauri-drag-region
-            style={{ position: "absolute", top: 0, left: 0, right: 0, height: 32, background: "transparent", cursor: "default" }}
-          />
-        )}
-        <div style={{ fontSize: 14, opacity: 0.7 }}>
-          {updateStatus.state === "checking" && "Checking for updates…"}
-          {updateStatus.state === "no-update" && updateStatus.message}
-          {updateStatus.state === "downloading" && `Updating… ${updateStatus.progress}%`}
-          {updateStatus.state === "installing" && "Installing update…"}
-          {updateStatus.state === "done" && "Restarting…"}
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-      {/* Draggable Titlebar Area that dodges the traffic lights (macOS only) */}
-      {isMacOS && (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", position: "relative" }}>
+      {/* Draggable Titlebar Area that dodges the traffic lights (macOS only).
+          The update pill lives here, Ghostty-style — the titlebar is a
+          transparent webview overlay, so it renders inside the real titlebar. */}
+      {isMacOS ? (
         <div
           data-tauri-drag-region
           className="titlebar"
-          style={{ height: 32, flexShrink: 0, width: "100%", zIndex: 9999, background: "transparent", cursor: "default" }}
-        />
+          style={{ height: 32, flexShrink: 0, width: "100%", zIndex: 9999, background: "transparent", cursor: "default", display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 6, boxSizing: "border-box" }}
+        >
+          <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} />
+        </div>
+      ) : (
+        /* No overlay titlebar on Windows/Linux — float the pill top-right. */
+        <div style={{ position: "absolute", top: 8, right: 8, zIndex: 9999 }}>
+          <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} />
+        </div>
       )}
       <div style={{
         flex: 1,
