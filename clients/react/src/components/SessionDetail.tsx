@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import type { StatusResponse, VideoResponse, SessionResponse } from "@lookout/shared";
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
@@ -134,35 +134,23 @@ export function SessionDetail({
 }: SessionDetailProps) {
   const [sessionInfo, setSessionInfo] = useState<{ name: string; createdAt: string } | null>(null);
   const [isRenaming, setIsRenaming] = useState(false);
+  const [isRenamingAnim, setIsRenamingAnim] = useState(false);
   const [editName, setEditName] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const measureRef = useRef<HTMLSpanElement>(null);
-  const [inputWidth, setInputWidth] = useState<number | null>(null);
 
   useEffect(() => {
-    if (isRenaming && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
+    if (isRenaming) {
+      setIsRenamingAnim(true);
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.select();
+      }
+    } else {
+      // Small delay before showing icon again to let layout animations finish
+      const t = setTimeout(() => setIsRenamingAnim(false), 600);
+      return () => clearTimeout(t);
     }
   }, [isRenaming]);
-
-  // Springs can't interpolate values like "max(100%, 300px)", so measure the
-  // text via the hidden mirror span and animate the input's width in pixels.
-  // Widths account for the input's 1px borders and horizontal padding.
-  useLayoutEffect(() => {
-    const el = measureRef.current;
-    if (!el) return;
-    const textWidth = el.getBoundingClientRect().width;
-    setInputWidth(isRenaming ? Math.max(textWidth + 18, 300) : textWidth + 10);
-  }, [isRenaming, editName, sessionInfo?.name]);
-
-  // Apply the first measured width instantly so the name doesn't animate
-  // open from the input's intrinsic size on mount.
-  const prevInputWidth = useRef<number | null>(null);
-  const isFirstWidth = prevInputWidth.current === null && inputWidth !== null;
-  useEffect(() => {
-    prevInputWidth.current = inputWidth;
-  });
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -361,17 +349,18 @@ export function SessionDetail({
                     if (inputRef.current) inputRef.current.blur();
                   }}
                   style={{
-                    margin: 0,
-                    minWidth: 0,
-                    maxWidth: "100%",
-                    position: "relative"
+                    display: "grid",
+                    alignItems: "center",
+                    margin: 0
                   }}
                 >
-                  <span
-                    ref={measureRef}
-                    aria-hidden="true"
+                  <motion.span
+                    animate={{
+                      padding: isRenaming ? "0 16px" : "0 8px 0 0"
+                    }}
+                    transition={{ type: "spring", stiffness: 500, damping: 30 }}
                     style={{
-                      position: "absolute",
+                      gridArea: "1 / 1",
                       visibility: "hidden",
                       whiteSpace: "pre",
                       fontFamily: "inherit",
@@ -381,7 +370,7 @@ export function SessionDetail({
                     }}
                   >
                     {isRenaming ? editName || " " : sessionInfo.name}
-                  </span>
+                  </motion.span>
 
                   <motion.input
                     ref={inputRef}
@@ -402,27 +391,28 @@ export function SessionDetail({
                       }
                     }}
                     size={1}
-                    initial={false}
                     animate={{
-                      width: inputWidth ?? "auto",
-                      paddingLeft: isRenaming ? 8 : 0,
-                      paddingRight: 8
+                      padding: isRenaming ? "0 8px" : "0",
+                      width: isRenaming ? "max(100%, 300px)" : "100%",
+                      backgroundColor: isRenaming ? colors.bg.surface : "transparent",
+                      borderColor: isRenaming ? colors.border.selected : "transparent"
                     }}
-                    transition={isFirstWidth ? { duration: 0 } : { type: "spring", stiffness: 550, damping: 38 }}
+                    transition={{
+                      padding: { type: "spring", stiffness: 500, damping: 30 },
+                      width: { type: "spring", stiffness: 500, damping: 30 },
+                      backgroundColor: { duration: 0.15 },
+                      borderColor: { duration: 0.15 }
+                    }}
                     style={{
-                      display: "block",
+                      gridArea: "1 / 1",
                       minWidth: 0,
-                      maxWidth: "100%",
                       height: 32,
                       fontFamily: "inherit",
                       fontSize: fontSize.xl,
                       fontWeight: fontWeight.bold,
                       color: colors.text.primary,
-                      backgroundColor: isRenaming ? colors.bg.surface : "transparent",
                       borderWidth: 1,
                       borderStyle: "solid",
-                      borderColor: isRenaming ? colors.border.selected : "transparent",
-                      transition: "background-color 0.15s ease, border-color 0.15s ease",
                       borderRadius: radii.md,
                       boxSizing: "border-box",
                       outline: "none",
@@ -433,16 +423,13 @@ export function SessionDetail({
                 </form>
 
                 <div style={{ display: "flex", alignItems: "center", width: 24, height: 24 }}>
-                  <AnimatePresence initial={false}>
-                    {!isRenaming && (
+                  <AnimatePresence>
+                    {!isRenamingAnim && (
                       <motion.button
-                        initial={{ opacity: 0, scale: 0.5 }}
-                        animate={{
-                          opacity: 1,
-                          scale: 1,
-                          transition: { type: "spring", stiffness: 500, damping: 28 }
-                        }}
-                        exit={{ opacity: 0, scale: 0.5, transition: { duration: 0.1 } }}
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        transition={{ duration: 0.15 }}
                         title="Rename session"
                         onClick={() => {
                           setEditName(sessionInfo.name);
@@ -472,7 +459,9 @@ export function SessionDetail({
                 </div>
               </div>
               <motion.div
-                animate={{ y: isRenaming ? 0 : -4 }}
+                animate={{
+                  y: (isRenaming == false) ? -4 : 0
+                }}
                 transition={{ type: "spring", stiffness: 500, damping: 30 }}
                 style={{ fontSize: fontSize.xs, color: colors.text.tertiary, marginTop: 2, y: -4 }}
               >
