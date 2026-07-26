@@ -147,45 +147,81 @@ export function TimelapseEditor({
   // ── Load ────────────────────────────────────────────────────
   // The preview video is built by the compile that ran at stop, so the
   // editor almost always opens BEFORE it exists: `/units` reports
-  // `preparing` for the whole build. Poll through that instead of
-  // showing an error — this is the normal path, not a failure.
+  // `preparing` for the whole build. That is the normal path, not a
+  // failure — but it must be waited out on `/status`, not `/units`.
+  //
+  // `/units` presigns a URL and is rate limited to 10/min; polling it
+  // every 1.5s is 40/min, so the wait itself would 429 after ~15s and the
+  // editor would report a rate-limit error instead of a video. `/status`
+  // is the cheap endpoint built for polling (60/min) and already carries
+  // `editable`, so wait on that and fetch `/units` only at the edges.
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const load = async () => {
-      try {
-        const res = await client.getUnits();
-        if (cancelled) return;
-        if (res.editable && res.originalVideoUrl) {
-          setPreparingUnits(null);
-          setData(res);
-          setRegions(cutsToRegions(res.cuts, res.units));
-          return;
-        }
-        if (res.editableReason === "preparing" || res.editableReason === "no_original") {
-          // Same number on every poll ⇒ React bails out, no re-render, and
-          // the progress effect below is left running undisturbed.
-          setPreparingUnits(res.expectedUnits ?? 0);
-          timer = setTimeout(load, 1500);
-          return;
-        }
-        setLoadError(
-          res.editableReason === "published"
-            ? "This timelapse has already been published, so it can't be edited."
-            : res.editableReason === "failed"
-              ? "This timelapse couldn't be compiled, so there's nothing to edit."
-              : res.editableReason === "recompiles_exhausted"
-                ? "This timelapse has reached its edit limit."
-                : "This timelapse isn't available for editing.",
-        );
-      } catch (err) {
-        if (!cancelled)
-          setLoadError(err instanceof Error ? err.message : String(err));
+    const fail = (reason: UnitsResponse["editableReason"]) =>
+      setLoadError(
+        reason === "published"
+          ? "This timelapse has already been published, so it can't be edited."
+          : reason === "failed"
+            ? "This timelapse couldn't be compiled, so there's nothing to edit."
+            : reason === "recompiles_exhausted"
+              ? "This timelapse has reached its edit limit."
+              : "This timelapse isn't available for editing.",
+      );
+
+    const loadUnits = async () => {
+      const res = await client.getUnits();
+      if (cancelled) return;
+      if (res.editable && res.originalVideoUrl) {
+        setPreparingUnits(null);
+        setData(res);
+        setRegions(cutsToRegions(res.cuts, res.units));
+        return;
       }
+      if (res.editableReason === "preparing" || res.editableReason === "no_original") {
+        // Keep the unit count for the progress estimate, then hand the
+        // waiting over to /status.
+        setPreparingUnits(res.expectedUnits ?? 0);
+        timer = setTimeout(waitForReady, 2000);
+        return;
+      }
+      fail(res.editableReason);
     };
 
-    void load();
+    const waitForReady = async () => {
+      if (cancelled) return;
+      try {
+        const status = await client.getStatus();
+        if (cancelled) return;
+        if (status.editable) {
+          await loadUnits();
+          return;
+        }
+        if (status.status === "complete") {
+          fail("published");
+          return;
+        }
+        if (status.status === "failed") {
+          fail("failed");
+          return;
+        }
+      } catch (err) {
+        // Transient: keep waiting rather than dropping the user out of an
+        // edit because one poll failed.
+        console.warn("[editor] status poll failed:", err);
+      }
+      timer = setTimeout(waitForReady, 2000);
+    };
+
+    void (async () => {
+      try {
+        await loadUnits();
+      } catch (err) {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
