@@ -3322,6 +3322,7 @@ pub fn run() {
             is_wayland,
             open_external_url,
             native_menu::show_add_menu,
+            native_menu::prefetch_add_menu_icons,
             request_screencast,
             add_screencast,
             set_blacklisted_apps,

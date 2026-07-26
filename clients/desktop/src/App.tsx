@@ -146,7 +146,17 @@ function MainWindowApp() {
       const res = await fetch(`${API_BASE}/api/programs`);
       if (!res.ok) return;
       const data = await res.json();
-      if (Array.isArray(data.programs)) programsRef.current = data.programs;
+      if (Array.isArray(data.programs)) {
+        programsRef.current = data.programs;
+        // Warm the native icon cache so the menu never opens with fallback
+        // symbols while images load.
+        const urls = programsRef.current
+          .map((p) => p.iconUrl)
+          .filter((u): u is string => !!u);
+        if (urls.length) {
+          invoke("prefetch_add_menu_icons", { urls }).catch(() => {});
+        }
+      }
     } catch (e) {
       console.warn("[programs] failed to load registry:", e);
     }
