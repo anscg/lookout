@@ -63,7 +63,10 @@ export async function openEditorWindow(token: string): Promise<void> {
     // Transparent + overlay titlebar is what lets the vibrancy material
     // show through, matching the main window's chrome exactly.
     transparent: true,
-    ...(isMacOS ? { titleBarStyle: "overlay" as const, hiddenTitle: true } : {}),
+    // Overlay titlebar with the title VISIBLE: macOS draws and centers it
+    // for us, so it can't drift out of alignment with the traffic lights
+    // the way a hand-placed label does.
+    ...(isMacOS ? { titleBarStyle: "overlay" as const } : {}),
   });
   win.once("tauri://error", (e) => {
     console.error("[editor] failed to open editor window:", e);
@@ -183,14 +186,19 @@ export function useEditorWindowOpen(): string | null {
 /**
  * The editor window's root view (route `#/editor?token=…`).
  *
- * An app shell, not a page: a draggable title strip, a body that owns all
- * remaining height, and nothing that can push content past the window
- * edge. The chrome is the system vibrancy material, so this window reads
- * as the same app as the main one in both light and dark.
+ * An app shell, not a page: a draggable strip clearing the window
+ * controls, a body that owns all remaining height, and nothing that can
+ * push content past the window edge. The chrome is the system vibrancy
+ * material, so this window reads as the same app as the main one in both
+ * light and dark.
+ *
+ * The title is the WINDOW's title, drawn by the OS — centered and aligned
+ * to the traffic lights for free. A hand-placed label next to them has to
+ * be pixel-matched against a position that varies by OS version, and it
+ * was visibly off.
  */
 export function EditorWindow({ token }: { token: string }) {
   const isMacOS = navigator.userAgent.includes("Mac");
-  const [sessionName, setSessionName] = useState<string | null>(null);
 
   // Vibrancy: the main window does this too. The webview must be
   // transparent for the material to show, so only go transparent once the
@@ -235,10 +243,7 @@ export function EditorWindow({ token }: { token: string }) {
     fetch(`${getApiBase()}/api/sessions/${token}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (d?.name) {
-          setSessionName(d.name);
-          void getCurrentWindow().setTitle(d.name);
-        }
+        if (d?.name) void getCurrentWindow().setTitle(`Edit — ${d.name}`);
       })
       .catch(() => {
         // Name is decoration — the editor works without it.
@@ -258,50 +263,15 @@ export function EditorWindow({ token }: { token: string }) {
         flexDirection: "column",
       }}
     >
-      {/* Title strip. Draggable, and on macOS it clears the traffic
-          lights so the label never collides with them. */}
-      <div
-        data-tauri-drag-region
-        style={{
-          flex: "0 0 auto",
-          height: 38,
-          display: "flex",
-          alignItems: "center",
-          gap: spacing.sm,
-          paddingLeft: isMacOS ? 78 : spacing.lg,
-          paddingRight: spacing.lg,
-          cursor: "default",
-        }}
-      >
-        <span
+      {/* Drag strip clearing the window controls and the OS-drawn title.
+          macOS only: elsewhere the window has real decorations above the
+          webview, so the content can start at the very top. */}
+      {isMacOS && (
+        <div
           data-tauri-drag-region
-          style={{
-            fontSize: fontSize.md,
-            fontWeight: fontWeight.semibold,
-            color: colors.text.primary,
-            letterSpacing: "-0.01em",
-            whiteSpace: "nowrap",
-          }}
-        >
-          Edit timelapse
-        </span>
-        {sessionName && (
-          <span
-            data-tauri-drag-region
-            style={{
-              fontSize: fontSize.md,
-              color: colors.text.tertiary,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              minWidth: 0,
-            }}
-            title={sessionName}
-          >
-            {sessionName}
-          </span>
-        )}
-      </div>
+          style={{ flex: "0 0 auto", height: 30, cursor: "default" }}
+        />
+      )}
 
       {/* Body owns the rest. min-height:0 is what lets the stage inside
           letterboxe down instead of clipping the dock off the bottom. */}
@@ -311,7 +281,9 @@ export function EditorWindow({ token }: { token: string }) {
           minHeight: 0,
           display: "flex",
           flexDirection: "column",
-          padding: `0 ${spacing.lg}px ${spacing.lg}px`,
+          padding: isMacOS
+            ? `0 ${spacing.lg}px ${spacing.lg}px`
+            : spacing.lg,
         }}
       >
         <TimelapseEditor
