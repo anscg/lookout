@@ -20,6 +20,7 @@ import {
   unitClockLabel,
   type UnitRegion,
 } from "../hooks/editorMath.js";
+import { injectEditorStyles } from "./editorStyles.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ProgressRing } from "../ui/ProgressRing.js";
@@ -32,22 +33,23 @@ export interface TimelapseEditorProps {
   /** The timelapse was published — with cuts baked in, or without them.
    *  The caller should return to its detail view and poll status. */
   onApplied?: () => void;
-  /** Optional "not now" escape. The timelapse stays held and publishes
+  /** Optional "not now" escape. The session stays held and publishes
    *  itself when the hold expires, so this never loses anything. Omit it
    *  in flows where publishing must be an explicit choice. */
   onCancel?: () => void;
 }
 
-const TIMELINE_HEIGHT = 64;
-const RULER_HEIGHT = 22;
-const FILMSTRIP_SAMPLES = 60;
+const STRIP_HEIGHT = 56;
+const RULER_HEIGHT = 18;
+const FILMSTRIP_SAMPLES = 48;
+/** Scrubber preview card. 16:9 keeps it honest about the source footage. */
+const PREVIEW_W = 168;
+const PREVIEW_H = 96;
 /** Fixed cost of a compile: claim, sampling query, assembly, upload. */
 const COMPILE_BASE_MS = 6_000;
 /** Marginal cost per capture unit (download + 1s segment encode, across
  *  the worker's 8-way pool). Only used to size the progress estimate. */
 const COMPILE_MS_PER_UNIT = 350;
-const CUT_FILL = "rgba(239, 68, 68, 0.38)";
-const CUT_BORDER = "#ef4444";
 
 type DragState =
   | { kind: "maybe"; downUnitF: number }
@@ -62,16 +64,16 @@ type DragState =
   | null;
 
 /**
- * The "Edit & Save" step of stopping a recording. The session is compiled
+ * The "Edit & save" step of stopping a recording. The session is compiled
  * but deliberately UNPUBLISHED (held), so nothing downstream has consumed
  * it yet; this view previews that video (1 second = 1 capture unit = 1
  * real-world minute), lets the user drag out cut regions, and publishes —
  * with the cuts baked in, or without them.
  *
- * Regions are first-class objects: draggable edges, selection, delete key.
- * A plain click on the timeline seeks; playback skips cut regions so
- * previewing shows the published result, while scrubbing passes through
- * them (dimmed) so cut edges can be judged.
+ * Layout is a three-row shell: a fixed transport bar, a stage that shrinks
+ * (the only flexible row), and a dock pinned to the bottom. Every ancestor
+ * of the stage carries `min-height: 0` so the video letterboxes down
+ * instead of shoving the timeline out of the window.
  */
 export function TimelapseEditor({
   token,
@@ -83,6 +85,8 @@ export function TimelapseEditor({
     () => createLookoutClient({ baseUrl: apiBaseUrl, token }),
     [apiBaseUrl, token],
   );
+
+  useEffect(() => injectEditorStyles(), []);
 
   const [data, setData] = useState<UnitsResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -96,9 +100,15 @@ export function TimelapseEditor({
   const [filmstrip, setFilmstrip] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** Scrubber preview: the unit under the pointer, or null when away. */
+  const [hoverUnit, setHoverUnit] = useState<number | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
+  const scrubVideoRef = useRef<HTMLVideoElement | null>(null);
+  const scrubBusyRef = useRef(false);
+  const scrubWantRef = useRef<number | null>(null);
   const dragRef = useRef<DragState>(null);
   const regionsRef = useRef<UnitRegion[]>(regions);
   regionsRef.current = regions;
@@ -164,7 +174,6 @@ export function TimelapseEditor({
     const estimateMs = COMPILE_BASE_MS + preparing.expectedUnits * COMPILE_MS_PER_UNIT;
     const tick = () => {
       const elapsed = Date.now() - startedAt;
-      // Asymptotic: fast at first, never quite arriving.
       setBuildProgress(1 - Math.exp(-2.2 * (elapsed / estimateMs)));
     };
     tick();
@@ -173,9 +182,6 @@ export function TimelapseEditor({
   }, [preparing]);
 
   // ── Hold countdown ──────────────────────────────────────────
-  // The session publishes itself when the hold expires. Surface the
-  // deadline (and bail out gracefully once it passes) instead of letting
-  // a Save silently 409.
   const holdUntilMs = data?.editHoldUntil ? Date.parse(data.editHoldUntil) : null;
   const [holdSecondsLeft, setHoldSecondsLeft] = useState<number | null>(null);
   useEffect(() => {
@@ -184,8 +190,6 @@ export function TimelapseEditor({
       const left = Math.max(0, Math.round((holdUntilMs - Date.now()) / 1000));
       setHoldSecondsLeft(left);
       if (left === 0) {
-        // Auto-published underneath us — the timelapse is safe, just no
-        // longer editable.
         setLoadError(
           "The edit window closed, so your timelapse was published as recorded.",
         );
@@ -216,7 +220,6 @@ export function TimelapseEditor({
       const region = regionAtTime(v.currentTime, regionsRef.current);
       if (!region) return;
       if (region.endUnit >= unitCount) {
-        // Cut runs to the end — nothing kept after it.
         v.pause();
         v.currentTime = region.startUnit;
       } else {
@@ -227,29 +230,107 @@ export function TimelapseEditor({
     return () => v.removeEventListener("timeupdate", onTimeUpdate);
   }, [unitCount, data?.originalVideoUrl]);
 
-  // ── Filmstrip: sample frames from an offscreen copy of the video.
-  // Best-effort — if the CDN response isn't CORS-readable the canvas
-  // taints and we quietly fall back to a plain timeline.
+  // ── Offscreen frame source: filmstrip + scrubber preview ────
+  //
+  // Both features read pixels out of a <video> via canvas, which needs a
+  // taint-free source. Two strategies, in order:
+  //
+  //  1. Load with crossOrigin="anonymous". If the presigned GET carries
+  //     CORS headers this succeeds and the canvas stays clean. Note this
+  //     is all-or-nothing: WITHOUT a fallback, a bucket that doesn't send
+  //     those headers fails the load outright and you get no thumbnails
+  //     at all — which is exactly what a missing CORS config looks like.
+  //  2. Otherwise pull the bytes through the app's fetch (on desktop that
+  //     is Tauri's HTTP plugin, which isn't subject to browser CORS at
+  //     all) and hand the video a blob: URL — same-origin by definition.
+  //
+  // Only if both fail does the timeline degrade to a plain track.
+  const [frameSrc, setFrameSrc] = useState<string | null>(null);
   useEffect(() => {
     const src = data?.originalVideoUrl;
-    if (!src || unitCount === 0) return;
+    if (!src) return;
     let cancelled = false;
+    let objectUrl: string | null = null;
+
+    const probe = (url: string, useCors: boolean) =>
+      new Promise<boolean>((resolve) => {
+        const probeEl = document.createElement("video");
+        if (useCors) probeEl.crossOrigin = "anonymous";
+        probeEl.muted = true;
+        probeEl.preload = "metadata";
+        probeEl.onloadedmetadata = () => {
+          probeEl.removeAttribute("src");
+          resolve(true);
+        };
+        probeEl.onerror = () => resolve(false);
+        probeEl.src = url;
+      });
+
     (async () => {
-      const v = document.createElement("video");
-      v.crossOrigin = "anonymous";
-      v.muted = true;
-      v.preload = "auto";
-      v.src = src;
+      if (await probe(src, true)) {
+        if (!cancelled) setFrameSrc(src);
+        return;
+      }
+      console.warn(
+        "[editor] preview video is not CORS-readable; fetching bytes for thumbnails",
+      );
+      try {
+        const res = await fetch(src);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setFrameSrc(objectUrl);
+      } catch (err) {
+        console.error("[editor] no frame source available for thumbnails:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setFrameSrc(null);
+    };
+  }, [data?.originalVideoUrl]);
+
+  // Persistent decoder for the hover scrubber. Kept separate from the
+  // filmstrip pass below so the two never fight over `currentTime`.
+  useEffect(() => {
+    if (!frameSrc) return;
+    const v = document.createElement("video");
+    if (!frameSrc.startsWith("blob:")) v.crossOrigin = "anonymous";
+    v.muted = true;
+    v.preload = "auto";
+    v.src = frameSrc;
+    scrubVideoRef.current = v;
+    return () => {
+      scrubVideoRef.current = null;
+      v.removeAttribute("src");
+      v.load();
+    };
+  }, [frameSrc]);
+
+  // Filmstrip: sample evenly across the video, streaming partial strips in
+  // so the timeline fills progressively instead of blocking on the whole set.
+  useEffect(() => {
+    if (!frameSrc || unitCount === 0) return;
+    let cancelled = false;
+
+    const v = document.createElement("video");
+    if (!frameSrc.startsWith("blob:")) v.crossOrigin = "anonymous";
+    v.muted = true;
+    v.preload = "auto";
+    v.src = frameSrc;
+
+    (async () => {
       try {
         await new Promise<void>((resolve, reject) => {
           v.onloadedmetadata = () => resolve();
-          v.onerror = () => reject(new Error("video load failed"));
+          v.onerror = () => reject(new Error("filmstrip video load failed"));
         });
         const canvas = document.createElement("canvas");
-        const thumbH = TIMELINE_HEIGHT;
-        const thumbW = Math.round(
-          (v.videoWidth / Math.max(1, v.videoHeight)) * thumbH,
-        );
+        const thumbH = STRIP_HEIGHT;
+        const thumbW = Math.round((v.videoWidth / Math.max(1, v.videoHeight)) * thumbH);
         canvas.width = thumbW;
         canvas.height = thumbH;
         const ctx = canvas.getContext("2d");
@@ -259,33 +340,69 @@ export function TimelapseEditor({
         const thumbs: string[] = [];
         for (let i = 0; i < count; i++) {
           if (cancelled) return;
-          // Sample the middle of each strip cell, +0.5 to land inside a
-          // second (unit) rather than on the boundary between two.
-          const t = Math.min(
-            v.duration - 0.05,
-            (i / count) * unitCount + 0.5,
-          );
+          const t = Math.min(v.duration - 0.05, (i / count) * unitCount + 0.5);
           await new Promise<void>((resolve) => {
             v.onseeked = () => resolve();
             v.currentTime = t;
           });
           ctx.drawImage(v, 0, 0, thumbW, thumbH);
-          thumbs.push(canvas.toDataURL("image/jpeg", 0.5));
-          // Stream partial strips in so the timeline fills as we go.
-          if (i % 6 === 5) setFilmstrip([...thumbs]);
+          thumbs.push(canvas.toDataURL("image/jpeg", 0.6));
+          if (i % 4 === 3) setFilmstrip([...thumbs]);
         }
         if (!cancelled) setFilmstrip(thumbs);
-      } catch {
-        // Tainted canvas / load failure → no thumbnails, timeline still works.
+      } catch (err) {
+        console.error("[editor] filmstrip generation failed:", err);
       } finally {
         v.removeAttribute("src");
         v.load();
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [data?.originalVideoUrl, unitCount]);
+  }, [frameSrc, unitCount]);
+
+  /**
+   * Draw the hovered frame into the preview card — the iOS-scrubber move.
+   * Seeks are coalesced: one in flight at a time, with the latest request
+   * kept as the target, so dragging across an hour of footage stays
+   * responsive instead of queueing hundreds of seeks.
+   */
+  const requestScrubFrame = useCallback((unitF: number) => {
+    const v = scrubVideoRef.current;
+    const canvas = previewCanvasRef.current;
+    if (!v || !canvas || !v.duration) return;
+    scrubWantRef.current = unitF;
+    if (scrubBusyRef.current) return;
+
+    const pump = () => {
+      const want = scrubWantRef.current;
+      if (want === null || !scrubVideoRef.current) {
+        scrubBusyRef.current = false;
+        return;
+      }
+      scrubWantRef.current = null;
+      scrubBusyRef.current = true;
+      const target = Math.max(0, Math.min(v.duration - 0.05, want + 0.5));
+      const onSeeked = () => {
+        v.removeEventListener("seeked", onSeeked);
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          try {
+            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+          } catch {
+            // Tainted — leave the card blank rather than throwing.
+          }
+        }
+        if (scrubWantRef.current !== null) pump();
+        else scrubBusyRef.current = false;
+      };
+      v.addEventListener("seeked", onSeeked);
+      v.currentTime = target;
+    };
+    pump();
+  }, []);
 
   // ── Pointer plumbing ────────────────────────────────────────
   const unitFromEvent = useCallback(
@@ -299,11 +416,14 @@ export function TimelapseEditor({
     [unitCount],
   );
 
-  const seekTo = useCallback((t: number) => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.currentTime = Math.max(0, Math.min(unitCount - 0.05, t));
-  }, [unitCount]);
+  const seekTo = useCallback(
+    (t: number) => {
+      const v = videoRef.current;
+      if (!v) return;
+      v.currentTime = Math.max(0, Math.min(unitCount - 0.05, t));
+    },
+    [unitCount],
+  );
 
   const beginDrag = useCallback((e: React.PointerEvent, state: DragState) => {
     dragRef.current = state;
@@ -331,9 +451,15 @@ export function TimelapseEditor({
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      const drag = dragRef.current;
-      if (!drag) return;
       const unitF = unitFromEvent(e);
+      const drag = dragRef.current;
+
+      // The scrubber preview follows the pointer whether or not a drag is
+      // in progress — while dragging a cut edge it IS the boundary frame.
+      setHoverUnit(unitF);
+      requestScrubFrame(unitF);
+
+      if (!drag) return;
 
       if (drag.kind === "scrub") {
         seekTo(unitF);
@@ -353,7 +479,7 @@ export function TimelapseEditor({
         });
         dragRef.current = {
           kind: "region",
-          index: regionsRef.current.length, // index of the region just added
+          index: regionsRef.current.length,
           mode: unitF >= drag.downUnitF ? "end" : "start",
           grabOffset: 0,
           anchorUnit: Math.floor(drag.downUnitF),
@@ -361,7 +487,6 @@ export function TimelapseEditor({
         return;
       }
 
-      // Region move/resize. Edges snap to whole units by construction.
       setRegions((prev) => {
         const next = prev.map((r) => ({ ...r }));
         const r = next[drag.index];
@@ -374,20 +499,16 @@ export function TimelapseEditor({
           r.endUnit = start + width;
         } else if (drag.mode === "start") {
           r.startUnit = Math.max(0, Math.min(r.endUnit - 1, Math.round(unitF)));
-          // The preview rides the dragged edge: show the first REMOVED unit.
           seekTo(r.startUnit + 0.02);
         } else {
           const anchor = drag.anchorUnit;
           const rounded = Math.round(unitF);
           if (rounded <= anchor) {
-            // Dragged back across the anchor — grow leftward instead.
             r.startUnit = Math.max(0, rounded);
             r.endUnit = anchor + 1;
             seekTo(r.startUnit + 0.02);
           } else {
             r.endUnit = Math.min(unitCount, Math.max(r.startUnit + 1, rounded));
-            // Show the first KEPT unit after the cut — the frame the splice
-            // will land on.
             seekTo(Math.min(unitCount - 0.05, r.endUnit + 0.02));
           }
         }
@@ -395,7 +516,7 @@ export function TimelapseEditor({
       });
       setSelected(drag.index);
     },
-    [seekTo, unitCount, unitFromEvent],
+    [requestScrubFrame, seekTo, unitCount, unitFromEvent],
   );
 
   const onPointerUp = useCallback(() => {
@@ -403,17 +524,13 @@ export function TimelapseEditor({
     dragRef.current = null;
     if (!drag) return;
     if (drag.kind === "maybe") {
-      // A plain click: seek. (Deselect any selected region.)
       seekTo(drag.downUnitF);
       setSelected(null);
       return;
     }
     if (drag.kind === "region") {
-      setRegions((prev) => {
-        const next = normalizeRegions(prev);
-        setSelected(null);
-        return next;
-      });
+      setRegions((prev) => normalizeRegions(prev));
+      setSelected(null);
     }
   }, [seekTo]);
 
@@ -434,7 +551,30 @@ export function TimelapseEditor({
     [beginDrag, saving, unitFromEvent],
   );
 
-  // ── Keyboard: space = play/pause, delete = remove selection ─
+  const togglePlay = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) {
+      const region = regionAtTime(v.currentTime, regionsRef.current);
+      if (region && region.endUnit < unitCount) v.currentTime = region.endUnit;
+      void v.play();
+    } else {
+      v.pause();
+    }
+  }, [unitCount]);
+
+  const cutHere = useCallback(() => {
+    const v = videoRef.current;
+    if (!v || unitCount === 0) return;
+    const at = unitAtTime(v.currentTime, unitCount);
+    setRegions((prev) => {
+      const next = normalizeRegions([...prev, { startUnit: at, endUnit: at + 1 }]);
+      setSelected(next.findIndex((r) => at >= r.startUnit && at < r.endUnit));
+      return next;
+    });
+  }, [unitCount]);
+
+  // ── Keyboard ────────────────────────────────────────────────
   // Capture phase + preventDefault so hosting apps' global key handlers
   // (e.g. the desktop router's Backspace-goes-back) never fire underneath
   // an open editor — losing unsaved cuts to a stray Backspace is the worst
@@ -443,9 +583,13 @@ export function TimelapseEditor({
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && ["INPUT", "TEXTAREA"].includes(target.tagName)) return;
+      if (e.metaKey || e.ctrlKey) return;
       if (e.key === " " || e.key === "k") {
         e.preventDefault();
         togglePlay();
+      } else if (e.key === "x" || e.key === "c") {
+        e.preventDefault();
+        cutHere();
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         if (selected !== null) {
@@ -457,26 +601,16 @@ export function TimelapseEditor({
         setSelected(null);
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
-        seekTo((videoRef.current?.currentTime ?? 0) + (e.key === "ArrowLeft" ? -1 : 1));
+        const step = e.shiftKey ? 10 : 1;
+        seekTo(
+          (videoRef.current?.currentTime ?? 0) +
+            (e.key === "ArrowLeft" ? -step : step),
+        );
       }
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, seekTo]);
-
-  const togglePlay = useCallback(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (v.paused) {
-      // Never start playback inside a cut — jump to the next kept unit.
-      const region = regionAtTime(v.currentTime, regionsRef.current);
-      if (region && region.endUnit < unitCount) v.currentTime = region.endUnit;
-      void v.play();
-    } else {
-      v.pause();
-    }
-  }, [unitCount]);
+  }, [selected, seekTo, togglePlay, cutHere]);
 
   // ── Publish ─────────────────────────────────────────────────
   const save = useCallback(async () => {
@@ -485,9 +619,6 @@ export function TimelapseEditor({
     setSaveError(null);
     try {
       const cuts = regionsToCuts(normalizeRegions(regionsRef.current), data.units);
-      // Always write the list — an empty one is a meaningful "publish it
-      // as recorded" — then publish. The server bakes cuts in before the
-      // session ever reaches `complete`.
       await client.setCuts(cuts);
       await client.applyCuts();
       onApplied?.();
@@ -505,18 +636,17 @@ export function TimelapseEditor({
   const gaps = useMemo(() => (data ? gapIndices(data.units) : []), [data]);
   const currentUnit = unitAtTime(time, Math.max(1, unitCount));
   const inCutNow = regionAtTime(time, normalized) !== null;
-
   const pct = (u: number) => `${(u / Math.max(1, unitCount)) * 100}%`;
 
   // ── Render ──────────────────────────────────────────────────
   if (loadError) {
     return (
-      <div style={{ padding: spacing.lg }}>
+      <div style={{ padding: spacing.xl, maxWidth: 520 }}>
         <ErrorDisplay error={loadError} variant="banner" title="Can't edit" />
         {onCancel && (
           <div style={{ marginTop: spacing.md }}>
             <Button variant="secondary" size="sm" onClick={onCancel}>
-              &larr; Back
+              Close
             </Button>
           </div>
         )}
@@ -528,13 +658,15 @@ export function TimelapseEditor({
     return (
       <div
         style={{
+          height: "100%",
+          minHeight: 260,
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
-          minHeight: 300,
           gap: spacing.lg,
           textAlign: "center",
+          padding: spacing.xl,
         }}
       >
         {preparing ? (
@@ -548,19 +680,21 @@ export function TimelapseEditor({
         <div>
           <div
             style={{
-              fontSize: fontSize.lg,
-              fontWeight: fontWeight.bold,
+              fontSize: fontSize.xl,
+              fontWeight: fontWeight.semibold,
               color: colors.text.primary,
+              letterSpacing: "-0.01em",
             }}
           >
-            Preparing your timelapse…
+            Preparing your timelapse
           </div>
           <div
             style={{
               fontSize: fontSize.md,
               color: colors.text.secondary,
               marginTop: spacing.xs,
-              maxWidth: 380,
+              maxWidth: 340,
+              lineHeight: 1.5,
             }}
           >
             {preparing && preparing.expectedUnits > 0
@@ -574,16 +708,32 @@ export function TimelapseEditor({
     );
   }
 
+  const previewLeftPct =
+    hoverUnit === null ? 0 : (hoverUnit / Math.max(1, unitCount)) * 100;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: spacing.md }}>
-      {/* Preview */}
+    <div
+      style={{
+        height: "100%",
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        gap: spacing.md,
+      }}
+    >
+      {/* ── Stage: the only row that flexes ──────────────────── */}
       <div
         style={{
+          flex: "1 1 auto",
+          minHeight: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
           position: "relative",
-          borderRadius: radii.lg,
+          background: colors.editor.well,
+          border: `1px solid ${colors.editor.wellBorder}`,
+          borderRadius: 12,
           overflow: "hidden",
-          background: "#000",
-          lineHeight: 0,
         }}
       >
         <video
@@ -594,16 +744,24 @@ export function TimelapseEditor({
           onClick={togglePlay}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
-          style={{ width: "100%", display: "block", cursor: "pointer" }}
+          // max-* rather than width:100% is what lets the stage shrink:
+          // the video letterboxes into whatever height is left instead of
+          // forcing the dock off the bottom of the window.
+          style={{
+            maxWidth: "100%",
+            maxHeight: "100%",
+            display: "block",
+            cursor: "pointer",
+          }}
         />
-        {/* Play affordance when paused (clicking the video toggles) */}
+
         <AnimatePresence>
           {!playing && (
             <motion.div
-              initial={{ opacity: 0, scale: 0.85 }}
+              initial={{ opacity: 0, scale: 0.88 }}
               animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.85 }}
-              transition={{ type: "spring", stiffness: 500, damping: 30 }}
+              exit={{ opacity: 0, scale: 0.88 }}
+              transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
               style={{
                 position: "absolute",
                 inset: 0,
@@ -615,10 +773,12 @@ export function TimelapseEditor({
             >
               <div
                 style={{
-                  width: 52,
-                  height: 52,
+                  width: 56,
+                  height: 56,
                   borderRadius: "50%",
-                  background: "rgba(0,0,0,0.65)",
+                  background: "rgba(0,0,0,0.55)",
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -631,7 +791,7 @@ export function TimelapseEditor({
             </motion.div>
           )}
         </AnimatePresence>
-        {/* Removed-minute overlay while scrubbing inside a cut */}
+
         <AnimatePresence>
           {inCutNow && (
             <motion.div
@@ -642,261 +802,347 @@ export function TimelapseEditor({
               style={{
                 position: "absolute",
                 inset: 0,
-                background: "rgba(239, 68, 68, 0.18)",
-                display: "flex",
-                alignItems: "flex-start",
-                justifyContent: "flex-end",
-                padding: spacing.md,
+                boxShadow: `inset 0 0 0 3px ${colors.editor.cutBorder}`,
+                background: "rgba(220, 38, 38, 0.12)",
                 pointerEvents: "none",
               }}
             >
               <span
                 style={{
-                  background: "rgba(0,0,0,0.75)",
-                  color: "#fca5a5",
-                  fontSize: fontSize.sm,
+                  position: "absolute",
+                  top: spacing.md,
+                  right: spacing.md,
+                  background: colors.editor.cutBorder,
+                  color: "#fff",
+                  fontSize: fontSize.xs,
                   fontWeight: fontWeight.semibold,
-                  padding: "4px 10px",
-                  borderRadius: radii.md,
-                  lineHeight: 1.4,
+                  padding: "3px 8px",
+                  borderRadius: radii.sm,
+                  letterSpacing: "0.01em",
                 }}
               >
-                This minute will be removed
+                Will be removed
               </span>
             </motion.div>
           )}
         </AnimatePresence>
-        {/* Wall-clock of the frame under the playhead */}
-        {unitCount > 0 && (
+      </div>
+
+      {/* ── Dock: transport, timeline, actions ───────────────── */}
+      <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", gap: spacing.sm }}>
+        {/* Transport */}
+        <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
+          <button
+            className="lk-ed-iconbtn"
+            onClick={togglePlay}
+            aria-label={playing ? "Pause" : "Play"}
+            style={{ width: 30, height: 30, borderRadius: radii.md }}
+          >
+            {playing ? (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M6 4h4v16H6zM14 4h4v16h-4z" />
+              </svg>
+            ) : (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            )}
+          </button>
+
           <div
             style={{
-              position: "absolute",
-              left: spacing.md,
-              bottom: spacing.md,
-              background: "rgba(0,0,0,0.7)",
-              color: "#fff",
-              fontSize: fontSize.sm,
-              padding: "3px 8px",
-              borderRadius: radii.sm,
-              pointerEvents: "none",
+              fontSize: fontSize.md,
+              color: colors.text.primary,
               fontVariantNumeric: "tabular-nums",
-              lineHeight: 1.4,
+              letterSpacing: "-0.01em",
             }}
           >
             {unitClockLabel(units[currentUnit])}
-            <span style={{ opacity: 0.55 }}>
-              {" "}· minute {currentUnit + 1}/{unitCount}
+            <span style={{ color: colors.text.tertiary }}>
+              {" · "}min {currentUnit + 1} of {unitCount}
             </span>
           </div>
-        )}
-      </div>
 
-      {/* Timeline */}
-      <div
-        style={{ position: "relative", userSelect: "none", touchAction: "none" }}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      >
-        {/* Ruler lane — owns scrubbing */}
-        <div
-          onPointerDown={onRulerPointerDown}
-          style={{
-            position: "relative",
-            height: RULER_HEIGHT,
-            cursor: "ew-resize",
-            borderBottom: `1px solid ${colors.border.default}`,
-          }}
-        >
-          {units.length > 0 &&
-            [0, 0.25, 0.5, 0.75, 1].map((f) => {
-              const idx = Math.min(unitCount - 1, Math.round(f * (unitCount - 1)));
-              return (
-                <span
-                  key={f}
-                  style={{
-                    position: "absolute",
-                    left: `calc(${f * 100}% ${f === 0 ? "" : f === 1 ? "- 34px" : "- 17px"})`,
-                    bottom: 4,
-                    fontSize: fontSize.xs,
-                    color: colors.text.tertiary,
-                    fontVariantNumeric: "tabular-nums",
-                    pointerEvents: "none",
-                  }}
-                >
-                  {unitClockLabel(units[idx])}
-                </span>
-              );
-            })}
+          <div style={{ flex: 1 }} />
+
+          <button
+            className="lk-ed-iconbtn"
+            onClick={cutHere}
+            style={{
+              height: 30,
+              borderRadius: radii.md,
+              padding: `0 ${spacing.md}px`,
+              gap: 6,
+              fontSize: fontSize.sm,
+              fontWeight: fontWeight.medium,
+              fontFamily: "inherit",
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="6" cy="6" r="3" />
+              <circle cx="6" cy="18" r="3" />
+              <line x1="20" y1="4" x2="8.12" y2="15.88" />
+              <line x1="14.47" y1="14.48" x2="20" y2="20" />
+              <line x1="8.12" y1="8.12" x2="12" y2="12" />
+            </svg>
+            Cut minute
+          </button>
         </div>
 
-        {/* Filmstrip lane — drag creates a cut, click seeks */}
+        {/* Timeline */}
         <div
-          ref={timelineRef}
-          onPointerDown={onTimelinePointerDown}
-          style={{
-            position: "relative",
-            height: TIMELINE_HEIGHT,
-            marginTop: 2,
-            borderRadius: radii.md,
-            overflow: "hidden",
-            cursor: "crosshair",
-            background: colors.bg.surface,
+          style={{ position: "relative", userSelect: "none", touchAction: "none" }}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onPointerLeave={() => {
+            if (!dragRef.current) setHoverUnit(null);
           }}
         >
-          {/* Thumbnails */}
-          <div style={{ position: "absolute", inset: 0, display: "flex" }}>
-            {filmstrip.length > 0
-              ? filmstrip.map((url, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      flex: 1,
-                      backgroundImage: `url(${url})`,
-                      backgroundSize: "cover",
-                      backgroundPosition: "center",
-                    }}
-                  />
-                ))
-              : null}
+          {/* Scrubber frame preview — follows the pointer, iOS-style.
+              Falls back to a bare time chip when no frame source is
+              available, so hovering still tells you where you are. */}
+          <div
+            aria-hidden="true"
+            className={hoverUnit !== null ? "lk-ed-fade-in" : undefined}
+            style={{
+              position: "absolute",
+              bottom: `calc(100% + ${spacing.sm}px)`,
+              left: `clamp(${PREVIEW_W / 2}px, ${previewLeftPct}%, calc(100% - ${PREVIEW_W / 2}px))`,
+              transform: "translateX(-50%)",
+              width: frameSrc ? PREVIEW_W : "auto",
+              display: hoverUnit === null ? "none" : "block",
+              borderRadius: radii.md,
+              overflow: "hidden",
+              background: frameSrc ? colors.editor.well : colors.bg.panel,
+              border: `1px solid ${colors.border.hover}`,
+              boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
+              pointerEvents: "none",
+              zIndex: 2,
+            }}
+          >
+            {frameSrc && (
+              <canvas
+                ref={previewCanvasRef}
+                width={PREVIEW_W}
+                height={PREVIEW_H}
+                style={{ display: "block", width: "100%", height: PREVIEW_H }}
+              />
+            )}
+            <div
+              style={{
+                padding: frameSrc ? "4px 8px" : "3px 8px",
+                fontSize: fontSize.xs,
+                color: colors.text.secondary,
+                fontVariantNumeric: "tabular-nums",
+                textAlign: "center",
+                whiteSpace: "nowrap",
+                borderTop: frameSrc ? `1px solid ${colors.border.default}` : undefined,
+              }}
+            >
+              {hoverUnit !== null &&
+                unitClockLabel(units[unitAtTime(hoverUnit, unitCount)])}
+            </div>
           </div>
 
-          {/* Pause-gap markers */}
-          {gaps.map((i) => (
-            <div
-              key={`gap-${i}`}
-              title="Recording paused here"
-              style={{
-                position: "absolute",
-                left: pct(i),
-                top: 0,
-                bottom: 0,
-                width: 0,
-                borderLeft: `2px dashed ${colors.text.quaternary}`,
-                pointerEvents: "none",
-              }}
-            />
-          ))}
-
-          {/* Cut regions */}
-          {regions.map((r, i) => {
-            const isSelected = selected === i;
-            return (
-              <div
-                key={i}
-                onPointerDown={(e) => onRegionPointerDown(e, i, "move")}
-                style={{
-                  position: "absolute",
-                  left: pct(r.startUnit),
-                  width: pct(r.endUnit - r.startUnit),
-                  top: 0,
-                  bottom: 0,
-                  background: CUT_FILL,
-                  border: `${isSelected ? 2 : 1}px solid ${CUT_BORDER}`,
-                  borderRadius: radii.sm,
-                  cursor: "grab",
-                  boxSizing: "border-box",
-                }}
-              >
-                {[
-                  { mode: "start" as const, side: { left: -6 } },
-                  { mode: "end" as const, side: { right: -6 } },
-                ].map(({ mode, side }) => (
-                  <div
-                    key={mode}
-                    onPointerDown={(e) => onRegionPointerDown(e, i, mode)}
+          {/* Ruler lane — owns scrubbing */}
+          <div
+            onPointerDown={onRulerPointerDown}
+            style={{
+              position: "relative",
+              height: RULER_HEIGHT,
+              cursor: "ew-resize",
+            }}
+          >
+            {units.length > 0 &&
+              [0, 0.5, 1].map((f) => {
+                const idx = Math.min(unitCount - 1, Math.round(f * (unitCount - 1)));
+                return (
+                  <span
+                    key={f}
                     style={{
                       position: "absolute",
+                      left: `${f * 100}%`,
+                      transform:
+                        f === 0
+                          ? "none"
+                          : f === 1
+                            ? "translateX(-100%)"
+                            : "translateX(-50%)",
                       top: 0,
-                      bottom: 0,
-                      width: 12,
-                      ...side,
-                      cursor: "ew-resize",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
+                      fontSize: fontSize.xs,
+                      color: colors.text.tertiary,
+                      fontVariantNumeric: "tabular-nums",
+                      pointerEvents: "none",
                     }}
                   >
+                    {unitClockLabel(units[idx])}
+                  </span>
+                );
+              })}
+          </div>
+
+          {/* Filmstrip — drag creates a cut, click seeks */}
+          <div
+            ref={timelineRef}
+            className="lk-ed-strip"
+            tabIndex={0}
+            role="group"
+            aria-label="Timelapse timeline. Drag to remove a stretch of time."
+            onPointerDown={onTimelinePointerDown}
+            style={{
+              position: "relative",
+              height: STRIP_HEIGHT,
+              borderRadius: radii.md,
+              overflow: "hidden",
+              cursor: "crosshair",
+              background: colors.editor.track,
+              border: `1px solid ${colors.border.default}`,
+            }}
+          >
+            <div style={{ position: "absolute", inset: 0, display: "flex" }}>
+              {filmstrip.map((url, i) => (
+                <div
+                  key={i}
+                  style={{
+                    flex: 1,
+                    backgroundImage: `url(${url})`,
+                    backgroundSize: "cover",
+                    backgroundPosition: "center",
+                  }}
+                />
+              ))}
+            </div>
+
+            {/* Pause markers: the recording stopped between these minutes */}
+            {gaps.map((i) => (
+              <div
+                key={`gap-${i}`}
+                title="Recording paused here"
+                style={{
+                  position: "absolute",
+                  left: pct(i),
+                  top: 0,
+                  bottom: 0,
+                  width: 2,
+                  marginLeft: -1,
+                  background:
+                    "repeating-linear-gradient(180deg, var(--color-text-quaternary) 0 3px, transparent 3px 6px)",
+                  pointerEvents: "none",
+                }}
+              />
+            ))}
+
+            {regions.map((r, i) => {
+              const isSelected = selected === i;
+              return (
+                <div
+                  key={i}
+                  className="lk-ed-region"
+                  onPointerDown={(e) => onRegionPointerDown(e, i, "move")}
+                  style={{
+                    position: "absolute",
+                    left: pct(r.startUnit),
+                    width: pct(r.endUnit - r.startUnit),
+                    top: 0,
+                    bottom: 0,
+                    background: colors.editor.cutFill,
+                    boxShadow: isSelected
+                      ? `inset 0 0 0 2px ${colors.editor.cutBorder}`
+                      : `inset 0 0 0 1px ${colors.editor.cutBorder}`,
+                    cursor: "grab",
+                    boxSizing: "border-box",
+                  }}
+                >
+                  {[
+                    { mode: "start" as const, side: { left: -6 } },
+                    { mode: "end" as const, side: { right: -6 } },
+                  ].map(({ mode, side }) => (
                     <div
+                      key={mode}
+                      className="lk-ed-handle"
+                      onPointerDown={(e) => onRegionPointerDown(e, i, mode)}
                       style={{
-                        width: 4,
-                        height: 26,
-                        borderRadius: 2,
-                        background: CUT_BORDER,
+                        position: "absolute",
+                        top: 0,
+                        bottom: 0,
+                        width: 12,
+                        ...side,
+                        cursor: "ew-resize",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
                       }}
-                    />
-                  </div>
-                ))}
-              </div>
-            );
-          })}
+                    >
+                      <div
+                        className="lk-ed-grip"
+                        style={{
+                          width: 3,
+                          height: 22,
+                          borderRadius: 2,
+                          background: colors.editor.cutBorder,
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
 
-          {/* Playhead */}
-          {unitCount > 0 && (
-            <div
-              style={{
-                position: "absolute",
-                left: pct(Math.min(time, unitCount)),
-                top: 0,
-                bottom: 0,
-                width: 2,
-                marginLeft: -1,
-                background: colors.text.primary,
-                pointerEvents: "none",
-                boxShadow: "0 0 4px rgba(0,0,0,0.6)",
-              }}
-            />
-          )}
+            {unitCount > 0 && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: pct(Math.min(time, unitCount)),
+                  top: 0,
+                  bottom: 0,
+                  width: 2,
+                  marginLeft: -1,
+                  background: "#fff",
+                  boxShadow: "0 0 0 1px rgba(0,0,0,0.5)",
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* Footer */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: spacing.md,
-          flexWrap: "wrap",
-        }}
-      >
+        {/* Actions */}
         <div
           style={{
             display: "flex",
-            alignItems: "baseline",
-            gap: spacing.sm,
-            fontSize: fontSize.md,
-            color: colors.text.secondary,
+            alignItems: "center",
+            gap: spacing.md,
+            flexWrap: "wrap",
+            marginTop: spacing.xs,
           }}
         >
-          <span
-            style={{
-              fontWeight: fontWeight.bold,
-              color: allCut ? colors.status.danger : colors.text.primary,
-              fontSize: fontSize.lg,
-            }}
-          >
-            {formatUnitsDuration(keptUnits)}
-          </span>
-          <span>kept</span>
-          <AnimatePresence>
-            {removedUnits > 0 && (
-              <motion.span
-                initial={{ opacity: 0, y: 2 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                style={{ color: colors.status.danger }}
-              >
-                · {formatUnitsDuration(removedUnits)} removed
-              </motion.span>
-            )}
-          </AnimatePresence>
-          <span style={{ fontSize: fontSize.xs, color: colors.text.quaternary }}>
-            drag the strip to cut · click to seek · space to preview
-          </span>
-        </div>
+          <div style={{ minWidth: 0 }}>
+            <div
+              style={{
+                fontSize: fontSize.lg,
+                color: colors.text.primary,
+                fontWeight: fontWeight.semibold,
+                letterSpacing: "-0.01em",
+              }}
+            >
+              {formatUnitsDuration(keptUnits)} kept
+              {removedUnits > 0 && (
+                <span style={{ color: colors.editor.cutBorder, fontWeight: fontWeight.medium }}>
+                  {" · "}
+                  {formatUnitsDuration(removedUnits)} removed
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: fontSize.xs, color: colors.text.tertiary, marginTop: 2 }}>
+              {holdSecondsLeft !== null && holdSecondsLeft < 120
+                ? `Publishing automatically in ${holdSecondsLeft}s`
+                : "Drag the strip to cut · Space to preview · X to cut a minute"}
+            </div>
+          </div>
 
-        <div style={{ display: "flex", gap: spacing.sm, alignItems: "center" }}>
+          <div style={{ flex: 1, minWidth: spacing.md }} />
+
           {selected !== null && (
             <Button
               variant="secondary"
@@ -941,29 +1187,11 @@ export function TimelapseEditor({
                 : "Publish as recorded"}
           </Button>
         </div>
+
+        {saveError && (
+          <ErrorDisplay error={saveError} variant="banner" title="Couldn't save your edits" />
+        )}
       </div>
-
-      {saveError && (
-        <ErrorDisplay error={saveError} variant="banner" title="Couldn't save your edits" />
-      )}
-
-      {/* The hold is the promise that nothing gets lost — say so plainly,
-          and get louder as it runs out. */}
-      {holdSecondsLeft !== null && (
-        <div
-          style={{
-            fontSize: fontSize.xs,
-            color:
-              holdSecondsLeft < 120 ? colors.status.warning : colors.text.tertiary,
-          }}
-        >
-          {holdSecondsLeft < 120
-            ? `Publishing automatically in ${holdSecondsLeft}s — save now to keep your cuts.`
-            : `Not published yet. If you close this, it publishes as recorded in ${Math.round(
-                holdSecondsLeft / 60,
-              )} min.`}
-        </div>
-      )}
     </div>
   );
 }

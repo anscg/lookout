@@ -3,6 +3,7 @@ import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
+import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
 
 /** Event the editor window emits after applying cuts, so the main window
@@ -46,15 +47,23 @@ export async function openEditorWindow(token: string): Promise<void> {
     await emit(EDITOR_OPENED_EVENT, { token }).catch(() => {});
     return;
   }
+  const isMacOS = navigator.userAgent.includes("Mac");
   const win = new WebviewWindow(label, {
     url: `${window.location.pathname}#/editor?token=${token}`,
     title: "Edit timelapse",
-    width: 960,
-    height: 720,
-    minWidth: 720,
-    minHeight: 560,
+    width: 940,
+    height: 660,
+    // The floor is what the shell actually needs: chrome + a legible
+    // stage + the dock. Below this the layout would be cramped rather
+    // than broken — it still reflows — but there's no reason to allow it.
+    minWidth: 620,
+    minHeight: 480,
     resizable: true,
     center: true,
+    // Transparent + overlay titlebar is what lets the vibrancy material
+    // show through, matching the main window's chrome exactly.
+    transparent: true,
+    ...(isMacOS ? { titleBarStyle: "overlay" as const, hiddenTitle: true } : {}),
   });
   win.once("tauri://error", (e) => {
     console.error("[editor] failed to open editor window:", e);
@@ -171,55 +180,154 @@ export function useEditorWindowOpen(): string | null {
   return token;
 }
 
-/** The editor window's root view (route `#/editor?token=…`). */
+/**
+ * The editor window's root view (route `#/editor?token=…`).
+ *
+ * An app shell, not a page: a draggable title strip, a body that owns all
+ * remaining height, and nothing that can push content past the window
+ * edge. The chrome is the system vibrancy material, so this window reads
+ * as the same app as the main one in both light and dark.
+ */
 export function EditorWindow({ token }: { token: string }) {
+  const isMacOS = navigator.userAgent.includes("Mac");
+  const [sessionName, setSessionName] = useState<string | null>(null);
+
+  // Vibrancy: the main window does this too. The webview must be
+  // transparent for the material to show, so only go transparent once the
+  // native side confirms it applied — otherwise (Linux, or a failure) the
+  // window would render see-through with nothing behind it.
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const root = document.getElementById("root");
+    const isLinux = navigator.userAgent.toLowerCase().includes("linux");
+
+    if (isLinux) {
+      html.style.background = "var(--color-bg-body)";
+      body.style.background = "var(--color-bg-body)";
+      if (root) root.style.background = "var(--color-bg-body)";
+      return;
+    }
+
+    let applied = false;
+    invoke("enable_vibrancy")
+      .then(() => {
+        applied = true;
+        html.style.background = "transparent";
+        body.style.background = "transparent";
+        if (root) root.style.background = "transparent";
+      })
+      .catch((err) => {
+        console.warn("[editor] vibrancy unavailable, falling back:", err);
+        html.style.background = "var(--color-bg-body)";
+        body.style.background = "var(--color-bg-body)";
+        if (root) root.style.background = "var(--color-bg-body)";
+      });
+
+    return () => {
+      if (applied) invoke("disable_vibrancy").catch(() => {});
+    };
+  }, []);
+
+  // The window title carries the session name on the native title bar;
+  // the in-window strip shows it too, since the title is hidden on macOS.
+  useEffect(() => {
+    fetch(`${getApiBase()}/api/sessions/${token}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.name) {
+          setSessionName(d.name);
+          void getCurrentWindow().setTitle(d.name);
+        }
+      })
+      .catch(() => {
+        // Name is decoration — the editor works without it.
+      });
+  }, [token]);
+
+  const close = () => void getCurrentWindow().close().catch(() => {});
+
   return (
     <div
       style={{
-        minHeight: "100vh",
+        height: "100vh",
+        minHeight: 0,
         boxSizing: "border-box",
-        background: "var(--color-bg-body)",
         color: colors.text.primary,
-        padding: spacing.xl,
         display: "flex",
         flexDirection: "column",
-        gap: spacing.md,
       }}
     >
+      {/* Title strip. Draggable, and on macOS it clears the traffic
+          lights so the label never collides with them. */}
       <div
+        data-tauri-drag-region
         style={{
-          fontSize: fontSize.lg,
-          fontWeight: fontWeight.bold,
-          color: colors.text.primary,
+          flex: "0 0 auto",
+          height: 38,
+          display: "flex",
+          alignItems: "center",
+          gap: spacing.sm,
+          paddingLeft: isMacOS ? 78 : spacing.lg,
+          paddingRight: spacing.lg,
+          cursor: "default",
         }}
       >
-        Edit timelapse
         <span
+          data-tauri-drag-region
           style={{
-            marginLeft: spacing.sm,
-            fontSize: fontSize.xs,
-            fontWeight: fontWeight.normal,
-            color: colors.text.tertiary,
+            fontSize: fontSize.md,
+            fontWeight: fontWeight.semibold,
+            color: colors.text.primary,
+            letterSpacing: "-0.01em",
+            whiteSpace: "nowrap",
           }}
         >
-          drag the strip to remove minutes — the tracked time updates with it
+          Edit timelapse
         </span>
+        {sessionName && (
+          <span
+            data-tauri-drag-region
+            style={{
+              fontSize: fontSize.md,
+              color: colors.text.tertiary,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+            }}
+            title={sessionName}
+          >
+            {sessionName}
+          </span>
+        )}
       </div>
-      <TimelapseEditor
-        token={token}
-        apiBaseUrl={getApiBase()}
-        onApplied={() => {
-          // Tell the main window, then close. Fire-and-forget on purpose:
-          // even if the emit fails, closing is correct — the main window
-          // shows the recompiled video on its next fetch.
-          void emit(EDITED_EVENT, { token })
-            .catch((e) => console.error("[editor] emit failed:", e))
-            .finally(() => getCurrentWindow().close().catch(() => {}));
+
+      {/* Body owns the rest. min-height:0 is what lets the stage inside
+          letterboxe down instead of clipping the dock off the bottom. */}
+      <div
+        style={{
+          flex: "1 1 auto",
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          padding: `0 ${spacing.lg}px ${spacing.lg}px`,
         }}
-        onCancel={() => {
-          void getCurrentWindow().close().catch(() => {});
-        }}
-      />
+      >
+        <TimelapseEditor
+          token={token}
+          apiBaseUrl={getApiBase()}
+          onApplied={() => {
+            // Tell the main window, then close. Fire-and-forget on purpose:
+            // even if the emit fails, closing is correct — the main window
+            // shows the published video on its next fetch.
+            void emit(EDITED_EVENT, { token })
+              .catch((e) => console.error("[editor] emit failed:", e))
+              .finally(close);
+          }}
+          onCancel={close}
+        />
+      </div>
     </div>
   );
 }
