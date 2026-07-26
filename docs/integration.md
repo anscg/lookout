@@ -466,10 +466,12 @@ What this means for your program:
   means the session sits in `stopped` a little longer. The redirect hook
   still fires when the session completes, which is now also the moment the
   edits are in.
-- **An abandoned edit can't strand a timelapse.** The hold expires after 30
-  minutes and the session publishes as recorded. It can delay publication,
-  never cancel it. If you poll, treat a long `stopped` exactly as you
-  always have.
+- **An abandoned edit can't strand a timelapse.** The hold is a lease the
+  open editor renews, not a fixed deadline: editing takes as long as it
+  takes, and once nothing is renewing it (window closed, app quit) the
+  session publishes as recorded within about two minutes. It can delay
+  publication, never cancel it. If you poll, treat a slightly longer
+  `stopped` exactly as you always have.
 - **Cuts only ever shrink the numbers.** A user cannot gain time by
   editing — removing footage removes its credit. The pre-edit value is
   available as `uncutTrackedSeconds` and the intervals as `cuts` on

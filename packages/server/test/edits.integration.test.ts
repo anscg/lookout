@@ -11,6 +11,7 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { sql, eq } from "drizzle-orm";
+import { EDIT_LEASE_SECONDS, EDIT_HOLD_MAX_MINUTES } from "@lookout/shared";
 import { buildApp } from "../src/app.js";
 import { db, schema } from "../src/db/index.js";
 
@@ -50,7 +51,7 @@ async function seedHeldSession(
       trackedSeconds: 540,
       startedAt: minute(0),
       stoppedAt: minute(UNITS),
-      editHoldUntil: new Date(Date.now() + 30 * 60_000),
+      editHoldUntil: new Date(Date.now() + EDIT_LEASE_SECONDS * 1000),
       videoR2Key: null,
       originalVideoR2Key: "timelapses/x/original.mp4",
       thumbnailR2Key: "timelapses/x/thumbnail.jpg",
@@ -118,7 +119,7 @@ async function putCuts(token: string, cuts: unknown) {
 const getJson = async (url: string) => (await app.inject({ method: "GET", url })).json();
 
 describe("POST /stop with { edit }", () => {
-  it("sets an edit hold and still enqueues the compile", async () => {
+  it("opens a short first lease and still enqueues the compile", async () => {
     const s = await seedActiveSession();
     const r = await app.inject({
       method: "POST",
@@ -130,7 +131,11 @@ describe("POST /stop with { edit }", () => {
 
     const row = await load(s.id);
     expect(row!.status).toBe("stopped");
-    expect(row!.editHoldUntil).not.toBeNull();
+    // One lease term, not a long fixed window: a client that asks for an
+    // edit and never opens an editor publishes ~2 minutes later, not ~30.
+    const heldForMs = row!.editHoldUntil!.getTime() - Date.now();
+    expect(heldForMs).toBeGreaterThan((EDIT_LEASE_SECONDS - 20) * 1000);
+    expect(heldForMs).toBeLessThanOrEqual(EDIT_LEASE_SECONDS * 1000 + 1000);
   });
 
   it("leaves old clients untouched — no body means no hold", async () => {
@@ -158,6 +163,58 @@ describe("POST /stop with { edit }", () => {
     expect(r.json().editHoldUntil).toBeUndefined();
     // No screenshots → failed, as before.
     expect((await load(s.id))!.status).toBe("failed");
+  });
+});
+
+describe("POST /editing (lease renewal)", () => {
+  it("extends the hold so an open editor is never cut off", async () => {
+    const s = await seedHeldSession({
+      // Down to the last few seconds of its term.
+      editHoldUntil: new Date(Date.now() + 3_000),
+    });
+    const before = (await load(s.id))!.editHoldUntil!.getTime();
+
+    const r = await app.inject({ method: "POST", url: `/api/sessions/${s.token}/editing` });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().held).toBe(true);
+
+    const after = (await load(s.id))!.editHoldUntil!.getTime();
+    expect(after).toBeGreaterThan(before);
+    // A full fresh lease, not a fixed deadline ticking down.
+    expect(after - Date.now()).toBeGreaterThan((EDIT_LEASE_SECONDS - 10) * 1000);
+  });
+
+  it("renews through a lapse the expiry job hasn't processed yet", async () => {
+    // A stalled network shouldn't end someone's edit in the seconds
+    // between the term lapsing and the cron running.
+    const s = await seedHeldSession({ editHoldUntil: new Date(Date.now() - 5_000) });
+    const r = await app.inject({ method: "POST", url: `/api/sessions/${s.token}/editing` });
+    expect(r.json().held).toBe(true);
+    expect((await load(s.id))!.editHoldUntil!.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("reports not-held once the session published, and doesn't resurrect it", async () => {
+    const s = await seedHeldSession({
+      status: "complete",
+      editHoldUntil: null,
+      videoR2Key: "timelapses/x/original.mp4",
+    });
+    const r = await app.inject({ method: "POST", url: `/api/sessions/${s.token}/editing` });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().held).toBe(false);
+    const row = await load(s.id);
+    expect(row!.status).toBe("complete");
+    expect(row!.editHoldUntil).toBeNull();
+  });
+
+  it("stops renewing past the absolute ceiling", async () => {
+    // An editor left open overnight must not hold a program's session
+    // forever, so the ceiling is measured from the stop.
+    const s = await seedHeldSession({
+      stoppedAt: new Date(Date.now() - (EDIT_HOLD_MAX_MINUTES + 5) * 60_000),
+    });
+    const r = await app.inject({ method: "POST", url: `/api/sessions/${s.token}/editing` });
+    expect(r.json().held).toBe(false);
   });
 });
 

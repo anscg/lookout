@@ -262,10 +262,21 @@ export interface ResumeResponse {
 
 export interface StopRequest {
   /** Hold the session unpublished after compiling so the user can edit
-   *  (cut) it before programs see `complete`. The hold auto-publishes
-   *  after EDIT_HOLD_MINUTES if the user walks away. Only send this when
-   *  the stopping client can render the editor. */
+   *  (cut) it before programs see `complete`. The hold is a lease the open
+   *  editor renews (see `POST /:token/editing`); it publishes on its own
+   *  once nothing is renewing it. Only send this from a client that will
+   *  actually open an editing surface. */
   edit?: boolean;
+}
+
+export interface EditHeartbeatResponse {
+  /** Extended lease deadline. The session publishes at this time unless
+   *  renewed again. */
+  editHoldUntil: string;
+  /** False once the session published anyway (lease lapsed earlier, or the
+   *  absolute ceiling was hit) — the caller should stop renewing and show
+   *  the published state. */
+  held: boolean;
 }
 
 export interface StopResponse {

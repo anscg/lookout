@@ -13,6 +13,7 @@ import type {
   UnitsResponse,
   SetCutsResponse,
   ApplyCutsResponse,
+  EditHeartbeatResponse,
   CutInterval,
 } from "@lookout/shared";
 import type { TokenProvider } from "../types.js";
@@ -53,6 +54,10 @@ export interface LookoutClient {
   /** Apply the current cut list to the published video (a cut-compile —
    *  usually a lossless stream copy, seconds not minutes). */
   applyCuts(): Promise<ApplyCutsResponse>;
+  /** Renew the edit lease — "an editor is still open". Call every
+   *  EDIT_HEARTBEAT_SECONDS while an editing surface is showing; stop when
+   *  the response reports `held: false`. */
+  heartbeatEditing(): Promise<EditHeartbeatResponse>;
 }
 
 export class HttpError extends Error {
@@ -220,6 +225,12 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
 
     async applyCuts() {
       return fetchJson<ApplyCutsResponse>(await sessionUrl("/compile"), {
+        method: "POST",
+      });
+    },
+
+    async heartbeatEditing() {
+      return fetchJson<EditHeartbeatResponse>(await sessionUrl("/editing"), {
         method: "POST",
       });
     },

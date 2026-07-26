@@ -28,14 +28,37 @@ export const MAX_CUT_INTERVALS = 120;
 export const MAX_USER_RECOMPILES = 5;
 
 /**
- * How long a session stopped with `{edit: true}` waits, unpublished, for
- * the user to edit before it auto-publishes uncut. The clock starts at
- * stop. Editing happens ONLY inside this hold — never after `complete`,
- * because `complete` is the signal programs act on (forwarding heartbeats,
- * accepting submissions, firing the redirect hook); data must be final the
- * first time they see it.
+ * The edit hold is a LEASE, not a countdown.
+ *
+ * A session stopped with `{edit: true}` stays unpublished while an editing
+ * surface is actually open: that surface renews the lease every
+ * EDIT_HEARTBEAT_SECONDS, and the server holds the session for
+ * EDIT_LEASE_SECONDS past the last renewal. Stop renewing — close the
+ * window, quit the app, lose the machine — and it publishes within about a
+ * lease.
+ *
+ * A fixed deadline was wrong in both directions: it cut off someone
+ * carefully trimming a long recording, and it made an abandoned session sit
+ * unpublished for half an hour. A lease has neither failure: edit for as
+ * long as you like, and walking away is detected in a minute or two.
+ *
+ * Editing happens ONLY inside this hold — never after `complete`, because
+ * `complete` is the signal programs act on (forwarding heartbeats,
+ * accepting submissions, firing the redirect hook); the data must be final
+ * the first time they see it.
  */
-export const EDIT_HOLD_MINUTES = 30;
+export const EDIT_LEASE_SECONDS = 120;
+
+/** How often an open editing surface renews the lease. Comfortably inside
+ *  EDIT_LEASE_SECONDS so one dropped request never ends an edit. */
+export const EDIT_HEARTBEAT_SECONDS = 30;
+
+/**
+ * Absolute ceiling on a hold, measured from the stop. A safety valve, not
+ * the mechanism: an editor left open overnight must not keep a program
+ * waiting on a session forever.
+ */
+export const EDIT_HOLD_MAX_MINUTES = 120;
 
 /** Backstop retention for uncut originals of EDITED sessions (the worker
  *  deletes them immediately after an edited publish; this catches crashed
