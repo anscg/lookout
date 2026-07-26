@@ -49,8 +49,10 @@ export interface TimelapseEditorProps {
 }
 
 const STRIP_HEIGHT = 56;
-/** Diagonal hatch marking removed footage — the conventional "this is
- *  excluded" texture, and a second channel beyond colour alone. */
+/** Diagonal hatch marking removed stretches on the timeline — the
+ *  conventional "excluded" texture, and a second channel beyond colour
+ *  alone. Kept faint: it should register as texture, not as content
+ *  competing with the thumbnails underneath. */
 const hatch = (periodPx: number) =>
   `repeating-linear-gradient(45deg, ${colors.editor.cutStripe} 0 ${
     periodPx / 2
@@ -843,8 +845,11 @@ export function TimelapseEditor({
                 // corners and reads as a rendering glitch.
                 borderRadius: 12,
                 boxShadow: `inset 0 0 0 3px ${colors.editor.cutBorder}`,
+                // Tint only, no hatch: the stage is already showing the
+                // frame you're judging, and texture over live footage
+                // fights it. The hatch belongs on the timeline, where the
+                // question is "which stretch", not "what's in it".
                 backgroundColor: "rgba(220, 38, 38, 0.10)",
-                backgroundImage: hatch(16),
                 pointerEvents: "none",
               }}
             >
