@@ -9,6 +9,7 @@ import { ProcessingState } from "./ProcessingState.js";
 import { TimelapseEditor } from "./TimelapseEditor.js";
 import { createLookoutClient, type LookoutClient } from "../api/client.js";
 import { useEditLease } from "../hooks/useEditLease.js";
+import { estimateBuildProgress } from "../hooks/buildProgress.js";
 import { SessionDetailSkeleton } from "../ui/Skeleton.js";
 import { Card } from "../ui/Card.js";
 import { Badge } from "../ui/Badge.js";
@@ -41,11 +42,16 @@ function HoldPanel({
   // progress); it eases toward 100% and the `editable` flip is what
   // actually ends it.
   const [buildProgress, setBuildProgress] = useState(0);
+  const startedAtRef = useRef<number | null>(null);
   useEffect(() => {
     if (editable) return;
-    const startedAt = Date.now();
+    // Anchor the start once; a re-run must never rewind the ring.
+    if (startedAtRef.current === null) startedAtRef.current = Date.now();
+    const startedAt = startedAtRef.current;
     const tick = () =>
-      setBuildProgress(1 - Math.exp(-2.2 * ((Date.now() - startedAt) / 30_000)));
+      setBuildProgress((prev) =>
+        Math.max(prev, estimateBuildProgress(Date.now() - startedAt, 30_000)),
+      );
     tick();
     const id = setInterval(tick, 250);
     return () => clearInterval(id);
