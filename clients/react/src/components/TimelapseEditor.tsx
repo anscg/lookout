@@ -16,6 +16,8 @@ import {
   normalizeRegions,
   regionAtTime,
   regionsToCuts,
+  rulerStep,
+  rulerTicks,
   unitAtTime,
   unitClockLabel,
   type UnitRegion,
@@ -42,14 +44,14 @@ export interface TimelapseEditorProps {
 }
 
 const STRIP_HEIGHT = 56;
-const RULER_HEIGHT = 18;
+const RULER_HEIGHT = 22;
+/** Playhead head: a rounded tag above the ruler, wide enough to grab. */
+const HEAD_W = 20;
+const HEAD_H = 22;
 /** Upper bound on filmstrip tiles. The real count comes from the track
  *  width (see buildFilmstrip); this only stops an ultra-wide display from
  *  queueing hundreds of seeks. */
 const FILMSTRIP_MAX_TILES = 48;
-/** Scrubber preview card, in CSS px. Height is derived from the video's
- *  own aspect ratio at render time, not assumed. */
-const PREVIEW_W = 192;
 /** Canvases are sized in device pixels and scaled down by CSS — without
  *  this a 2x display renders every thumbnail at half resolution, which
  *  reads as a blurry, low-quality preview. Capped at 2 because 3x gains
@@ -112,15 +114,9 @@ export function TimelapseEditor({
   const [filmstrip, setFilmstrip] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  /** Scrubber preview: the unit under the pointer, or null when away. */
-  const [hoverUnit, setHoverUnit] = useState<number | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
-  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
-  const scrubVideoRef = useRef<HTMLVideoElement | null>(null);
-  const scrubBusyRef = useRef(false);
-  const scrubWantRef = useRef<number | null>(null);
   const dragRef = useRef<DragState>(null);
   const regionsRef = useRef<UnitRegion[]>(regions);
   regionsRef.current = regions;
@@ -305,23 +301,6 @@ export function TimelapseEditor({
     };
   }, [data?.originalVideoUrl]);
 
-  // Persistent decoder for the hover scrubber. Kept separate from the
-  // filmstrip pass below so the two never fight over `currentTime`.
-  useEffect(() => {
-    if (!frameSrc) return;
-    const v = document.createElement("video");
-    if (!frameSrc.startsWith("blob:")) v.crossOrigin = "anonymous";
-    v.muted = true;
-    v.preload = "auto";
-    v.src = frameSrc;
-    scrubVideoRef.current = v;
-    return () => {
-      scrubVideoRef.current = null;
-      v.removeAttribute("src");
-      v.load();
-    };
-  }, [frameSrc]);
-
   // Track width drives the filmstrip: tiles are whole frames at the
   // video's own aspect ratio, so how many fit is a function of the track,
   // not of how many minutes were recorded.
@@ -426,63 +405,6 @@ export function TimelapseEditor({
     };
   }, [frameSrc, unitCount, stripWidth]);
 
-  /**
-   * Draw the hovered frame into the preview card — the iOS-scrubber move.
-   * Seeks are coalesced: one in flight at a time, with the latest request
-   * kept as the target, so dragging across an hour of footage stays
-   * responsive instead of queueing hundreds of seeks.
-   */
-  const requestScrubFrame = useCallback((unitF: number) => {
-    const v = scrubVideoRef.current;
-    const canvas = previewCanvasRef.current;
-    if (!v || !canvas || !v.duration) return;
-
-    // Size the backing store to device pixels once the video's real
-    // dimensions are known. Skipping this is what makes a preview look
-    // soft on a retina display: CSS scales a half-resolution bitmap up.
-    if (v.videoWidth) {
-      const dpr = pixelRatio();
-      const aspect = v.videoWidth / Math.max(1, v.videoHeight);
-      const wantW = Math.round(PREVIEW_W * dpr);
-      const wantH = Math.round((PREVIEW_W / aspect) * dpr);
-      if (canvas.width !== wantW || canvas.height !== wantH) {
-        canvas.width = wantW;
-        canvas.height = wantH;
-      }
-    }
-
-    scrubWantRef.current = unitF;
-    if (scrubBusyRef.current) return;
-
-    const pump = () => {
-      const want = scrubWantRef.current;
-      if (want === null || !scrubVideoRef.current) {
-        scrubBusyRef.current = false;
-        return;
-      }
-      scrubWantRef.current = null;
-      scrubBusyRef.current = true;
-      const target = Math.max(0, Math.min(v.duration - 0.05, want + 0.5));
-      const onSeeked = () => {
-        v.removeEventListener("seeked", onSeeked);
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          try {
-            ctx.imageSmoothingQuality = "high";
-            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
-          } catch {
-            // Tainted — leave the card blank rather than throwing.
-          }
-        }
-        if (scrubWantRef.current !== null) pump();
-        else scrubBusyRef.current = false;
-      };
-      v.addEventListener("seeked", onSeeked);
-      v.currentTime = target;
-    };
-    pump();
-  }, []);
-
   // ── Pointer plumbing ────────────────────────────────────────
   const unitFromEvent = useCallback(
     (e: { clientX: number }): number => {
@@ -530,15 +452,9 @@ export function TimelapseEditor({
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      const unitF = unitFromEvent(e);
       const drag = dragRef.current;
-
-      // The scrubber preview follows the pointer whether or not a drag is
-      // in progress — while dragging a cut edge it IS the boundary frame.
-      setHoverUnit(unitF);
-      requestScrubFrame(unitF);
-
       if (!drag) return;
+      const unitF = unitFromEvent(e);
 
       if (drag.kind === "scrub") {
         seekTo(unitF);
@@ -595,7 +511,7 @@ export function TimelapseEditor({
       });
       setSelected(drag.index);
     },
-    [requestScrubFrame, seekTo, unitCount, unitFromEvent],
+    [seekTo, unitCount, unitFromEvent],
   );
 
   const onPointerUp = useCallback(() => {
@@ -713,6 +629,11 @@ export function TimelapseEditor({
   const keptUnits = unitCount - removedUnits;
   const allCut = unitCount > 0 && keptUnits === 0;
   const gaps = useMemo(() => (data ? gapIndices(data.units) : []), [data]);
+  const step = useMemo(
+    () => rulerStep(unitCount, stripWidth),
+    [unitCount, stripWidth],
+  );
+  const ticks = useMemo(() => rulerTicks(unitCount, step), [unitCount, step]);
   const currentUnit = unitAtTime(time, Math.max(1, unitCount));
   const inCutNow = regionAtTime(time, normalized) !== null;
   const pct = (u: number) => `${(u / Math.max(1, unitCount)) * 100}%`;
@@ -786,9 +707,6 @@ export function TimelapseEditor({
       </div>
     );
   }
-
-  const previewLeftPct =
-    hoverUnit === null ? 0 : (hoverUnit / Math.max(1, unitCount)) * 100;
 
   return (
     <div
@@ -974,62 +892,55 @@ export function TimelapseEditor({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
-          onPointerLeave={() => {
-            if (!dragRef.current) setHoverUnit(null);
-          }}
         >
-          {/* Scrubber frame preview — follows the pointer, iOS-style.
-              Falls back to a bare time chip when no frame source is
-              available, so hovering still tells you where you are. */}
-          <div
-            aria-hidden="true"
-            className={hoverUnit !== null ? "lk-ed-fade-in" : undefined}
-            style={{
-              position: "absolute",
-              bottom: `calc(100% + ${spacing.sm}px)`,
-              left: `clamp(${PREVIEW_W / 2}px, ${previewLeftPct}%, calc(100% - ${PREVIEW_W / 2}px))`,
-              transform: "translateX(-50%)",
-              width: frameSrc ? PREVIEW_W : "auto",
-              display: hoverUnit === null ? "none" : "block",
-              borderRadius: radii.md,
-              overflow: "hidden",
-              background: frameSrc ? colors.editor.well : colors.bg.panel,
-              border: `1px solid ${colors.border.hover}`,
-              boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
-              pointerEvents: "none",
-              zIndex: 2,
-            }}
-          >
-            {frameSrc && (
-              <canvas
-                ref={previewCanvasRef}
-                // Backing store is resized to device pixels on first draw
-                // (see requestScrubFrame); CSS keeps the box at the
-                // source aspect ratio so the frame is never squashed.
-                style={{
-                  display: "block",
-                  width: "100%",
-                  aspectRatio: String(tileAspect),
-                }}
-              />
-            )}
+          {/* Playhead: a grabbable tag above the ruler with a stem
+              through the strip. Rendered as a sibling of both lanes (not
+              inside the strip) so the head isn't clipped by its overflow. */}
+          {unitCount > 0 && (
             <div
               style={{
-                padding: frameSrc ? "4px 8px" : "3px 8px",
-                fontSize: fontSize.xs,
-                color: colors.text.secondary,
-                fontVariantNumeric: "tabular-nums",
-                textAlign: "center",
-                whiteSpace: "nowrap",
-                borderTop: frameSrc ? `1px solid ${colors.border.default}` : undefined,
+                position: "absolute",
+                left: pct(Math.min(time, unitCount)),
+                top: 0,
+                bottom: 0,
+                width: 0,
+                zIndex: 3,
+                pointerEvents: "none",
               }}
             >
-              {hoverUnit !== null &&
-                unitClockLabel(units[unitAtTime(hoverUnit, unitCount)])}
+              <div
+                onPointerDown={onRulerPointerDown}
+                className="lk-ed-playhead"
+                aria-hidden="true"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: -HEAD_W / 2,
+                  width: HEAD_W,
+                  height: HEAD_H,
+                  borderRadius: "5px 5px 9px 9px",
+                  background: colors.text.primary,
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
+                  cursor: "ew-resize",
+                  pointerEvents: "auto",
+                }}
+              />
+              <div
+                style={{
+                  position: "absolute",
+                  top: HEAD_H - 4,
+                  bottom: 0,
+                  left: -1,
+                  width: 2,
+                  background: colors.text.primary,
+                  boxShadow: "0 0 0 0.5px rgba(0,0,0,0.35)",
+                }}
+              />
             </div>
-          </div>
+          )}
 
-          {/* Ruler lane — owns scrubbing */}
+          {/* Ruler lane — owns scrubbing. Labels sit above their tick, at
+              a step chosen so they never crowd (see rulerStep). */}
           <div
             onPointerDown={onRulerPointerDown}
             style={{
@@ -1038,32 +949,50 @@ export function TimelapseEditor({
               cursor: "ew-resize",
             }}
           >
-            {units.length > 0 &&
-              [0, 0.5, 1].map((f) => {
-                const idx = Math.min(unitCount - 1, Math.round(f * (unitCount - 1)));
-                return (
-                  <span
-                    key={f}
+            {ticks.map(({ unit, major }) => {
+              const left = (unit / Math.max(1, unitCount)) * 100;
+              const idx = Math.min(unitCount - 1, Math.floor(unit));
+              return (
+                <div key={unit} style={{ position: "absolute", left: `${left}%`, top: 0, bottom: 0 }}>
+                  {major && units[idx] && (
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        // First and last labels tuck inside the track
+                        // instead of hanging off its edges.
+                        left: unit === 0 ? 0 : undefined,
+                        right: unit >= unitCount ? 0 : undefined,
+                        transform:
+                          unit === 0 || unit >= unitCount
+                            ? undefined
+                            : "translateX(-50%)",
+                        fontSize: fontSize.xs,
+                        color: colors.text.tertiary,
+                        fontVariantNumeric: "tabular-nums",
+                        whiteSpace: "nowrap",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      {unitClockLabel(units[idx])}
+                    </span>
+                  )}
+                  <div
                     style={{
                       position: "absolute",
-                      left: `${f * 100}%`,
-                      transform:
-                        f === 0
-                          ? "none"
-                          : f === 1
-                            ? "translateX(-100%)"
-                            : "translateX(-50%)",
-                      top: 0,
-                      fontSize: fontSize.xs,
-                      color: colors.text.tertiary,
-                      fontVariantNumeric: "tabular-nums",
+                      bottom: 0,
+                      left: unit === 0 ? 0 : unit >= unitCount ? -1 : -0.5,
+                      width: 1,
+                      height: major ? 7 : 4,
+                      background: major
+                        ? colors.text.tertiary
+                        : colors.text.quaternary,
                       pointerEvents: "none",
                     }}
-                  >
-                    {unitClockLabel(units[idx])}
-                  </span>
-                );
-              })}
+                  />
+                </div>
+              );
+            })}
           </div>
 
           {/* Filmstrip — drag creates a cut, click seeks */}
@@ -1188,21 +1117,6 @@ export function TimelapseEditor({
               );
             })}
 
-            {unitCount > 0 && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: pct(Math.min(time, unitCount)),
-                  top: 0,
-                  bottom: 0,
-                  width: 2,
-                  marginLeft: -1,
-                  background: "#fff",
-                  boxShadow: "0 0 0 1px rgba(0,0,0,0.5)",
-                  pointerEvents: "none",
-                }}
-              />
-            )}
           </div>
         </div>
 

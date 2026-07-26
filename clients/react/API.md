@@ -809,7 +809,9 @@ starts at stop and takes tens of seconds — so it polls through that state
 and shows a `<ProgressRing>` sized from the session's capture count, then
 swaps to the timeline when the video lands.
 
-While mounted it holds the session's **edit lease** (see `useEditLease`),
+The timeline ruler labels at a step chosen from the track width
+(`rulerStep`), with a grabbable playhead tag above it. While mounted the
+editor holds the session's **edit lease** (see `useEditLease`),
 so there's no deadline for the user to race: the timelapse stays
 unpublished for as long as the editor is open, and publishes on its own
 about two minutes after it closes.

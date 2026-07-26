@@ -133,3 +133,41 @@ export function unitClockLabel(unit: VideoUnit): string {
     minute: "2-digit",
   });
 }
+
+/** Steps a person reads without doing arithmetic — the reason a ruler
+ *  labels 0/8/16/24 and never 0/7/14/21. In units (= minutes). */
+const NICE_STEPS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 360, 720];
+
+/**
+ * Choose a ruler labelling interval: the smallest "nice" step that keeps
+ * labels at least `minLabelPx` apart at the current track width. Returns
+ * the step in units, so the caller can place a label every `step` and a
+ * minor tick every `step / 2`.
+ */
+export function rulerStep(
+  unitCount: number,
+  trackWidthPx: number,
+  minLabelPx = 88,
+): number {
+  if (unitCount <= 0 || trackWidthPx <= 0) return 1;
+  const pxPerUnit = trackWidthPx / unitCount;
+  const needed = minLabelPx / pxPerUnit;
+  return NICE_STEPS.find((s) => s >= needed) ?? NICE_STEPS[NICE_STEPS.length - 1];
+}
+
+/** Tick positions for a ruler: every `step` units, plus the midpoints. */
+export function rulerTicks(
+  unitCount: number,
+  step: number,
+): Array<{ unit: number; major: boolean }> {
+  const ticks: Array<{ unit: number; major: boolean }> = [];
+  if (unitCount <= 0 || step <= 0) return ticks;
+  const half = step / 2;
+  for (let u = 0; u <= unitCount; u += half) {
+    // Floating-point half-steps land a hair off an integer multiple;
+    // compare on the rounded value so majors are never missed.
+    const major = Math.abs(u / step - Math.round(u / step)) < 1e-9;
+    ticks.push({ unit: u, major });
+  }
+  return ticks;
+}

@@ -8,6 +8,8 @@ import {
   unitIsCut,
   regionAtTime,
   gapIndices,
+  rulerStep,
+  rulerTicks,
   formatUnitsDuration,
   type UnitRegion,
 } from "./editorMath.js";
@@ -123,6 +125,62 @@ describe("gapIndices", () => {
       capturedAt: new Date(Date.parse(units[1].capturedAt) + 80_000).toISOString(),
     };
     expect(gapIndices(units)).toEqual([]);
+  });
+});
+
+describe("rulerStep", () => {
+  it("picks a step people read without arithmetic", () => {
+    // 48 minutes across 900px → ~19px/min; a label needs ~88px, so ~5min.
+    expect(rulerStep(48, 900)).toBe(5);
+    // The same recording in a narrow window steps up rather than crowding.
+    expect(rulerStep(48, 300)).toBeGreaterThan(rulerStep(48, 900));
+    // A long session steps up too.
+    expect(rulerStep(600, 900)).toBeGreaterThanOrEqual(60);
+  });
+
+  it("only ever returns round values", () => {
+    const allowed = [1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 360, 720];
+    for (const units of [3, 17, 48, 121, 400, 1200]) {
+      for (const w of [200, 480, 900, 1600]) {
+        expect(allowed).toContain(rulerStep(units, w));
+      }
+    }
+  });
+
+  it("guarantees labels clear the minimum spacing", () => {
+    for (const units of [10, 48, 300]) {
+      for (const w of [300, 900, 1600]) {
+        const step = rulerStep(units, w, 88);
+        const pxPerLabel = (step / units) * w;
+        // The largest step is a ceiling, so only clamp-limited cases may
+        // fall short — everything else must satisfy the spacing rule.
+        if (step !== 720) expect(pxPerLabel).toBeGreaterThanOrEqual(88);
+      }
+    }
+  });
+
+  it("degrades safely on empty input", () => {
+    expect(rulerStep(0, 900)).toBe(1);
+    expect(rulerStep(48, 0)).toBe(1);
+  });
+});
+
+describe("rulerTicks", () => {
+  it("emits a major tick on each step and a minor between", () => {
+    const ticks = rulerTicks(20, 5);
+    expect(ticks.filter((t) => t.major).map((t) => t.unit)).toEqual([0, 5, 10, 15, 20]);
+    expect(ticks.filter((t) => !t.major).map((t) => t.unit)).toEqual([2.5, 7.5, 12.5, 17.5]);
+  });
+
+  it("marks majors correctly despite half-step float drift", () => {
+    // 0.5 increments accumulate error; majors must not be missed.
+    const ticks = rulerTicks(60, 1);
+    expect(ticks.filter((t) => t.major)).toHaveLength(61);
+  });
+
+  it("degrades safely on empty input", () => {
+    expect(rulerTicks(0, 5)).toEqual([]);
+    expect(rulerTicks(20, 0)).toEqual([]);
   });
 });
 
