@@ -260,7 +260,7 @@ function MainWindowApp() {
           iconUrl: p.iconUrl ?? undefined,
         })),
         { separator: true },
-        { id: "create-new", label: "Create new timelapse", symbol: "plus" },
+        { id: "create-new", label: "Start from link", symbol: "plus" },
       ];
       let choice: string | null;
       try {
