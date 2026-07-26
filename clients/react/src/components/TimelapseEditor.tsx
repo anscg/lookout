@@ -16,6 +16,7 @@ import {
   normalizeRegions,
   regionAtTime,
   regionsToCuts,
+  elapsedLabel,
   rulerStep,
   rulerTicks,
   unitAtTime,
@@ -45,9 +46,14 @@ export interface TimelapseEditorProps {
 
 const STRIP_HEIGHT = 56;
 const RULER_HEIGHT = 22;
-/** Playhead head: a rounded tag above the ruler, wide enough to grab. */
-const HEAD_W = 20;
-const HEAD_H = 22;
+/** Playhead cap: a slim pill, bottom-aligned to the ruler so it tucks
+ *  under the labels instead of covering them. Small on purpose — it marks
+ *  a position, it isn't a control that should dominate the timeline. */
+const HEAD_W = 9;
+const HEAD_H = 13;
+/** Invisible grab area around the cap. The cap is too small to hit
+ *  comfortably; the target isn't. */
+const HEAD_HIT = 22;
 /** Upper bound on filmstrip tiles. The real count comes from the track
  *  width (see buildFilmstrip); this only stops an ultra-wide display from
  *  queueing hundreds of seeks. */
@@ -854,9 +860,12 @@ export function TimelapseEditor({
               letterSpacing: "-0.01em",
             }}
           >
-            {unitClockLabel(units[currentUnit])}
+            {elapsedLabel(currentUnit, unitCount)}
             <span style={{ color: colors.text.tertiary }}>
-              {" · "}min {currentUnit + 1} of {unitCount}
+              {" of "}
+              {elapsedLabel(unitCount, unitCount)}
+              {" · recorded at "}
+              {unitClockLabel(units[currentUnit])}
             </span>
           </div>
 
@@ -893,9 +902,9 @@ export function TimelapseEditor({
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
         >
-          {/* Playhead: a grabbable tag above the ruler with a stem
+          {/* Playhead: a slim cap at the foot of the ruler with a stem
               through the strip. Rendered as a sibling of both lanes (not
-              inside the strip) so the head isn't clipped by its overflow. */}
+              inside the strip) so it isn't clipped by its overflow. */}
           {unitCount > 0 && (
             <div
               style={{
@@ -910,25 +919,35 @@ export function TimelapseEditor({
             >
               <div
                 onPointerDown={onRulerPointerDown}
-                className="lk-ed-playhead"
                 aria-hidden="true"
                 style={{
                   position: "absolute",
-                  top: 0,
-                  left: -HEAD_W / 2,
-                  width: HEAD_W,
-                  height: HEAD_H,
-                  borderRadius: "5px 5px 9px 9px",
-                  background: colors.text.primary,
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
+                  top: RULER_HEIGHT - HEAD_H,
+                  left: -HEAD_HIT / 2,
+                  width: HEAD_HIT,
+                  height: HEAD_HIT,
+                  display: "flex",
+                  justifyContent: "center",
+                  alignItems: "flex-start",
                   cursor: "ew-resize",
                   pointerEvents: "auto",
                 }}
-              />
+              >
+                <div
+                  className="lk-ed-playhead"
+                  style={{
+                    width: HEAD_W,
+                    height: HEAD_H,
+                    borderRadius: HEAD_W / 2,
+                    background: colors.text.primary,
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.45)",
+                  }}
+                />
+              </div>
               <div
                 style={{
                   position: "absolute",
-                  top: HEAD_H - 4,
+                  top: RULER_HEIGHT - 4,
                   bottom: 0,
                   left: -1,
                   width: 2,
@@ -951,10 +970,9 @@ export function TimelapseEditor({
           >
             {ticks.map(({ unit, major }) => {
               const left = (unit / Math.max(1, unitCount)) * 100;
-              const idx = Math.min(unitCount - 1, Math.floor(unit));
               return (
                 <div key={unit} style={{ position: "absolute", left: `${left}%`, top: 0, bottom: 0 }}>
-                  {major && units[idx] && (
+                  {major && (
                     <span
                       style={{
                         position: "absolute",
@@ -974,7 +992,7 @@ export function TimelapseEditor({
                         pointerEvents: "none",
                       }}
                     >
-                      {unitClockLabel(units[idx])}
+                      {elapsedLabel(unit, unitCount)}
                     </span>
                   )}
                   <div

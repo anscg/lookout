@@ -33,11 +33,12 @@ export function injectEditorStyles(): void {
     .lk-ed-grip { transition: transform 140ms ${EASE_OUT_QUART}; }
     .lk-ed-handle:hover .lk-ed-grip { transform: scaleX(1.6); }
 
-    /* The head is the grab target for scrubbing, so it acknowledges the
-       pointer — otherwise it reads as decoration painted on the ruler. */
+    /* The cap is a grab target, so it acknowledges the pointer — but
+       subtly: it marks a position, it shouldn't dominate the timeline.
+       The hover is driven from the (larger, invisible) hit area. */
     .lk-ed-playhead { transition: transform 120ms ${EASE_OUT_QUART}; }
-    .lk-ed-playhead:hover { transform: scale(1.12); }
-    .lk-ed-playhead:active { transform: scale(0.96); }
+    *:hover > .lk-ed-playhead { transform: scaleX(1.25); }
+    *:active > .lk-ed-playhead { transform: scaleX(1.1); }
 
     .lk-ed-iconbtn {
       display: inline-flex; align-items: center; justify-content: center;
@@ -74,7 +75,7 @@ export function injectEditorStyles(): void {
       }
       .lk-ed-fade-in { animation-duration: 1ms; }
       .lk-ed-handle:hover .lk-ed-grip { transform: none; }
-      .lk-ed-playhead:hover { transform: none; }
+      *:hover > .lk-ed-playhead { transform: none; }
     }
   `;
   document.head.appendChild(style);
