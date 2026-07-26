@@ -8,6 +8,7 @@ import {
   unitIsCut,
   regionAtTime,
   gapIndices,
+  elapsedLabel,
   rulerStep,
   rulerTicks,
   formatUnitsDuration,
@@ -125,6 +126,27 @@ describe("gapIndices", () => {
       capturedAt: new Date(Date.parse(units[1].capturedAt) + 80_000).toISOString(),
     };
     expect(gapIndices(units)).toEqual([]);
+  });
+});
+
+describe("elapsedLabel", () => {
+  it("is never mistakable for a duration in the wrong unit", () => {
+    // The bug this replaced: a 17-minute timelapse labelled with wall
+    // clock ("1:29" … "1:45") is correct but reads as 1m29s, making the
+    // whole timeline look broken. Short sessions get an explicit unit.
+    expect(elapsedLabel(0, 17)).toBe("0m");
+    expect(elapsedLabel(5, 17)).toBe("5m");
+    expect(elapsedLabel(16, 17)).toBe("16m");
+  });
+
+  it("switches to hours:minutes once minutes stop being readable", () => {
+    expect(elapsedLabel(0, 180)).toBe("0:00");
+    expect(elapsedLabel(65, 180)).toBe("1:05");
+    expect(elapsedLabel(120, 180)).toBe("2:00");
+  });
+
+  it("rounds half-step tick positions to whole minutes", () => {
+    expect(elapsedLabel(7.5, 17)).toBe("8m");
   });
 });
 

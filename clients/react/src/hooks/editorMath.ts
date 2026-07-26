@@ -125,13 +125,31 @@ export function formatUnitsDuration(unitCount: number): string {
   return `${m}m`;
 }
 
-/** Wall-clock label (HH:MM, local) for a unit. */
+/** Wall-clock label (local) for a unit. Includes AM/PM where the locale
+ *  uses it — this is the one place the *time of day* is stated, so it must
+ *  not be mistakable for a duration. */
 export function unitClockLabel(unit: VideoUnit): string {
   const d = new Date(unit.capturedAt);
   return d.toLocaleTimeString(undefined, {
-    hour: "2-digit",
+    hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/**
+ * Ruler label: how far into the *recording* a unit sits, since one unit is
+ * one recorded minute.
+ *
+ * Deliberately not wall-clock. A ruler reading "1:29 … 1:45" on a
+ * 17-minute timelapse is correct (those are times of day) but reads as
+ * "1 minute 29 seconds", which makes the whole timeline look wrong. Under
+ * an hour this is "5m"; past that, "1:05" as hours:minutes.
+ */
+export function elapsedLabel(unitIndex: number, totalUnits: number): string {
+  const m = Math.max(0, Math.round(unitIndex));
+  if (totalUnits < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}:${String(m % 60).padStart(2, "0")}`;
 }
 
 /** Steps a person reads without doing arithmetic — the reason a ruler
