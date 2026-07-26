@@ -16,8 +16,17 @@ recording ──Stop──> ┌ Keep recording ───────────
                                         │
                                         ├ user cuts → publish ──> compiling ──> complete
                                         ├ "publish as recorded" ───────────────> complete
-                                        └ hold expires (30 min) ───────────────> complete
+                                        └ lease lapses (~2 min unrenewed) ─────> complete
 ```
+
+**The hold is a lease, not a countdown.** Whatever surface represents
+active editing — the editor, the review panel — renews it every 30s via
+`POST /:token/editing`, and the server holds the session 120s past the last
+renewal. A fixed deadline was wrong in both directions: it cut off someone
+carefully trimming a long recording, and left an abandoned session
+unpublished for half an hour. A lease has neither failure. An absolute
+ceiling (`EDIT_HOLD_MAX_MINUTES`, from the stop) bounds an editor left open
+overnight.
 
 **Why not edit after `complete`?** Because `complete` is the signal
 programs act on — forwarding heartbeats to Hackatime, accepting a
@@ -31,7 +40,7 @@ Consequences that fall out of this:
 - **Programs need no changes at all.** The observable lifecycle is still
   `stopped → compiling → complete`; an edit just means longer in `stopped`.
 - **The hold can delay publication, never cancel it.** A background job
-  publishes the timelapse as recorded when the hold expires, so an
+  publishes the timelapse as recorded once the lease lapses, so an
   abandoned edit still yields a video.
 - **Cut footage is deleted immediately** after an edited publish, instead
   of lingering for a 7-day re-edit window.
@@ -100,7 +109,7 @@ subtraction happens in the one read-side dispatcher
 | `original_video_r2_key` | `text` | The uncut compiled video — the editor's preview source. Nulled (and the object deleted) as soon as an edited publish lands |
 | `video_copy_aligned` | `boolean` | True when assembly used the stream-copy path (GOP grid guaranteed). False → the cut must use its re-encode fallback |
 | `recompile_count` | `integer not null default 0` | User-initiated publishes-with-cuts, capped |
-| `edit_hold_until` | `timestamptz` | While set and in the future, the compiled video stays unpublished (`status` `stopped`, `video_r2_key` null) so the owner can cut it. Cleared by the publish call or the expiry job |
+| `edit_hold_until` | `timestamptz` | Lease deadline. While set and in the future the compiled video stays unpublished (`status` `stopped`, `video_r2_key` null) so the owner can cut it. Extended by each `POST /:token/editing`; cleared by the publish call or the expiry job |
 
 No `screenshots` changes — cut membership is computed from the interval
 list, never denormalized onto rows.
@@ -123,8 +132,8 @@ Token-authenticated, rate-limited like their neighbors.
 1. **`POST /api/sessions/:token/stop`** — accepts an optional body
    `{ edit: true }`. Absent (or no body at all) → today's behavior
    byte-for-byte, so shipped clients are untouched. Present, and the
-   session has captures → sets `edit_hold_until = now + 30 min` and
-   returns it. The compile is enqueued either way.
+   session has captures → opens a lease (`edit_hold_until = now +
+   EDIT_LEASE_SECONDS`) and returns it. The compile is enqueued either way.
 2. **`GET /api/sessions/:token/units`** — editor metadata:
    `{ units: <video_units>, cuts, editable, editableReason, editHoldUntil,
    originalVideoUrl, recompilesRemaining }`. `originalVideoUrl` is a
@@ -150,10 +159,17 @@ Token-authenticated, rate-limited like their neighbors.
    session endpoint — add `cuts`, `cutSeconds`, `uncutTrackedSeconds`,
    `editable`, `editHoldUntil`. `trackedSeconds` becomes post-cut
    everywhere via the dispatcher.
-7. **Hold expiry** (`lib/timeouts.ts`, on the existing every-minute cron):
-   publish any `stopped` session whose `edit_hold_until` has passed, via
-   the shared `publishHeldSession` helper. This is what makes offering the
-   edit step safe — the hold delays publication, never cancels it.
+7. **`POST /api/sessions/:token/editing`** — renew the lease. Extends
+   `edit_hold_until` to `now + EDIT_LEASE_SECONDS`, bounded by the ceiling.
+   Renews even through a term that lapsed seconds ago (a network stall
+   shouldn't end an edit), but the `status IN ('stopped','compiling')`
+   guard means it can never resurrect a published session. Returns
+   `held: false` once the session is out, so clients stop renewing.
+8. **Lease expiry** (`lib/timeouts.ts`, on the existing every-minute cron):
+   publish any `stopped` session whose lease lapsed **or** that passed the
+   ceiling, via the shared `publishHeldSession` helper. This is what makes
+   offering the edit step safe — the hold delays publication, never
+   cancels it.
 
 ## Worker changes
 
@@ -250,9 +266,9 @@ their single video file forever, as today.
     stop and runs for tens of seconds — so `preparing` is the normal
     opening state, not an error. It polls through it behind a
     `<ProgressRing>` sized from `expectedUnits` (compile time scales with
-    unit count), then swaps to the timeline. It also counts down to the
-    hold's auto-publish (louder in the last two minutes) so the user always
-    knows the timelapse is safe but not yet out.
+    unit count), then swaps to the timeline. While mounted it holds the
+    edit lease, so there is no deadline to race — the copy just states
+    that nothing is published until you save.
   - The ring is a time estimate, not worker-reported progress: it eases
     asymptotically toward 100% and only completes when `/units` actually
     reports the video ready, so it can never sit at 100% while the user
@@ -263,8 +279,10 @@ their single video file forever, as today.
 - Wiring: `LookoutRecorder` routes every Stop button through the modal and
   renders the editor inline after an `edit` stop. `SessionDetail` shows a
   **review panel** for any session with a live `editHoldUntil` (Edit & save
-  / Publish as recorded / countdown), and suppresses the compile spinner
-  there — "processing" under "ready to review" would contradict itself.
+  / Publish as recorded), holds the lease while it's showing — reading the
+  panel for two minutes must not publish underneath the reader — and
+  suppresses the compile spinner there, since "processing" under "ready to
+  review" would contradict itself.
 - Pure helpers with tests (style of `computeBestTracked.ts`): unit↔interval
   mapping, kept-range computation, gap detection.
 
@@ -335,7 +353,8 @@ but a 30-minute wait). Deploy order:
 
 1. `@lookout/shared`: `CutInterval`, membership/normalize helpers,
    constants (`MAX_CUT_INTERVALS`, `MAX_USER_RECOMPILES`,
-   `EDIT_HOLD_MINUTES`, `EDIT_WINDOW_DAYS`).
+   `EDIT_LEASE_SECONDS`, `EDIT_HEARTBEAT_SECONDS`, `EDIT_HOLD_MAX_MINUTES`,
+   `EDIT_WINDOW_DAYS`).
 2. Migrations `0018_session_edits` + `0019_edit_hold`.
 3. Worker: GOP-pinned assembly fallback, `video_units` bookkeeping,
    hold-aware publish, cut-apply path. (Inert — nothing sets a hold yet.)

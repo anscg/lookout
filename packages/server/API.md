@@ -424,7 +424,7 @@ Stops a session and enqueues video compilation if screenshots exist.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `edit` | boolean | Hold the timelapse unpublished after it compiles so the owner can cut it first. See [Edits (Cuts)](#edits-cuts). Omit for today's behavior. |
+| `edit` | boolean | Hold the timelapse unpublished after it compiles so the owner can cut it first. Opens a lease the client must renew (see [Edits (Cuts)](#edits-cuts)). Omit for today's behavior. |
 
 **Response `200 OK`:**
 ```json
@@ -436,7 +436,7 @@ Stops a session and enqueues video compilation if screenshots exist.
 }
 ```
 
-`editHoldUntil` is present only when the stop requested `edit: true` and the session actually has captures to edit.
+`editHoldUntil` is present only when the stop requested `edit: true` and the session actually has captures to edit. It is one lease term (~2 min) — keep it alive with `POST /:token/editing` for as long as your editor is open.
 
 **Errors:**
 - `404` — Session not found
@@ -445,7 +445,7 @@ Stops a session and enqueues video compilation if screenshots exist.
 **Notes:**
 - Marks session `failed` immediately if no screenshots exist (skips compilation), regardless of `edit`
 - Accumulates any remaining active time
-- Only send `edit: true` from a client that can render the editor. The hold auto-publishes when it expires, so an abandoned edit still yields a timelapse — but a client that requests a hold and then never shows an editor makes the user wait for no reason.
+- Only send `edit: true` from a client that will actually open an editing surface and renew the lease. An abandoned hold still publishes on its own, so nothing is lost either way — but a client that asks for a hold and never renews it just makes the user wait a lease for no reason.
 
 ---
 
@@ -581,10 +581,24 @@ That is what the **edit hold** is for. `POST /stop` with `{"edit": true}` marks 
 stop {edit:true} ─> stopped (hold, compiling internally)
                       ├─ PUT /cuts … then POST /compile ─> compiling ─> complete
                       ├─ POST /compile with no cuts ────────────────────> complete
-                      └─ hold expires (30 min) ────────────────────────> complete
+                      └─ lease lapses (~2 min unrenewed) ──────────────> complete
 ```
 
-The hold can only **delay** publication, never cancel it: if the user closes the app mid-edit, a background job publishes the timelapse as recorded when the hold expires. A stop without `{"edit": true}` behaves exactly as it always has, so existing clients are unaffected.
+**The hold is a lease, not a countdown.** An open editing surface calls `POST /:token/editing` every 30 s; the server holds the session for 120 s past the last renewal. So editing takes exactly as long as it takes — there's no deadline to race on a three-hour recording — and an abandoned session publishes about two minutes later instead of sitting unpublished for half an hour. An absolute ceiling of 120 minutes from the stop bounds the pathological case (an editor left open overnight).
+
+The hold can only **delay** publication, never cancel it. A stop without `{"edit": true}` behaves exactly as it always has, so existing clients are unaffected.
+
+#### Renew the Edit Lease
+
+```
+POST /api/sessions/:token/editing
+```
+
+"An editor is still open." Extends the hold to `now + 120s`. Idempotent and cheap; call it every 30 s while an editing surface is showing. Rate limit: 20 req/min per token.
+
+**Response `200 OK`:** `{ "editHoldUntil": ISO-8601, "held": boolean }`
+
+`held: false` means the session is no longer holdable — it published, failed, or passed the ceiling. Stop renewing and show the published state; the call never resurrects a published session.
 
 **Mechanics:** the compile always produces the **uncut original** and records its unit map. Publishing with cuts is a lossless stream-copy of the kept ranges (seconds, even for 12-hour sessions, no quality loss), after which the uncut original is **deleted immediately** — cut content does not outlive the publish. Publishing without cuts just points the session at the original, with no worker round-trip.
 

@@ -747,6 +747,19 @@ own editor surface (the desktop app opens a separate window).
 
 ---
 
+### `useEditLease(client, active?)`
+
+Holds a held session's **edit lease** open while an editing surface is
+mounted. The server publishes a held timelapse once nothing has renewed the
+lease for ~2 minutes, so "is the user still editing?" is answered by the
+surface existing rather than by a countdown. Returns `false` once the
+session is no longer held (published, failed, or past the ceiling).
+
+Called automatically by `<TimelapseEditor>` and by `<SessionDetail>`'s
+review panel. Use it directly only if you build your own editing surface.
+
+---
+
 ### `<StopChoiceModal>`
 
 The stop confirmation: keep recording, stop and save, or edit and save.
@@ -794,8 +807,12 @@ baked in (a lossless server-side stream copy) or without them. Standalone
 The editor normally opens **before** the preview video exists — the compile
 starts at stop and takes tens of seconds — so it polls through that state
 and shows a `<ProgressRing>` sized from the session's capture count, then
-swaps to the timeline when the video lands. It also counts down to the
-hold's auto-publish (getting louder in the last two minutes).
+swaps to the timeline when the video lands.
+
+While mounted it holds the session's **edit lease** (see `useEditLease`),
+so there's no deadline for the user to race: the timelapse stays
+unpublished for as long as the editor is open, and publishes on its own
+about two minutes after it closes.
 
 **Interactions:**
 - **Drag on the filmstrip** creates a cut region in one gesture (edges snap to
@@ -895,6 +912,7 @@ const session = await client.getSession();
 | `getUnits` | `() => Promise<UnitsResponse>` | Editor metadata: unit map, cuts, presigned preview-video URL |
 | `setCuts` | `(cuts: CutInterval[]) => Promise<SetCutsResponse>` | Replace the session's cut list (`[]` clears). Only during an edit hold |
 | `applyCuts` | `() => Promise<ApplyCutsResponse>` | Publish the held timelapse with its cuts baked in |
+| `heartbeatEditing` | `() => Promise<EditHeartbeatResponse>` | Renew the edit lease — "an editor is still open" |
 
 ---
 

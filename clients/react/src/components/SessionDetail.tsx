@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import type { StatusResponse, VideoResponse, SessionResponse } from "@lookout/shared";
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
@@ -7,6 +7,8 @@ import { ProgressRing } from "../ui/ProgressRing.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
 import { ProcessingState } from "./ProcessingState.js";
 import { TimelapseEditor } from "./TimelapseEditor.js";
+import { createLookoutClient, type LookoutClient } from "../api/client.js";
+import { useEditLease } from "../hooks/useEditLease.js";
 import { SessionDetailSkeleton } from "../ui/Skeleton.js";
 import { Card } from "../ui/Card.js";
 import { Badge } from "../ui/Badge.js";
@@ -20,29 +22,20 @@ import { statusConfig, colors, spacing, fontSize, fontWeight, radii } from "../u
  */
 function HoldPanel({
   editable,
-  holdUntil,
+  client,
   onEdit,
   onPublish,
 }: {
   editable: boolean;
-  holdUntil: string;
+  client: LookoutClient;
   onEdit: () => void;
   onPublish: () => void | Promise<void>;
 }) {
-  const [secondsLeft, setSecondsLeft] = useState(() =>
-    Math.max(0, Math.round((Date.parse(holdUntil) - Date.now()) / 1000)),
-  );
   const [publishing, setPublishing] = useState(false);
-  useEffect(() => {
-    const id = setInterval(
-      () =>
-        setSecondsLeft(
-          Math.max(0, Math.round((Date.parse(holdUntil) - Date.now()) / 1000)),
-        ),
-      1000,
-    );
-    return () => clearInterval(id);
-  }, [holdUntil]);
+  // Sitting on this panel counts as still deciding, so it holds the lease
+  // too. Without this, reading the panel for a couple of minutes would
+  // publish the timelapse out from under the person reading it.
+  useEditLease(client, !publishing);
 
   // Same asymptotic estimate the editor uses (the worker reports no real
   // progress); it eases toward 100% and the `editable` flip is what
@@ -57,8 +50,6 @@ function HoldPanel({
     const id = setInterval(tick, 250);
     return () => clearInterval(id);
   }, [editable]);
-
-  const minutesLeft = Math.max(1, Math.round(secondsLeft / 60));
 
   return (
     <Card padding={spacing.lg} style={{ marginBottom: spacing.lg }}>
@@ -81,13 +72,9 @@ function HoldPanel({
               ? "Cut out anything you don't want to share, then save. Nothing is published until you do."
               : "Your recording is compiling. You'll be able to trim it in a moment."}
             {" "}
-            {secondsLeft > 0 && (
-              <span style={{ color: secondsLeft < 120 ? colors.status.warning : colors.text.tertiary }}>
-                {secondsLeft < 120
-                  ? `Publishing automatically in ${secondsLeft}s.`
-                  : `Publishes automatically in ${minutesLeft} min.`}
-              </span>
-            )}
+            <span style={{ color: colors.text.tertiary }}>
+              If you close Lookout, it publishes as recorded.
+            </span>
           </div>
         </div>
       </div>
@@ -174,6 +161,10 @@ export function SessionDetail({
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  const client = useMemo(
+    () => createLookoutClient({ baseUrl: apiBaseUrl, token }),
+    [apiBaseUrl, token],
+  );
 
   // Completion detection for the redirect hook: only a live transition from
   // an in-flight state counts — a session opened when already "complete"
@@ -306,7 +297,7 @@ export function SessionDetail({
       {status && !editing && inHold && (
         <HoldPanel
           editable={status.editable === true}
-          holdUntil={status.editHoldUntil!}
+          client={client}
           onEdit={() => (onEdit ? onEdit() : setEditing(true))}
           onPublish={async () => {
             try {

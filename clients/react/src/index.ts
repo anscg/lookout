@@ -11,6 +11,7 @@ export { TimelapseEditor } from "./components/TimelapseEditor.js";
 export type { TimelapseEditorProps } from "./components/TimelapseEditor.js";
 export { StopChoiceModal } from "./components/StopChoiceModal.js";
 export type { StopChoiceModalProps } from "./components/StopChoiceModal.js";
+export { useEditLease } from "./hooks/useEditLease.js";
 export {
   regionsToCuts,
   cutsToRegions,

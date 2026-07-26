@@ -20,6 +20,7 @@ import {
   unitClockLabel,
   type UnitRegion,
 } from "../hooks/editorMath.js";
+import { useEditLease } from "../hooks/useEditLease.js";
 import { injectEditorStyles } from "./editorStyles.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -190,24 +191,18 @@ export function TimelapseEditor({
     return () => clearInterval(id);
   }, [preparing]);
 
-  // ── Hold countdown ──────────────────────────────────────────
-  const holdUntilMs = data?.editHoldUntil ? Date.parse(data.editHoldUntil) : null;
-  const [holdSecondsLeft, setHoldSecondsLeft] = useState<number | null>(null);
+  // ── Edit lease ──────────────────────────────────────────────
+  // This editor being open IS the signal that editing is in progress, so
+  // it renews the lease while mounted. No countdown, no deadline to race:
+  // the session waits as long as the window is up, and publishes on its
+  // own shortly after it isn't. Stops once the session is no longer held.
+  const leaseHeld = useEditLease(client, !saving);
   useEffect(() => {
-    if (holdUntilMs === null) return;
-    const tick = () => {
-      const left = Math.max(0, Math.round((holdUntilMs - Date.now()) / 1000));
-      setHoldSecondsLeft(left);
-      if (left === 0) {
-        setLoadError(
-          "The edit window closed, so your timelapse was published as recorded.",
-        );
-      }
-    };
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [holdUntilMs]);
+    if (leaseHeld || saving) return;
+    setLoadError(
+      "This timelapse was already published, so it can no longer be edited.",
+    );
+  }, [leaseHeld, saving]);
 
   // ── Playhead tracking (rAF for a smooth 60fps playhead) ─────
   useEffect(() => {
@@ -1231,9 +1226,7 @@ export function TimelapseEditor({
               )}
             </div>
             <div style={{ fontSize: fontSize.xs, color: colors.text.tertiary, marginTop: 2 }}>
-              {holdSecondsLeft !== null && holdSecondsLeft < 120
-                ? `Publishing automatically in ${holdSecondsLeft}s`
-                : "Drag the strip to cut · Space to preview · X to cut a minute"}
+              Drag the strip to cut · Space to preview · X to cut a minute
             </div>
           </div>
 

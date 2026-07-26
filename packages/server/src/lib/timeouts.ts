@@ -19,6 +19,7 @@ import {
   MAX_COMPILE_ATTEMPTS,
   SCREENSHOT_RETENTION_DAYS,
   EDIT_WINDOW_DAYS,
+  EDIT_HOLD_MAX_MINUTES,
 } from "@lookout/shared";
 
 /**
@@ -52,12 +53,19 @@ export async function registerTimeoutJobs() {
 }
 
 /**
- * Publish sessions whose edit hold ran out. This is the promise that makes
- * the "Edit & Save" flow safe to offer: a user who closes the app mid-edit
- * still gets their timelapse, uncut, within EDIT_HOLD_MINUTES — the hold
- * can delay publication, never cancel it.
+ * Publish sessions whose edit lease lapsed — nothing has said "still
+ * editing" for a lease term — or that hit the absolute ceiling.
+ *
+ * This is the promise that makes "Edit & Save" safe to offer: a user who
+ * closes the app mid-edit still gets their timelapse, uncut, about a lease
+ * later. The hold can delay publication, never cancel it.
  */
 async function publishExpiredHolds() {
+  const now = new Date();
+  const ceilingCutoff = new Date(
+    now.getTime() - EDIT_HOLD_MAX_MINUTES * 60_000,
+  );
+
   const expired = await db
     .select({ id: schema.sessions.id })
     .from(schema.sessions)
@@ -65,7 +73,8 @@ async function publishExpiredHolds() {
       and(
         eq(schema.sessions.status, "stopped"),
         isNotNull(schema.sessions.editHoldUntil),
-        lt(schema.sessions.editHoldUntil, new Date()),
+        sql`(${schema.sessions.editHoldUntil} < ${now}
+             OR ${schema.sessions.stoppedAt} < ${ceilingCutoff})`,
       ),
     );
 

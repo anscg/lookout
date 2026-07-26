@@ -32,7 +32,8 @@ import {
   CAPTURE_FORMATS,
   CAPTURE_FORMAT_CONTENT_TYPES,
   MAX_USER_RECOMPILES,
-  EDIT_HOLD_MINUTES,
+  EDIT_LEASE_SECONDS,
+  EDIT_HOLD_MAX_MINUTES,
   normalizeCuts,
   isCutAt,
   countCutUnits,
@@ -1112,10 +1113,13 @@ export async function sessionRoutes(app: FastifyInstance) {
       const trackedSeconds = await getTrackedSecondsForSession(session);
 
       // Edit hold: only meaningful when there will be a video to edit.
+      // This is the first lease term — the editor renews it as soon as it
+      // opens, so a client that promises an editor and never shows one
+      // publishes a lease later rather than stranding the session.
       const screenshotCount = await getScreenshotCount(session.id);
       const wantsEdit = request.body?.edit === true && screenshotCount > 0;
       const editHoldUntil = wantsEdit
-        ? new Date(stopNow.getTime() + EDIT_HOLD_MINUTES * 60_000)
+        ? new Date(stopNow.getTime() + EDIT_LEASE_SECONDS * 1000)
         : null;
 
       const [updated] = await db
@@ -1362,6 +1366,72 @@ export async function sessionRoutes(app: FastifyInstance) {
           MAX_USER_RECOMPILES - session.recompileCount,
         ),
       };
+    },
+  );
+
+  // Renew the edit lease: "someone still has this open".
+  //
+  // The hold is a lease rather than a countdown, so an open editor keeps
+  // the session unpublished for as long as it's genuinely being used, and
+  // an abandoned one publishes about a lease later. Cheap and idempotent —
+  // clients call it every EDIT_HEARTBEAT_SECONDS.
+  app.post<{ Params: { token: string } }>(
+    "/api/sessions/:token/editing",
+    {
+      schema: { params: tokenParamSchema },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-editing", request.params.token, 20);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      // Already out the door — tell the caller to stop renewing.
+      if (session.status === "complete" || session.status === "failed") {
+        return { editHoldUntil: new Date().toISOString(), held: false };
+      }
+      if (session.editHoldUntil === null) {
+        return { editHoldUntil: new Date().toISOString(), held: false };
+      }
+
+      // The absolute ceiling is measured from the stop, so an editor left
+      // open indefinitely can't keep a program waiting forever.
+      const ceiling = session.stoppedAt
+        ? session.stoppedAt.getTime() + EDIT_HOLD_MAX_MINUTES * 60_000
+        : Number.POSITIVE_INFINITY;
+      if (Date.now() >= ceiling) {
+        return { editHoldUntil: session.editHoldUntil.toISOString(), held: false };
+      }
+
+      const next = new Date(
+        Math.min(ceiling, Date.now() + EDIT_LEASE_SECONDS * 1000),
+      );
+      // Renew even if the previous term lapsed moments ago but the expiry
+      // job hasn't run: a brief network stall shouldn't end someone's edit.
+      // The status guard is what makes that safe — a published session
+      // can't be pulled back.
+      const [updated] = await db
+        .update(schema.sessions)
+        .set({ editHoldUntil: next, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            sql`${schema.sessions.status} IN ('stopped', 'compiling')`,
+            isNotNull(schema.sessions.editHoldUntil),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+
+      return updated
+        ? { editHoldUntil: next.toISOString(), held: true }
+        : { editHoldUntil: new Date().toISOString(), held: false };
     },
   );
 
