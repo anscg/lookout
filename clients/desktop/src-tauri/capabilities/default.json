@@ -27,6 +27,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-get-all-windows",
     "core:webview:allow-get-all-webviews",
+    "core:window:allow-destroy",
     {
       "identifier": "http:default",
       "allow": [
