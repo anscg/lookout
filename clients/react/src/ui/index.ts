@@ -3,6 +3,8 @@ export type { ButtonProps } from "./Button.js";
 export { Spinner } from "./Spinner.js";
 export type { SpinnerProps } from "./Spinner.js";
 export { ProgressRing } from "./ProgressRing.js";
+export { MinutesFlow } from "./MinutesFlow.js";
+export type { MinutesFlowProps } from "./MinutesFlow.js";
 export type { ProgressRingProps } from "./ProgressRing.js";
 export { Badge } from "./Badge.js";
 export type { BadgeProps } from "./Badge.js";

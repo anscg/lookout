@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { confirm } from "@tauri-apps/plugin-dialog";
+import { createLookoutClient, type CutInterval } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
@@ -250,7 +252,56 @@ export function EditorWindow({ token }: { token: string }) {
       });
   }, [token]);
 
-  const close = () => void getCurrentWindow().close().catch(() => {});
+  // Closing the window IS the decision to finish: the timelapse publishes
+  // with whatever cuts are on screen. There's no "leave it hanging" exit —
+  // the session is unpublished until someone decides, so an editor that
+  // could be dismissed without deciding would just strand it until the
+  // lease lapsed. Hence: confirm, publish, then close.
+  const cutsRef = useRef<CutInterval[]>([]);
+  const dirtyRef = useRef(false);
+  const finishedRef = useRef(false);
+  const client = useRef(
+    createLookoutClient({ baseUrl: getApiBase(), token }),
+  ).current;
+
+  const finishAndClose = useCallback(async () => {
+    finishedRef.current = true;
+    try {
+      await client.setCuts(cutsRef.current);
+      await client.applyCuts();
+      await emit(EDITED_EVENT, { token });
+    } catch (e) {
+      console.error("[editor] publish on close failed:", e);
+      // Don't trap the user in a window they asked to close: the hold
+      // lapses on its own and publishes as recorded shortly after.
+    }
+    await getCurrentWindow().close().catch(() => {});
+  }, [client, token]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        if (finishedRef.current) return;
+        event.preventDefault();
+        const removed = cutsRef.current.length;
+        const ok = await confirm(
+          dirtyRef.current && removed > 0
+            ? `Closing publishes this timelapse with ${removed} cut${
+                removed === 1 ? "" : "s"
+              } applied. This can't be undone.`
+            : "Closing publishes this timelapse as recorded. This can't be undone.",
+          { title: "Finish timelapse?", kind: "warning" },
+        );
+        if (ok) void finishAndClose();
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [finishAndClose]);
 
   return (
     <div
@@ -289,15 +340,18 @@ export function EditorWindow({ token }: { token: string }) {
         <TimelapseEditor
           token={token}
           apiBaseUrl={getApiBase()}
+          onCutsChange={(cuts, dirty) => {
+            cutsRef.current = cuts;
+            dirtyRef.current = dirty;
+          }}
           onApplied={() => {
-            // Tell the main window, then close. Fire-and-forget on purpose:
-            // even if the emit fails, closing is correct — the main window
-            // shows the published video on its next fetch.
+            // Saved from inside the editor. Flag it so the close handler
+            // doesn't prompt to publish something already published.
+            finishedRef.current = true;
             void emit(EDITED_EVENT, { token })
               .catch((e) => console.error("[editor] emit failed:", e))
-              .finally(close);
+              .finally(() => void getCurrentWindow().close().catch(() => {}));
           }}
-          onCancel={close}
         />
       </div>
     </div>
