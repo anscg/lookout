@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CutInterval, VideoUnit } from "@lookout/shared";
+import { countCutUnits, type CutInterval, type VideoUnit } from "@lookout/shared";
 import {
   regionsToCuts,
   cutsToRegions,
@@ -60,20 +60,76 @@ describe("regionsToCuts ⇄ cutsToRegions round-trip", () => {
     expect(unitIsCut(5, cutsToRegions(cuts, units))).toBe(false);
   });
 
-  it("serializes a region as [firstUnit, lastUnit + 60s)", () => {
+  it("serializes a region as [firstCutUnit, firstKeptUnit)", () => {
     const units = makeUnits(5);
     const cuts = regionsToCuts([{ startUnit: 1, endUnit: 3 }], units);
+    // End is exclusive and anchored to the next kept capture, so that
+    // capture is excluded exactly regardless of the gap before it. On an
+    // even 60s cadence that coincides with lastCut + 60s.
     expect(cuts).toEqual<CutInterval[]>([
-      {
-        start: units[1].capturedAt,
-        end: new Date(Date.parse(units[2].capturedAt) + 60_000).toISOString(),
-      },
+      { start: units[1].capturedAt, end: units[3].capturedAt },
     ]);
   });
 
   it("drops empty regions", () => {
     const units = makeUnits(5);
     expect(regionsToCuts([{ startUnit: 2, endUnit: 2 }], units)).toEqual([]);
+  });
+});
+
+describe("regionsToCuts agrees with the server's membership rule", () => {
+  /** Server-side count: timestamp membership over the serialized list. */
+  const serverCutCount = (units: VideoUnit[], cuts: CutInterval[]) =>
+    countCutUnits(units.map((u) => Date.parse(u.capturedAt)), cuts);
+
+  it("does not over-cut when captures arrive early", () => {
+    // The reported bug: a 3-minute timelapse with 2 minutes selected was
+    // rejected as "would remove the entire timelapse". Captures jitter
+    // (the server credits anything within ±30s of the mark), so a 57s gap
+    // put the next capture inside an interval that assumed a 60s stride.
+    const T = Date.parse("2026-07-27T14:58:00.000Z");
+    const units: VideoUnit[] = [
+      { capturedAt: new Date(T).toISOString(), screenshotId: "a" },
+      { capturedAt: new Date(T + 57_000).toISOString(), screenshotId: "b" },
+      { capturedAt: new Date(T + 114_000).toISOString(), screenshotId: "c" },
+    ];
+    const cuts = regionsToCuts([{ startUnit: 0, endUnit: 2 }], units);
+    expect(serverCutCount(units, cuts)).toBe(2);
+    expect(cutsToRegions(cuts, units)).toEqual([{ startUnit: 0, endUnit: 2 }]);
+  });
+
+  it("holds across a spread of realistic jitter", () => {
+    for (const gap of [40_000, 52_000, 57_000, 59_999, 60_000, 63_000, 75_000]) {
+      const T = Date.parse("2026-07-27T09:00:00.000Z");
+      const units: VideoUnit[] = Array.from({ length: 6 }, (_, i) => ({
+        capturedAt: new Date(T + i * gap).toISOString(),
+        screenshotId: `u${i}`,
+      }));
+      for (const region of [
+        { startUnit: 0, endUnit: 2 },
+        { startUnit: 2, endUnit: 4 },
+        { startUnit: 4, endUnit: 6 },
+      ]) {
+        const cuts = regionsToCuts([region], units);
+        expect(serverCutCount(units, cuts)).toBe(region.endUnit - region.startUnit);
+      }
+    }
+  });
+
+  it("never swallows more than an interval across a pause", () => {
+    // Anchoring to the next kept capture must not extend a cut across a
+    // three-hour pause and remove captures that live inside it.
+    const units = makeUnits(6, { 2: 180 });
+    const cuts = regionsToCuts([{ startUnit: 1, endUnit: 3 }], units);
+    const span = Date.parse(cuts[0].end) - Date.parse(units[2].capturedAt);
+    expect(span).toBeLessThanOrEqual(60_000);
+    expect(serverCutCount(units, cuts)).toBe(2);
+  });
+
+  it("agrees for a cut running to the very end", () => {
+    const units = makeUnits(5);
+    const cuts = regionsToCuts([{ startUnit: 3, endUnit: 5 }], units);
+    expect(serverCutCount(units, cuts)).toBe(2);
   });
 });
 
