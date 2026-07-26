@@ -34,7 +34,12 @@ export interface LookoutClient {
   uploadToR2(uploadUrl: string, blob: Blob, contentType?: string): Promise<void>;
   pause(): Promise<PauseResponse>;
   resume(): Promise<ResumeResponse>;
-  stop(): Promise<StopResponse>;
+  /** Stop the session. Pass `{ edit: true }` to hold it unpublished after
+   *  compiling so the user can cut it first — programs never see
+   *  `complete` until the edits are baked in. The hold auto-publishes if
+   *  the user walks away, so this can never strand a timelapse. Only send
+   *  it from a client that can actually render the editor. */
+  stop(opts?: { edit?: boolean }): Promise<StopResponse>;
   rename(name: string): Promise<RenameSessionResponse>;
   getStatus(): Promise<StatusResponse>;
   getVideo(): Promise<VideoResponse>;
@@ -178,9 +183,12 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
       });
     },
 
-    async stop() {
+    async stop(opts) {
       return fetchJson<StopResponse>(await sessionUrl("/stop"), {
         method: "POST",
+        // Old servers ignore an unknown body; omit it entirely for the
+        // plain stop so the request stays byte-identical to before.
+        ...(opts?.edit ? { body: JSON.stringify({ edit: true }) } : {}),
       });
     },
 

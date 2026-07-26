@@ -14,6 +14,7 @@ import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { SourcePicker } from "./SourcePicker.js";
 import { DesktopRecorder } from "./DesktopRecorder.js";
 import { NamingModal } from "./NamingModal.js";
+import { openEditorWindow } from "./EditorWindow.js";
 import { PageLayout, cardButtonStyle } from "./PageLayout.js";
 
 import { getApiBase } from "../serverConfig.js";
@@ -70,9 +71,11 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
     setIsPrompting(true);
   }, []);
 
-  const handleConfirmStop = useCallback(async (name: string | null) => {
+  const stopSession = useCallback(async (name: string | null, edit: boolean) => {
     setStopping(true);
-    console.log(`[record] stopping session, name: ${name?.trim() || "(none)"}`);
+    console.log(
+      `[record] stopping session, name: ${name?.trim() || "(none)"}, edit: ${edit}`,
+    );
     if (name && name.trim()) {
       try {
         await fetch(`${API_BASE}/api/sessions/${token}/name`, {
@@ -85,13 +88,38 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
       }
     }
     try {
-      await fetch(`${API_BASE}/api/sessions/${token}/stop`, { method: "POST" });
+      // `edit: true` holds the timelapse unpublished after it compiles so
+      // the user can cut it first — programs only ever see it finished.
+      await fetch(`${API_BASE}/api/sessions/${token}/stop`, {
+        method: "POST",
+        ...(edit
+          ? {
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ edit: true }),
+            }
+          : {}),
+      });
       console.log("[record] session stopped");
     } catch (e) {
       console.error("[record] stop failed:", e);
     }
+    // Either way the user lands on the session view; when held, it shows
+    // the review panel (and the editor window opens from there).
+    if (edit) {
+      void openEditorWindow(token);
+    }
     onViewSession(token);
   }, [token, onViewSession]);
+
+  const handleConfirmStop = useCallback(
+    (name: string | null) => stopSession(name, false),
+    [stopSession],
+  );
+
+  const handleEditAndSave = useCallback(
+    (name: string | null) => stopSession(name, true),
+    [stopSession],
+  );
 
   const handleResumeFromModal = useCallback(() => {
     setIsPrompting(false);
@@ -229,6 +257,7 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
               <NamingModal
                 loading={stopping}
                 onConfirm={handleConfirmStop}
+                onEditAndSave={handleEditAndSave}
                 onResume={handleResumeFromModal}
               />
             )}

@@ -25,7 +25,13 @@ import { RecordPage } from "./components/RecordPage.js";
 import { AddSessionPage } from "./components/AddSessionPage.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { TrayApp } from "./components/TrayApp.js";
-import { EditorWindow, openEditorWindow, EDITED_EVENT } from "./components/EditorWindow.js";
+import {
+  EditorWindow,
+  EditorOpenPlaceholder,
+  useEditorWindowOpen,
+  openEditorWindow,
+  EDITED_EVENT,
+} from "./components/EditorWindow.js";
 import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
 import { useAppUpdate } from "./hooks/useAppUpdate.js";
 import { useAnnouncement } from "./hooks/useAnnouncement.js";
@@ -121,6 +127,11 @@ function MainWindowApp() {
     apiBaseUrl: API_BASE,
     tokens: tokenStore.getAllTokenValues(),
   });
+
+  // While the editor window is up, the main window steps aside entirely —
+  // two views of the same session competing for attention is worse than
+  // one clear pointer to where the work is happening.
+  const editorWindowToken = useEditorWindowOpen();
 
   // Bumped when an editor window applies cuts — remounts the open
   // SessionDetail so it re-fetches (picks up the compiling → complete flip
@@ -481,6 +492,10 @@ function MainWindowApp() {
 
   // Step 2: Route
   const content = (() => {
+    // The editor owns the session while its window is open.
+    if (editorWindowToken) {
+      return <EditorOpenPlaceholder token={editorWindowToken} />;
+    }
     switch (route.page) {
       case "gallery":
         return (
@@ -604,7 +619,11 @@ function MainWindowApp() {
     Sentry.setTag("session_token", token ?? null);
   }, [route]);
 
-  const routeKey = `${route.page}:${(route as { token?: string }).token ?? ""}`;
+  // The editor placeholder participates in the route transition, so the
+  // main window slides to it and back instead of hard-cutting.
+  const routeKey = editorWindowToken
+    ? `editor-open:${editorWindowToken}`
+    : `${route.page}:${(route as { token?: string }).token ?? ""}`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", position: "relative" }}>

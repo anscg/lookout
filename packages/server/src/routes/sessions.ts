@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
 import { r2Client, R2_BUCKET } from "../config/r2.js";
 import { boss, COMPILE_JOB } from "../lib/queue.js";
+import { publishHeldSession } from "../lib/publish.js";
 import {
   computeMinuteBucket,
   checkRateLimit,
@@ -31,6 +32,7 @@ import {
   CAPTURE_FORMATS,
   CAPTURE_FORMAT_CONTENT_TYPES,
   MAX_USER_RECOMPILES,
+  EDIT_HOLD_MINUTES,
   normalizeCuts,
   isCutAt,
   countCutUnits,
@@ -87,20 +89,39 @@ function sessionCuts(session: { cuts: unknown }): CutInterval[] {
   return Array.isArray(session.cuts) ? (session.cuts as CutInterval[]) : [];
 }
 
-/** Whether the compiled timelapse can (still) be edited, and why not. */
+/** Is the session's edit hold currently active? */
+function holdActive(session: { editHoldUntil: Date | null }): boolean {
+  return (
+    session.editHoldUntil !== null && session.editHoldUntil.getTime() > Date.now()
+  );
+}
+
+/**
+ * Whether the session is CURRENTLY editable, and why not. Editing exists
+ * only inside the stop-time edit hold — never after `complete`. `complete`
+ * is the signal programs act on (forwarding heartbeats to Hackatime,
+ * accepting submissions, firing the redirect hook), so the data they read
+ * must already be final; a post-publish edit would mutate numbers someone
+ * already consumed.
+ */
 function sessionEditability(session: {
   status: string;
   videoUnits: unknown;
   originalVideoR2Key: string | null;
   recompileCount: number;
-}): { editable: boolean; reason?: "no_original" | "recompiles_exhausted" | "not_complete" } {
-  if (session.status !== "complete") {
-    return { editable: false, reason: "not_complete" };
+  editHoldUntil: Date | null;
+}): {
+  editable: boolean;
+  reason?: "no_original" | "recompiles_exhausted" | "not_ready" | "published";
+} {
+  if (session.status === "complete") {
+    return { editable: false, reason: "published" };
   }
-  // videoUnits is written by every post-edit-feature compile; its absence
-  // means the video predates edit support (no unit map to cut against).
-  // A null originalVideoR2Key means the retention job reclaimed the uncut
-  // original of an edited session — the source material is gone.
+  if (session.status !== "stopped" || !holdActive(session)) {
+    return { editable: false, reason: "not_ready" };
+  }
+  // Hold is active but the preview build hasn't landed yet (the compile
+  // job writes videoUnits + the original when it finishes).
   if (
     !Array.isArray(session.videoUnits) ||
     session.videoUnits.length === 0 ||
@@ -268,6 +289,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         cutSeconds: session.cutSeconds ?? 0,
         uncutTrackedSeconds: rawTrackedSeconds,
         editable: sessionEditability(session).editable,
+        editHoldUntil: holdActive(session)
+          ? session.editHoldUntil!.toISOString()
+          : undefined,
         screenshotCount,
         clientInfo,
         ja4,
@@ -1012,11 +1036,24 @@ export async function sessionRoutes(app: FastifyInstance) {
     },
   );
 
-  // Stop session
-  app.post<{ Params: { token: string } }>(
+  // Stop session.
+  // Optional body { edit: true } holds the session UNPUBLISHED after its
+  // compile so the owner can cut it before programs ever observe
+  // `complete`. The hold auto-publishes after EDIT_HOLD_MINUTES. Old
+  // clients send no body and get today's behavior byte-for-byte.
+  app.post<{ Params: { token: string }; Body: { edit?: boolean } | null }>(
     "/api/sessions/:token/stop",
     {
-      schema: { params: tokenParamSchema },
+      schema: {
+        params: tokenParamSchema,
+        body: {
+          type: ["object", "null"] as const,
+          properties: {
+            edit: { type: "boolean" as const },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request, reply) => {
       // Rate limit: 10 req/min per token (actions)
@@ -1057,6 +1094,13 @@ export async function sessionRoutes(app: FastifyInstance) {
       // Compute tracked seconds before stopping (screenshots may be cleaned up later)
       const trackedSeconds = await getTrackedSecondsForSession(session);
 
+      // Edit hold: only meaningful when there will be a video to edit.
+      const screenshotCount = await getScreenshotCount(session.id);
+      const wantsEdit = request.body?.edit === true && screenshotCount > 0;
+      const editHoldUntil = wantsEdit
+        ? new Date(stopNow.getTime() + EDIT_HOLD_MINUTES * 60_000)
+        : null;
+
       const [updated] = await db
         .update(schema.sessions)
         .set({
@@ -1064,6 +1108,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           stoppedAt: stopNow,
           totalActiveSeconds,
           trackedSeconds,
+          editHoldUntil,
           updatedAt: stopNow,
         })
         .where(and(
@@ -1077,7 +1122,6 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       // Enqueue compilation
-      const screenshotCount = await getScreenshotCount(session.id);
       if (screenshotCount > 0) {
         await boss.send(COMPILE_JOB, { sessionId: session.id });
       } else {
@@ -1092,6 +1136,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         status: "stopped" as const,
         trackedSeconds,
         totalActiveSeconds,
+        ...(editHoldUntil
+          ? { editHoldUntil: editHoldUntil.toISOString() }
+          : {}),
       };
     },
   );
@@ -1137,7 +1184,12 @@ export async function sessionRoutes(app: FastifyInstance) {
         // Redirect hook — clients watching the compile open this once the
         // status flips to "complete". Absent when the session has none.
         redirectUrl: session.redirectUrl ?? undefined,
+        // Edit hold. `editable` flips true when the preview build lands;
+        // until then a set `editHoldUntil` means "still preparing".
         editable: sessionEditability(session).editable,
+        editHoldUntil: holdActive(session)
+          ? session.editHoldUntil!.toISOString()
+          : undefined,
       };
     },
   );
@@ -1280,6 +1332,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         cuts: sessionCuts(session),
         editable,
         ...(editable ? {} : { editableReason: reason }),
+        editHoldUntil: holdActive(session)
+          ? session.editHoldUntil!.toISOString()
+          : null,
         originalVideoUrl,
         recompilesRemaining: Math.max(
           0,
@@ -1290,9 +1345,9 @@ export async function sessionRoutes(app: FastifyInstance) {
   );
 
   // Replace the session's cut list. Idempotent full replace — no patch
-  // semantics (the list is small). `[]` clears all edits. The cuts take
-  // effect in /timings and trackedSeconds immediately; the published video
-  // updates on the next POST /compile.
+  // semantics (the list is small). `[]` clears all edits. Only valid during
+  // an active edit hold; the cuts are baked in by POST /compile, which also
+  // publishes the session.
   app.put<{
     Params: { token: string };
     Body: { cuts: Array<{ start: string; end: string }> };
@@ -1383,6 +1438,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         normalized.cuts,
       );
 
+      // Guard on `stopped` + a live hold: the expiry job could have
+      // published this session between our read and this write, and a
+      // published session's numbers must never move.
       const [updated] = await db
         .update(schema.sessions)
         .set({
@@ -1393,14 +1451,15 @@ export async function sessionRoutes(app: FastifyInstance) {
         .where(
           and(
             eq(schema.sessions.id, session.id),
-            eq(schema.sessions.status, "complete"),
+            eq(schema.sessions.status, "stopped"),
+            sql`${schema.sessions.editHoldUntil} > now()`,
           ),
         )
         .returning({ id: schema.sessions.id });
       if (!updated) {
         return reply
           .code(409)
-          .send({ error: "Session state changed concurrently, please retry" });
+          .send({ error: "Edit window closed — the timelapse was already published" });
       }
 
       return {
@@ -1413,10 +1472,13 @@ export async function sessionRoutes(app: FastifyInstance) {
     },
   );
 
-  // Apply the current cut list to the published video (a cut-compile).
-  // Usually a lossless stream-copy of the kept ranges of the original —
-  // seconds, not minutes. Clearing all cuts when the original is already
-  // published is a pure no-op ("instant").
+  // Publish a held session, baking in its current cut list.
+  //
+  // This ENDS the edit hold: the session goes `complete` and programs read
+  // its final numbers. With cuts, the worker slices the kept ranges out of
+  // the built original (usually a lossless stream copy — seconds) and then
+  // deletes the uncut original. With no cuts, the already-built original is
+  // published as-is with no compile job at all ("instant").
   app.post<{ Params: { token: string } }>(
     "/api/sessions/:token/compile",
     {
@@ -1435,17 +1497,27 @@ export async function sessionRoutes(app: FastifyInstance) {
       const session = await findSession(request.params.token);
       if (!session) return reply.code(404).send({ error: "Session not found" });
 
+      const recompilesRemaining = Math.max(
+        0,
+        MAX_USER_RECOMPILES - session.recompileCount,
+      );
+
       if (session.status === "compiling") {
-        // Already applying — treat as success so client retries are safe.
-        return reply.code(202).send({
-          status: "compiling" as const,
-          instant: false,
-          recompilesRemaining: Math.max(
-            0,
-            MAX_USER_RECOMPILES - session.recompileCount,
-          ),
-        });
+        // Already publishing — treat as success so client retries are safe.
+        return reply
+          .code(202)
+          .send({ status: "compiling" as const, instant: false, recompilesRemaining });
       }
+      if (session.status === "complete") {
+        // Someone (usually the hold-expiry job) published first. Idempotent
+        // from the client's point of view: the timelapse is out.
+        return {
+          status: "complete" as const,
+          instant: true,
+          recompilesRemaining,
+        };
+      }
+
       const { editable, reason } = sessionEditability(session);
       if (!editable) {
         return reply
@@ -1454,33 +1526,39 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       const cuts = sessionCuts(session);
-      const publishedIsOriginal =
-        session.videoR2Key === session.originalVideoR2Key;
-      if (cuts.length === 0 && publishedIsOriginal) {
-        // Nothing to change: no cuts, original already published.
+
+      if (cuts.length === 0) {
+        // No cuts: publish the already-built original directly. No worker
+        // round-trip, so "Save without edits" is instant.
+        const published = await publishHeldSession(session.id);
+        if (!published) {
+          return reply
+            .code(409)
+            .send({ error: "Session state changed concurrently, please retry" });
+        }
         return {
           status: "complete" as const,
           instant: true,
-          recompilesRemaining: Math.max(
-            0,
-            MAX_USER_RECOMPILES - session.recompileCount,
-          ),
+          recompilesRemaining,
         };
       }
 
-      // Atomically claim: complete → compiling, burn one recompile. The
-      // worker's own claim accepts re-entry from 'compiling'.
+      // Cuts to bake in: claim stopped → compiling and hand off to the
+      // worker (whose claim accepts re-entry from 'compiling' on retry).
       const [updated] = await db
         .update(schema.sessions)
         .set({
           status: "compiling",
           recompileCount: session.recompileCount + 1,
+          // Clear the hold: this session is being published now, so the
+          // expiry job must not race in behind us.
+          editHoldUntil: null,
           updatedAt: new Date(),
         })
         .where(
           and(
             eq(schema.sessions.id, session.id),
-            eq(schema.sessions.status, "complete"),
+            eq(schema.sessions.status, "stopped"),
           ),
         )
         .returning({ id: schema.sessions.id });

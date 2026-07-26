@@ -3,6 +3,7 @@ import { useLookout } from "../hooks/useLookout.js";
 import { useLookoutContext } from "../LookoutProvider.js";
 import { StatusBar } from "./StatusBar.js";
 import { TimelapseEditor } from "./TimelapseEditor.js";
+import { StopChoiceModal } from "./StopChoiceModal.js";
 import { ScreenPreview } from "./ScreenPreview.js";
 import { CameraPreview } from "./CameraPreview.js";
 import { CameraSelector } from "./CameraSelector.js";
@@ -25,40 +26,54 @@ import { colors, fontSize, fontWeight, spacing } from "../ui/theme.js";
  * Must be used within a `<LookoutProvider>`.
  */
 export interface LookoutRecorderProps {
-  /** Offer the cut editor on completed timelapses (default true). Programs
-   *  embedding the recorder can pass false to hide the affordance. */
+  /** Offer "Edit & save" when stopping (default true). Programs embedding
+   *  the recorder can pass false to keep stopping a one-click action. */
   editing?: boolean;
 }
 
 export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
   const { state, actions } = useLookout();
   const { client, config } = useLookoutContext();
-  const [editorOpen, setEditorOpen] = useState(false);
   const [resolvedToken, setResolvedToken] = useState<string | null>(null);
-  const [sessionEditable, setSessionEditable] = useState(false);
+  // Set when the user chose "Edit & save": the session is held unpublished
+  // and this view owns the editor until they publish.
+  const [editorOpen, setEditorOpen] = useState(false);
 
-  // The editor needs a concrete token string and the session's editability.
-  // Resolve them once the recording reaches "complete".
+  // The editor needs a concrete token string; resolve it once, up front,
+  // so opening the editor is instant when the user asks for it.
   useEffect(() => {
-    if (state.status !== "complete" || !editing) return;
+    if (!editing) return;
     let cancelled = false;
-    (async () => {
-      try {
-        const [token, status] = await Promise.all([
-          client.resolveToken(),
-          client.getStatus(),
-        ]);
-        if (cancelled) return;
-        setResolvedToken(token);
-        setSessionEditable(status.editable === true);
-      } catch {
-        // Editability probe is best-effort — the video still plays.
-      }
-    })();
+    client
+      .resolveToken()
+      .then((t) => {
+        if (!cancelled) setResolvedToken(t);
+      })
+      .catch(() => {
+        // Best-effort: without a token we simply don't offer editing.
+      });
     return () => {
       cancelled = true;
     };
-  }, [state.status, editing, client]);
+  }, [editing, client]);
+
+  const canEdit = editing && resolvedToken !== null;
+  const [stopPrompt, setStopPrompt] = useState(false);
+  const [stopping, setStopping] = useState(false);
+
+  const confirmStop = async (withEdit: boolean) => {
+    setStopping(true);
+    try {
+      // Open the editor optimistically for the edit path: the session is
+      // held, so the editor can show its own "preparing" state while the
+      // compile runs instead of leaving the user on a dead screen.
+      if (withEdit) setEditorOpen(true);
+      await actions.stop({ edit: withEdit });
+      setStopPrompt(false);
+    } finally {
+      setStopping(false);
+    }
+  };
 
   if (state.status === "loading") {
     return (
@@ -97,19 +112,16 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
     state.status === "complete" ||
     state.status === "failed"
   ) {
-    if (editorOpen && resolvedToken) {
+    // "Edit & save": the session is held unpublished while the user cuts
+    // it. No cancel affordance here — publishing is the way out (and the
+    // hold publishes on its own if they abandon the tab).
+    if (editorOpen && resolvedToken && state.status !== "failed") {
       return (
         <PageContainer style={{ padding: spacing.xxl }}>
           <TimelapseEditor
             token={resolvedToken}
             apiBaseUrl={config.apiBaseUrl}
-            onCancel={() => setEditorOpen(false)}
-            onApplied={() => {
-              // The session flips complete → compiling → complete on the
-              // server; the ResultView refetches the video on next mount.
-              setEditorOpen(false);
-              setSessionEditable(false);
-            }}
+            onApplied={() => setEditorOpen(false)}
           />
         </PageContainer>
       );
@@ -120,13 +132,6 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
           status={state.status}
           trackedSeconds={state.trackedSeconds}
         />
-        {state.status === "complete" && editing && sessionEditable && resolvedToken && (
-          <div style={{ display: "flex", justifyContent: "center", marginTop: spacing.lg }}>
-            <Button variant="secondary" size="sm" onClick={() => setEditorOpen(true)}>
-              Edit timelapse
-            </Button>
-          </div>
-        )}
       </PageContainer>
     );
   }
@@ -170,7 +175,7 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
             status={state.status}
             onStartPreview={actions.startPreview}
             onStartRecording={actions.startSharing}
-            onStop={actions.stop}
+            onStop={() => setStopPrompt(true)}
           />
         ) : state.isPreviewing && !state.isSharing ? (
           /* Phase 2: Previewing — show "Start Recording" */
@@ -186,8 +191,16 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
             onStartSharing={actions.startSharing}
             onPause={actions.pause}
             onResume={actions.resume}
-            onStop={actions.stop}
+            onStop={() => setStopPrompt(true)}
             captureMode="camera"
+          />
+        )}
+        {stopPrompt && (
+          <StopChoiceModal
+            loading={stopping}
+            onResume={() => setStopPrompt(false)}
+            onStopAndSave={() => void confirmStop(false)}
+            onEditAndSave={canEdit ? () => void confirmStop(true) : undefined}
           />
         )}
       </PageContainer>
@@ -209,9 +222,17 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
         onStartSharing={actions.startSharing}
         onPause={actions.pause}
         onResume={actions.resume}
-        onStop={actions.stop}
+        onStop={() => setStopPrompt(true)}
         captureMode="screen"
       />
+      {stopPrompt && (
+        <StopChoiceModal
+          loading={stopping}
+          onResume={() => setStopPrompt(false)}
+          onStopAndSave={() => void confirmStop(false)}
+          onEditAndSave={canEdit ? () => void confirmStop(true) : undefined}
+        />
+      )}
     </PageContainer>
   );
 }

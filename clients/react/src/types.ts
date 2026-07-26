@@ -209,8 +209,12 @@ export interface LookoutActions {
   pause: () => Promise<void>;
   /** Resume a paused session. */
   resume: () => Promise<void>;
-  /** Stop the session (triggers compilation). Optionally name the timelapse before stopping. */
-  stop: (options?: { name?: string }) => Promise<void>;
+  /** Stop the session (triggers compilation). Optionally name the timelapse
+   *  before stopping. Pass `edit: true` to hold the timelapse unpublished
+   *  after it compiles so the user can cut it first — programs only ever
+   *  see `complete` with the edits already applied. The hold auto-publishes
+   *  if the user walks away. */
+  stop: (options?: { name?: string; edit?: boolean }) => Promise<void>;
   /** Select a camera device by ID. Only effective when captureMode is "camera". */
   selectCamera: (deviceId: string) => void;
   /** Start camera preview without recording. Acquires the stream so the UI can show a live video. */

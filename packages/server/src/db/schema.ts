@@ -168,10 +168,17 @@ export const sessions = pgTable(
     // User-initiated cut-compiles, capped at MAX_USER_RECOMPILES.
     recompileCount: integer("recompile_count").notNull().default(0),
     // When the last cut-compile finished; anchors the EDIT_WINDOW_DAYS
-    // original-video retention for edited sessions.
+    // original-video retention backstop for edited sessions.
     lastEditCompileAt: timestamp("last_edit_compile_at", {
       withTimezone: true,
     }),
+    // Edit hold: while set and in the future, a stopped session's compiled
+    // video stays UNPUBLISHED (status remains "stopped", video_r2_key null)
+    // so the owner can cut it before programs ever see `complete`. Set by
+    // POST /stop {edit: true}; cleared by the finalize call or the expiry
+    // job (which auto-publishes uncut). Editing is only possible during
+    // this hold — never after complete, because programs act on complete.
+    editHoldUntil: timestamp("edit_hold_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

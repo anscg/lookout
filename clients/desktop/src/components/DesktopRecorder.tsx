@@ -18,6 +18,7 @@ import {
 } from "@lookout/react";
 import { getReport } from "../logger.js";
 import { NamingModal } from "./NamingModal.js";
+import { openEditorWindow } from "./EditorWindow.js";
 import { useNativeCapture } from "../hooks/useNativeCapture.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
@@ -243,12 +244,14 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     };
   }, []);
 
-  // Finalize stop: optionally name, then stop the session.
-  const handleConfirmStop = useCallback(async (name: string | null) => {
+  // Finalize stop: optionally name, then stop the session. With `edit`,
+  // the timelapse is held unpublished after compiling so the user can cut
+  // it first — programs only ever observe it once, finished.
+  const finalizeStop = useCallback(async (name: string | null, edit: boolean) => {
     if (stopActionHandled.current) return;
     stopActionHandled.current = true;
     setStopLoading(true);
-    console.log(`[session] stopping, name: ${name?.trim() || "(none)"}`);
+    console.log(`[session] stopping, name: ${name?.trim() || "(none)"}, edit: ${edit}`);
     if (name && name.trim()) {
       try {
         await fetch(`${API_BASE}/api/sessions/${token}/name`, {
@@ -262,9 +265,11 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     }
 
     try {
-      await session.stop();
+      // Name was already applied above via the rename endpoint.
+      await session.stop(undefined, { edit });
       console.log("[session] stopped, navigating to session detail");
       if (isCamera) camera.stopStream();
+      if (edit) void openEditorWindow(token);
       setIsPrompting(false);
       setStopLoading(false);
     } catch (e) {
@@ -273,6 +278,16 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
       stopActionHandled.current = false;
     }
   }, [token, session, isCamera, camera]);
+
+  const handleConfirmStop = useCallback(
+    (name: string | null) => finalizeStop(name, false),
+    [finalizeStop],
+  );
+
+  const handleEditAndSave = useCallback(
+    (name: string | null) => finalizeStop(name, true),
+    [finalizeStop],
+  );
 
   const handlePause = useCallback(async () => {
     console.log("[session] pausing...");
@@ -659,6 +674,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
         <NamingModal
           loading={stopLoading}
           onConfirm={handleConfirmStop}
+          onEditAndSave={handleEditAndSave}
           onResume={handleResumeFromModal}
         />
       )}

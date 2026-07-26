@@ -9,6 +9,8 @@ export type { LookoutRecorderProps } from "./components/LookoutRecorder.js";
 // Cut editor
 export { TimelapseEditor } from "./components/TimelapseEditor.js";
 export type { TimelapseEditorProps } from "./components/TimelapseEditor.js";
+export { StopChoiceModal } from "./components/StopChoiceModal.js";
+export type { StopChoiceModalProps } from "./components/StopChoiceModal.js";
 export {
   regionsToCuts,
   cutsToRegions,

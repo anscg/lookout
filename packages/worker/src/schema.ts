@@ -59,6 +59,7 @@ export const sessions = pgTable(
     lastEditCompileAt: timestamp("last_edit_compile_at", {
       withTimezone: true,
     }),
+    editHoldUntil: timestamp("edit_hold_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

@@ -27,10 +27,19 @@ export const MAX_CUT_INTERVALS = 120;
  *  but enqueues worker jobs — bound the loop. */
 export const MAX_USER_RECOMPILES = 5;
 
-/** How long after the last cut-compile the uncut original video is retained
- *  for further re-edits. After this the retention job deletes the original
- *  of EDITED sessions (the cut content must eventually be truly gone) and
- *  editing freezes. Uncut sessions keep their single video forever. */
+/**
+ * How long a session stopped with `{edit: true}` waits, unpublished, for
+ * the user to edit before it auto-publishes uncut. The clock starts at
+ * stop. Editing happens ONLY inside this hold — never after `complete`,
+ * because `complete` is the signal programs act on (forwarding heartbeats,
+ * accepting submissions, firing the redirect hook); data must be final the
+ * first time they see it.
+ */
+export const EDIT_HOLD_MINUTES = 30;
+
+/** Backstop retention for uncut originals of EDITED sessions (the worker
+ *  deletes them immediately after an edited publish; this catches crashed
+ *  flows). Uncut sessions keep their single video forever. */
 export const EDIT_WINDOW_DAYS = 7;
 
 /** How far outside [startedAt, stoppedAt] a cut interval may reach before
