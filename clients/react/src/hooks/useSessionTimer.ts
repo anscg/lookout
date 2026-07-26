@@ -6,7 +6,52 @@ import { SCREENSHOT_INTERVAL_MS } from "@lookout/shared";
  *  the display jumps to the new server value (== frozen value) and
  *  unfreezes smoothly. If captures stall, the freeze stays put so the
  *  user sees something is wrong instead of an inflated count. */
-const MAX_INTERPOLATION_S = Math.floor(SCREENSHOT_INTERVAL_MS / 1000);
+export const MAX_INTERPOLATION_S = Math.floor(SCREENSHOT_INTERVAL_MS / 1000);
+
+/**
+ * The timer's anchor state, for surfaces that tick their own clock
+ * instead of consuming `displaySeconds` (the desktop menu-bar ticker in
+ * Rust, and the tray popup window).
+ *
+ * Those surfaces MUST reproduce the same three rules or they drift out
+ * of sync with the main window — which is exactly the "menu bar shows a
+ * different time" bug:
+ *
+ *   1. display = `baseSeconds` + min(MAX_INTERPOLATION_S, now - `anchorAt`)
+ *   2. while not active (paused/stopped), display = `baseSeconds` — the
+ *      interpolated remainder is dropped, not frozen
+ *   3. `baseSeconds` ratchets forward only, and `anchorAt` resets only
+ *      when it actually advances
+ *
+ * Never re-interpolate from `displaySeconds`: it already contains the
+ * interpolated remainder, so extrapolating from it double-counts.
+ */
+export interface SessionTimerState {
+  /** What to render. */
+  displaySeconds: number;
+  /** Ratcheted server-authoritative value the display is anchored to. */
+  baseSeconds: number;
+  /** `Date.now()` when `baseSeconds` last advanced. */
+  anchorAt: number;
+}
+
+/**
+ * The one implementation of rules 1 and 2 above. Every JS surface that
+ * renders the recording clock goes through this — the main window via
+ * `useSessionTimerState`, the desktop tray popup from the anchor it
+ * receives over IPC. (The Rust menu-bar ticker mirrors it in
+ * `tray_timer_task`; keep the two in step.)
+ */
+export function deriveDisplaySeconds(
+  baseSeconds: number,
+  anchorAt: number,
+  isActive: boolean,
+  now: number,
+): number {
+  if (!isActive) return baseSeconds;
+  const elapsed = Math.floor((now - anchorAt) / 1000);
+  return baseSeconds + Math.min(MAX_INTERPOLATION_S, Math.max(0, elapsed));
+}
 
 /**
  * Display timer for the recording session.
@@ -26,10 +71,10 @@ const MAX_INTERPOLATION_S = Math.floor(SCREENSHOT_INTERVAL_MS / 1000);
  * ratchets up and `lastSyncRef` resets — display jumps to the new
  * value and the next interpolation cycle starts from there.
  */
-export function useSessionTimer(
+export function useSessionTimerState(
   serverTrackedSeconds: number,
   isActive: boolean,
-): number {
+): SessionTimerState {
   const [displaySeconds, setDisplaySeconds] = useState(serverTrackedSeconds);
   const lastSyncRef = useRef(Date.now());
   const baseRef = useRef(serverTrackedSeconds);
@@ -57,15 +102,17 @@ export function useSessionTimer(
     lastSyncRef.current = Date.now();
 
     let raf: number;
-    let lastRenderedSecond = -1;
+    let lastRendered = -1;
     const tick = () => {
-      const elapsed = Math.min(
-        MAX_INTERPOLATION_S,
-        Math.floor((Date.now() - lastSyncRef.current) / 1000),
+      const next = deriveDisplaySeconds(
+        baseRef.current,
+        lastSyncRef.current,
+        true,
+        Date.now(),
       );
-      if (elapsed !== lastRenderedSecond) {
-        lastRenderedSecond = elapsed;
-        setDisplaySeconds(baseRef.current + elapsed);
+      if (next !== lastRendered) {
+        lastRendered = next;
+        setDisplaySeconds(next);
       }
       raf = requestAnimationFrame(tick);
     };
@@ -78,9 +125,28 @@ export function useSessionTimer(
       // keep the inflated baseRef). Server credits after resume re-anchor
       // baseRef via the sync effect above.
     };
-  }, [isActive, serverTrackedSeconds]);
+    // `serverTrackedSeconds` is deliberately NOT a dep. The tick reads
+    // baseRef/lastSyncRef live, and the sync effect above already
+    // re-anchors on advance. Including it here re-ran this effect on
+    // every server response and reset `lastSyncRef` even when the value
+    // did NOT advance (a repeated or lower reading), silently discarding
+    // up to a minute of interpolation that the other surfaces kept.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive]);
 
-  return displaySeconds;
+  return {
+    displaySeconds,
+    baseSeconds: baseRef.current,
+    anchorAt: lastSyncRef.current,
+  };
+}
+
+/** Convenience wrapper: just the number to render. */
+export function useSessionTimer(
+  serverTrackedSeconds: number,
+  isActive: boolean,
+): number {
+  return useSessionTimerState(serverTrackedSeconds, isActive).displaySeconds;
 }
 
 /** Format seconds as H:MM:SS or M:SS (for live timer display). */

@@ -112,22 +112,39 @@ function sessionEditability(session: {
   editHoldUntil: Date | null;
 }): {
   editable: boolean;
-  reason?: "no_original" | "recompiles_exhausted" | "not_ready" | "published";
+  reason?:
+    | "preparing"
+    | "no_original"
+    | "recompiles_exhausted"
+    | "not_ready"
+    | "failed"
+    | "published";
 } {
   if (session.status === "complete") {
     return { editable: false, reason: "published" };
   }
-  if (session.status !== "stopped" || !holdActive(session)) {
+  if (session.status === "failed") {
+    return { editable: false, reason: "failed" };
+  }
+  if (!holdActive(session)) {
+    return { editable: false, reason: "not_ready" };
+  }
+  // A held session is "compiling" for most of the wait — the worker claims
+  // the job within a second of the stop and only returns the session to
+  // "stopped" once the preview is built. Both states are legitimate
+  // waiting room; anything else means the recording isn't finished.
+  if (session.status !== "stopped" && session.status !== "compiling") {
     return { editable: false, reason: "not_ready" };
   }
   // Hold is active but the preview build hasn't landed yet (the compile
   // job writes videoUnits + the original when it finishes).
   if (
+    session.status === "compiling" ||
     !Array.isArray(session.videoUnits) ||
     session.videoUnits.length === 0 ||
     !session.originalVideoR2Key
   ) {
-    return { editable: false, reason: "no_original" };
+    return { editable: false, reason: "preparing" };
   }
   if (session.recompileCount >= MAX_USER_RECOMPILES) {
     return { editable: false, reason: "recompiles_exhausted" };
@@ -1335,6 +1352,10 @@ export async function sessionRoutes(app: FastifyInstance) {
         editHoldUntil: holdActive(session)
           ? session.editHoldUntil!.toISOString()
           : null,
+        // Roughly how many units the finished video will hold. Lets a
+        // client waiting on the build size its progress estimate — compile
+        // time scales with unit count.
+        expectedUnits: await getScreenshotCount(session.id),
         originalVideoUrl,
         recompilesRemaining: Math.max(
           0,
@@ -1519,6 +1540,23 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       const { editable, reason } = sessionEditability(session);
+
+      // "Publish as recorded" while the preview is still building: just
+      // drop the hold. The build re-reads it when it finishes and
+      // publishes normally, so the user never has to wait for a preview
+      // they said they don't want.
+      if (!editable && reason === "preparing") {
+        await db
+          .update(schema.sessions)
+          .set({ editHoldUntil: null, updatedAt: new Date() })
+          .where(eq(schema.sessions.id, session.id));
+        return {
+          status: session.status as "stopped" | "compiling",
+          instant: false,
+          recompilesRemaining,
+        };
+      }
+
       if (!editable) {
         return reply
           .code(409)

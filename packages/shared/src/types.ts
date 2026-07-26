@@ -154,14 +154,21 @@ export interface UnitsResponse {
    *  the original video is built, and recompile budget remains. Editing is
    *  only possible during the hold — never after `complete`. */
   editable: boolean;
-  /** Why `editable` is false (for UX copy); absent when editable. */
+  /** Why `editable` is false (for UX copy); absent when editable.
+   *  `"preparing"` means the hold is active and the preview video is still
+   *  compiling — keep polling, it will become editable. */
   editableReason?:
+    | "preparing"
     | "no_original"
     | "recompiles_exhausted"
     | "not_ready"
+    | "failed"
     | "published";
   /** When the edit hold auto-publishes; null when no hold is active. */
   editHoldUntil?: string | null;
+  /** Confirmed captures in the session ≈ units the finished video will
+   *  hold. Lets a client waiting on the build size a progress estimate. */
+  expectedUnits?: number;
   /** Presigned GET URL (~1h) of the UNCUT original video — the editor's
    *  preview source. Token-gated by this endpoint; deliberately NOT the
    *  public media URL, which after an edit serves the cut version only.

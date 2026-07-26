@@ -53,7 +53,17 @@ export type { UploadPayload } from "./hooks/useUploader.js";
 export { ClipRecorder } from "./hooks/clipRecorder.js";
 export type { ClipCaptureResult, ClipRecorderOptions } from "./hooks/clipRecorder.js";
 export { useSession } from "./hooks/useSession.js";
-export { useSessionTimer, formatTime, formatTrackedTime } from "./hooks/useSessionTimer.js";
+export {
+  useSessionTimer,
+  useSessionTimerState,
+  deriveDisplaySeconds,
+  MAX_INTERPOLATION_S,
+  formatTime,
+  formatTrackedTime,
+} from "./hooks/useSessionTimer.js";
+export type { SessionTimerState } from "./hooks/useSessionTimer.js";
+export { computeBestTrackedSeconds } from "./hooks/computeBestTracked.js";
+export type { BestTrackedInputs } from "./hooks/computeBestTracked.js";
 
 // Gallery hooks
 export { useTokenStore } from "./hooks/useTokenStore.js";
