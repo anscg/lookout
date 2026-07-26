@@ -44,7 +44,7 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       --color-cut-fill: rgba(248, 113, 113, 0.26);
       --color-cut-fill-hover: rgba(248, 113, 113, 0.36);
       --color-cut-border: #f87171;
-      --color-cut-stripe: rgba(248, 113, 113, 0.22);
+      --color-cut-stripe: rgba(248, 113, 113, 0.13);
       --color-track: rgba(255, 255, 255, 0.06);
     }
     @media (prefers-color-scheme: light) {
@@ -84,7 +84,7 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
         --color-cut-fill: rgba(220, 38, 38, 0.20);
         --color-cut-fill-hover: rgba(220, 38, 38, 0.30);
         --color-cut-border: #dc2626;
-        --color-cut-stripe: rgba(220, 38, 38, 0.20);
+        --color-cut-stripe: rgba(220, 38, 38, 0.12);
         --color-track: rgba(0, 0, 0, 0.06);
       }
     }
@@ -124,7 +124,7 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       --color-cut-fill: rgba(220, 38, 38, 0.20);
       --color-cut-fill-hover: rgba(220, 38, 38, 0.30);
       --color-cut-border: #dc2626;
-      --color-cut-stripe: rgba(220, 38, 38, 0.20);
+      --color-cut-stripe: rgba(220, 38, 38, 0.12);
       --color-track: rgba(0, 0, 0, 0.06);
     }`;
   document.head.appendChild(style);
