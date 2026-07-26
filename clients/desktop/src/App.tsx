@@ -554,9 +554,9 @@ function MainWindowApp() {
           <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} />
         </div>
       ) : (
-        /* No overlay titlebar on Windows/Linux — float the pill top-right. */
-        <div style={{ position: "absolute", top: 8, right: 8, zIndex: 9999 }}>
-          <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} />
+        /* No overlay titlebar on Windows/Linux — float the pill bottom-left. */
+        <div style={{ position: "absolute", bottom: 8, left: 8, zIndex: 9999 }}>
+          <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} origin="bottom" />
         </div>
       )}
       <div style={{

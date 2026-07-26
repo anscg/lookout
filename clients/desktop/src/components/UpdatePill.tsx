@@ -7,6 +7,8 @@ import type { UpdatePhase } from "../hooks/useAppUpdate.js";
 interface UpdatePillProps {
   phase: UpdatePhase;
   onRestart: () => void;
+  /** Which screen edge the pill is anchored to — sets the slide direction. */
+  origin?: "top" | "bottom";
 }
 
 /** Tiny circular progress ring for the downloading state. */
@@ -47,9 +49,11 @@ function PowerIcon() {
  * progress while an update streams in, then becomes a "Restart to Complete
  * Update" button. Renders nothing when no update is in flight.
  */
-export function UpdatePill({ phase, onRestart }: UpdatePillProps) {
+export function UpdatePill({ phase, onRestart, origin = "top" }: UpdatePillProps) {
   const [hovered, setHovered] = useState(false);
   const clickable = phase.state === "ready";
+  // Slide in from whichever edge the pill is anchored to.
+  const offset = origin === "bottom" ? 8 : -8;
   // Ready/restarting render as a solid, borderless capsule (inverted colors);
   // downloading stays a quiet outlined pill.
   const solid = phase.state === "ready" || phase.state === "restarting";
@@ -58,9 +62,9 @@ export function UpdatePill({ phase, onRestart }: UpdatePillProps) {
     <AnimatePresence>
       {phase.state !== "idle" && (
         <motion.button
-          initial={{ opacity: 0, y: -8, scale: 0.95 }}
+          initial={{ opacity: 0, y: offset, scale: 0.95 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: -8, scale: 0.95, transition: { duration: 0.15 } }}
+          exit={{ opacity: 0, y: offset, scale: 0.95, transition: { duration: 0.15 } }}
           transition={{ type: "spring", stiffness: 450, damping: 32 }}
           disabled={!clickable}
           onClick={onRestart}
