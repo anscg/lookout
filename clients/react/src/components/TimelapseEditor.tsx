@@ -41,10 +41,19 @@ export interface TimelapseEditorProps {
 
 const STRIP_HEIGHT = 56;
 const RULER_HEIGHT = 18;
-const FILMSTRIP_SAMPLES = 48;
-/** Scrubber preview card. 16:9 keeps it honest about the source footage. */
-const PREVIEW_W = 168;
-const PREVIEW_H = 96;
+/** Upper bound on filmstrip tiles. The real count comes from the track
+ *  width (see buildFilmstrip); this only stops an ultra-wide display from
+ *  queueing hundreds of seeks. */
+const FILMSTRIP_MAX_TILES = 48;
+/** Scrubber preview card, in CSS px. Height is derived from the video's
+ *  own aspect ratio at render time, not assumed. */
+const PREVIEW_W = 192;
+/** Canvases are sized in device pixels and scaled down by CSS — without
+ *  this a 2x display renders every thumbnail at half resolution, which
+ *  reads as a blurry, low-quality preview. Capped at 2 because 3x gains
+ *  nothing visible here and triples the decode cost. */
+const pixelRatio = () =>
+  Math.min(2, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
 /** Fixed cost of a compile: claim, sampling query, assembly, upload. */
 const COMPILE_BASE_MS = 6_000;
 /** Marginal cost per capture unit (download + 1s segment encode, across
@@ -310,58 +319,109 @@ export function TimelapseEditor({
     };
   }, [frameSrc]);
 
-  // Filmstrip: sample evenly across the video, streaming partial strips in
-  // so the timeline fills progressively instead of blocking on the whole set.
+  // Track width drives the filmstrip: tiles are whole frames at the
+  // video's own aspect ratio, so how many fit is a function of the track,
+  // not of how many minutes were recorded.
+  const [stripWidth, setStripWidth] = useState(0);
   useEffect(() => {
-    if (!frameSrc || unitCount === 0) return;
+    const el = timelineRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([entry]) =>
+      setStripWidth(entry.contentRect.width),
+    );
+    ro.observe(el);
+    setStripWidth(el.getBoundingClientRect().width);
+    return () => ro.disconnect();
+  }, [data]);
+
+  /**
+   * Filmstrip: whole, uncropped frames tiled across the track — the
+   * Premiere / CapCut / iOS scrubber look.
+   *
+   * The math: a tile is the full frame at track height, so
+   *   tileW = STRIP_HEIGHT × (videoW / videoH)   — 56 × 16/9 ≈ 100px
+   *   tiles = ceil(trackW / tileW)               — ~9 across a 900px track
+   * Tile i covers x ∈ [i·tileW, (i+1)·tileW), so it samples the frame at
+   * its own midpoint: t = clamp(((i + 0.5)·tileW) / trackW) × duration.
+   * The last tile is clipped by the track's overflow, exactly as a real
+   * filmstrip is. Deliberately NOT one tile per minute: at 48 minutes
+   * that squeezed each frame into 19px and cropped it to a smear.
+   */
+  const [tileAspect, setTileAspect] = useState(16 / 9);
+  const [tileWidth, setTileWidth] = useState(Math.round(STRIP_HEIGHT * (16 / 9)));
+  useEffect(() => {
+    if (!frameSrc || unitCount === 0 || stripWidth <= 0) return;
     let cancelled = false;
+    let v: HTMLVideoElement | null = null;
 
-    const v = document.createElement("video");
-    if (!frameSrc.startsWith("blob:")) v.crossOrigin = "anonymous";
-    v.muted = true;
-    v.preload = "auto";
-    v.src = frameSrc;
+    // Debounce: a live window drag fires dozens of resizes, and each
+    // regeneration is a series of decoder seeks.
+    const timer = setTimeout(() => {
+      v = document.createElement("video");
+      if (!frameSrc.startsWith("blob:")) v.crossOrigin = "anonymous";
+      v.muted = true;
+      v.preload = "auto";
+      v.src = frameSrc;
+      const el = v;
 
-    (async () => {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          v.onloadedmetadata = () => resolve();
-          v.onerror = () => reject(new Error("filmstrip video load failed"));
-        });
-        const canvas = document.createElement("canvas");
-        const thumbH = STRIP_HEIGHT;
-        const thumbW = Math.round((v.videoWidth / Math.max(1, v.videoHeight)) * thumbH);
-        canvas.width = thumbW;
-        canvas.height = thumbH;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-
-        const count = Math.min(FILMSTRIP_SAMPLES, unitCount);
-        const thumbs: string[] = [];
-        for (let i = 0; i < count; i++) {
-          if (cancelled) return;
-          const t = Math.min(v.duration - 0.05, (i / count) * unitCount + 0.5);
-          await new Promise<void>((resolve) => {
-            v.onseeked = () => resolve();
-            v.currentTime = t;
+      void (async () => {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            el.onloadedmetadata = () => resolve();
+            el.onerror = () => reject(new Error("filmstrip video load failed"));
           });
-          ctx.drawImage(v, 0, 0, thumbW, thumbH);
-          thumbs.push(canvas.toDataURL("image/jpeg", 0.6));
-          if (i % 4 === 3) setFilmstrip([...thumbs]);
+          if (cancelled) return;
+
+          const aspect = el.videoWidth / Math.max(1, el.videoHeight);
+          setTileAspect(aspect);
+          const tileW = Math.max(24, Math.round(STRIP_HEIGHT * aspect));
+          setTileWidth(tileW);
+
+          const tiles = Math.min(
+            FILMSTRIP_MAX_TILES,
+            Math.max(1, Math.ceil(stripWidth / tileW)),
+          );
+
+          const dpr = pixelRatio();
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.round(tileW * dpr);
+          canvas.height = Math.round(STRIP_HEIGHT * dpr);
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return;
+          ctx.imageSmoothingQuality = "high";
+
+          const thumbs: string[] = [];
+          for (let i = 0; i < tiles; i++) {
+            if (cancelled) return;
+            const frac = Math.min(1, ((i + 0.5) * tileW) / stripWidth);
+            const t = Math.min(el.duration - 0.05, frac * el.duration);
+            await new Promise<void>((resolve) => {
+              el.onseeked = () => resolve();
+              el.currentTime = Math.max(0, t);
+            });
+            ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
+            thumbs.push(canvas.toDataURL("image/jpeg", 0.82));
+            if (i % 3 === 2) setFilmstrip([...thumbs]);
+          }
+          if (!cancelled) setFilmstrip(thumbs);
+        } catch (err) {
+          console.error("[editor] filmstrip generation failed:", err);
+        } finally {
+          el.removeAttribute("src");
+          el.load();
         }
-        if (!cancelled) setFilmstrip(thumbs);
-      } catch (err) {
-        console.error("[editor] filmstrip generation failed:", err);
-      } finally {
-        v.removeAttribute("src");
-        v.load();
-      }
-    })();
+      })();
+    }, 220);
 
     return () => {
       cancelled = true;
+      clearTimeout(timer);
+      if (v) {
+        v.removeAttribute("src");
+        v.load();
+      }
     };
-  }, [frameSrc, unitCount]);
+  }, [frameSrc, unitCount, stripWidth]);
 
   /**
    * Draw the hovered frame into the preview card — the iOS-scrubber move.
@@ -373,6 +433,21 @@ export function TimelapseEditor({
     const v = scrubVideoRef.current;
     const canvas = previewCanvasRef.current;
     if (!v || !canvas || !v.duration) return;
+
+    // Size the backing store to device pixels once the video's real
+    // dimensions are known. Skipping this is what makes a preview look
+    // soft on a retina display: CSS scales a half-resolution bitmap up.
+    if (v.videoWidth) {
+      const dpr = pixelRatio();
+      const aspect = v.videoWidth / Math.max(1, v.videoHeight);
+      const wantW = Math.round(PREVIEW_W * dpr);
+      const wantH = Math.round((PREVIEW_W / aspect) * dpr);
+      if (canvas.width !== wantW || canvas.height !== wantH) {
+        canvas.width = wantW;
+        canvas.height = wantH;
+      }
+    }
+
     scrubWantRef.current = unitF;
     if (scrubBusyRef.current) return;
 
@@ -390,6 +465,7 @@ export function TimelapseEditor({
         const ctx = canvas.getContext("2d");
         if (ctx) {
           try {
+            ctx.imageSmoothingQuality = "high";
             ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
           } catch {
             // Tainted — leave the card blank rather than throwing.
@@ -924,9 +1000,14 @@ export function TimelapseEditor({
             {frameSrc && (
               <canvas
                 ref={previewCanvasRef}
-                width={PREVIEW_W}
-                height={PREVIEW_H}
-                style={{ display: "block", width: "100%", height: PREVIEW_H }}
+                // Backing store is resized to device pixels on first draw
+                // (see requestScrubFrame); CSS keeps the box at the
+                // source aspect ratio so the frame is never squashed.
+                style={{
+                  display: "block",
+                  width: "100%",
+                  aspectRatio: String(tileAspect),
+                }}
               />
             )}
             <div
@@ -1000,15 +1081,30 @@ export function TimelapseEditor({
               border: `1px solid ${colors.border.default}`,
             }}
           >
-            <div style={{ position: "absolute", inset: 0, display: "flex" }}>
+            {/* Whole frames at the source aspect ratio, tiled left to
+                right. Fixed width (not flex) is the point: stretching
+                tiles to fill would distort them, and `cover` would crop
+                them. The final tile runs past the edge and is clipped. */}
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                pointerEvents: "none",
+              }}
+            >
               {filmstrip.map((url, i) => (
-                <div
+                <img
                   key={i}
+                  src={url}
+                  alt=""
+                  draggable={false}
                   style={{
-                    flex: 1,
-                    backgroundImage: `url(${url})`,
-                    backgroundSize: "cover",
-                    backgroundPosition: "center",
+                    width: tileWidth,
+                    height: "100%",
+                    flex: "0 0 auto",
+                    objectFit: "fill",
+                    display: "block",
                   }}
                 />
               ))}
