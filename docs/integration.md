@@ -447,34 +447,39 @@ Notes:
 
 ## Edits and cuts
 
-Users can **edit** a completed timelapse in the official clients: they select
-wall-clock stretches of the recording to remove ("cuts"), and Lookout removes
-those minutes from the published video, the `/timings` heartbeats, and
-`trackedSeconds` — consistently, from one stored cut list of
-`{start, end}` intervals.
+When a user stops a recording, the official clients offer three choices:
+keep recording, save as recorded, or **review and cut first**. If they
+choose to edit, they mark wall-clock stretches to remove and Lookout drops
+those minutes from the video, the `/timings` heartbeats, and
+`trackedSeconds` — all from one stored list of `{start, end}` intervals.
 
 What this means for your program:
 
-- **Nothing in your integration changes.** `trackedSeconds` and `/timings`
-  already reflect the user's edits. If you forward `/timings` to Hackatime as
-  described above, cut minutes are simply absent from the heartbeat array.
-- **Cuts only ever shrink the numbers.** A user cannot gain time by editing —
-  removing footage removes its credit. The pre-edit value is available as
-  `uncutTrackedSeconds`, and the intervals themselves as `cuts`, on
-  `GET /api/sessions/:token` (and `?includeCut=true` on `/timings` returns
-  the removed timestamps) if you want to audit or display them.
-- **Re-editing is time-boxed.** Users can revise or clear their cuts for up
-  to 7 days after their last edit; then the uncut original video is deleted
-  (the cut content is meant to be gone — think "I accidentally recorded my
-  bank tab") and the edit becomes final.
-- **Opting out of the UI:** the hosted web recorder hides the edit button
-  when the session URL carries `?edit=false`; `<LookoutRecorder editing={false}>`
-  does the same in the React SDK. The API itself stays available to the
-  token holder either way.
-- Forward heartbeats **after** the user is done editing when possible (e.g.
-  when you accept a submission) — if you forwarded earlier and the user then
-  cuts, re-fetch `/timings` and reconcile, since Hackatime won't know about
-  the removal.
+- **Nothing in your integration changes, and nothing you read ever changes
+  underneath you.** Editing happens *before* the session reaches
+  `complete`: a session being edited stays `stopped`, and only flips to
+  `complete` once the user's cuts are baked in. So the first time you see a
+  finished session, its video, `trackedSeconds`, and `/timings` are final.
+  There is no post-publication editing.
+- **The lifecycle you observe is unchanged.** `stopped → compiling →
+  complete` (or `stopped → complete`), exactly as before — an edit just
+  means the session sits in `stopped` a little longer. The redirect hook
+  still fires when the session completes, which is now also the moment the
+  edits are in.
+- **An abandoned edit can't strand a timelapse.** The hold expires after 30
+  minutes and the session publishes as recorded. It can delay publication,
+  never cancel it. If you poll, treat a long `stopped` exactly as you
+  always have.
+- **Cuts only ever shrink the numbers.** A user cannot gain time by
+  editing — removing footage removes its credit. The pre-edit value is
+  available as `uncutTrackedSeconds` and the intervals as `cuts` on
+  `GET /api/sessions/:token`; `?includeCut=true` on `/timings` returns the
+  removed timestamps, if you want to audit or display them.
+- **Cut footage is deleted immediately** once the edited timelapse
+  publishes — the point of a cut is usually "I didn't mean to record that."
+- **Opting out of the review step:** add `?edit=false` to the hosted
+  recorder URL, or pass `<LookoutRecorder editing={false} />` in the React
+  SDK. Stopping is then a single click, as before.
 
 ## Client telemetry
 

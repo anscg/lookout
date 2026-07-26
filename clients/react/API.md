@@ -183,7 +183,7 @@ const { state, actions } = useLookout();
 | `stopSharing` | `() => void` | Stop capture source without stopping session (auto-pauses) |
 | `pause` | `() => Promise<void>` | Pause the session |
 | `resume` | `() => Promise<void>` | Resume a paused session |
-| `stop` | `(options?: { name?: string }) => Promise<void>` | Stop the session and trigger compilation. Optionally name the timelapse before stopping. |
+| `stop` | `(options?: { name?: string; edit?: boolean }) => Promise<void>` | Stop the session and trigger compilation. Optionally name it first. `edit: true` holds it unpublished so the user can cut it before programs see it. |
 | `selectCamera` | `(deviceId: string) => void` | Select a camera device by ID. Works during preview and recording. |
 | `startPreview` | `() => Promise<void>` | Acquire camera stream for live preview without starting the capture loop. Camera mode only. |
 | `stopPreview` | `() => void` | Stop the preview stream. Camera mode only. |
@@ -334,7 +334,7 @@ const session = useSession();
 | `error` | `string \| null` | Error message |
 | `pause` | `() => Promise<void>` | Pause the session |
 | `resume` | `() => Promise<void>` | Resume the session |
-| `stop` | `(name?: string) => Promise<void>` | Stop the session. Optionally name the timelapse before stopping (non-fatal if rename fails). |
+| `stop` | `(name?: string, opts?: { edit?: boolean }) => Promise<void>` | Stop the session. Optionally name it first (non-fatal if rename fails). `edit: true` requests an edit hold. |
 | `reload` | `() => Promise<void>` | Re-fetch session from server |
 | `syncStatus` | `() => Promise<void>` | Best-effort fetch of latest server status (used when a 409 surfaces in the uploader to reconcile local state) |
 | `updateTrackedSeconds` | `(seconds: number) => void` | Update tracked seconds locally |
@@ -472,9 +472,14 @@ Drop-in recorder widget. Handles the full lifecycle: capture, upload, pause/resu
 
 | Prop | Type | Description |
 |------|------|-------------|
-| `editing` | `boolean?` | Offer the cut editor on completed timelapses (default `true`). Pass `false` to hide the affordance. |
+| `editing` | `boolean?` | Offer "Edit & save" when stopping (default `true`). Pass `false` to keep stopping a single click. |
 
 Everything else is read from context.
+
+**Stopping** opens a `<StopChoiceModal>` with three ways out: keep
+recording, stop and save, or edit and save. Choosing to edit stops the
+session with a hold, so it compiles without publishing, and swaps the view
+for a `<TimelapseEditor>` until the user publishes.
 
 **Renders based on status:**
 - `loading` — spinner
@@ -705,26 +710,48 @@ Full session detail view with video player, stats, and compilation polling. Stan
 | `apiBaseUrl` | `string` | Server API base URL |
 | `onBack` | `() => void?` | Back button handler |
 | `onArchive` | `() => void?` | Archive button handler |
+| `onEdit` | `() => void?` | Override the review panel's "Edit & save" — open your own editor surface instead of the inline one |
 
-When the session is `complete` and still editable, the header shows an **Edit**
-button that swaps the view for a `<TimelapseEditor>`; applying edits returns to
-the detail view and polls the cut-compile back to `complete`.
+A session in its **edit hold** (stopped with `edit`, not yet published)
+renders a review panel instead of the compile spinner: "Edit & save" opens
+the editor, "Publish as recorded" ends the hold immediately, and a
+countdown shows when it publishes on its own. Pass `onEdit` to open your
+own editor surface (the desktop app opens a separate window).
+
+---
+
+### `<StopChoiceModal>`
+
+The stop confirmation: keep recording, stop and save, or edit and save.
+Rendered automatically by `<LookoutRecorder>`; exported for custom
+recorders.
+
+**Props (`StopChoiceModalProps`):**
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `onResume` | `() => void` | Keep recording |
+| `onStopAndSave` | `(name: string \| null) => void` | Stop and publish as recorded |
+| `onEditAndSave` | `((name: string \| null) => void)?` | Stop with a hold, then edit. Omit to hide the option |
+| `withName` | `boolean?` | Show a name field (default `false`) |
+| `loading` | `boolean?` | Disable inputs while the stop is in flight |
 
 ---
 
 ### `<TimelapseEditor>`
 
-Post-compile cut editor. Previews the **uncut original** video (1 second of
-video = 1 capture unit = 1 real-world minute), lets the user drag out cut
-regions on a filmstrip timeline, and applies them via a fast server-side
-cut-compile (usually a lossless stream copy). Standalone (no provider needed).
+The "Edit & save" step. The session is compiled but deliberately
+**unpublished**, so nothing downstream has consumed it yet; this previews
+that video (1 second = 1 capture unit = 1 real-world minute), lets the user
+drag out cut regions on a filmstrip timeline, and publishes — with the cuts
+baked in (a lossless server-side stream copy) or without them. Standalone
+(no provider needed).
 
 ```tsx
 <TimelapseEditor
   token="..."
   apiBaseUrl="https://lookout.hackclub.com"
   onApplied={() => refetchStatus()}
-  onCancel={() => setEditing(false)}
 />
 ```
 
@@ -734,8 +761,11 @@ cut-compile (usually a lossless stream copy). Standalone (no provider needed).
 |------|------|-------------|
 | `token` | `string` | Session token |
 | `apiBaseUrl` | `string` | Server API base URL |
-| `onApplied` | `() => void?` | Cuts were saved and the cut-compile started — return to your detail view and poll `/status` |
-| `onCancel` | `() => void?` | User backed out without applying |
+| `onApplied` | `() => void?` | The timelapse was published — return to your detail view and poll `/status` |
+| `onCancel` | `() => void?` | Optional "not now". The session stays held and publishes itself when the hold expires, so nothing is lost. Omit where publishing should be an explicit choice |
+
+It polls while the preview is still compiling, and shows a countdown to the
+hold's auto-publish (getting louder in the last two minutes).
 
 **Interactions:**
 - **Drag on the filmstrip** creates a cut region in one gesture (edges snap to
@@ -828,13 +858,13 @@ const session = await client.getSession();
 | `uploadToR2` | `(uploadUrl, blob) => Promise<void>` | PUT blob to presigned URL |
 | `pause` | `() => Promise<PauseResponse>` | Pause session |
 | `resume` | `() => Promise<ResumeResponse>` | Resume session |
-| `stop` | `() => Promise<StopResponse>` | Stop session |
+| `stop` | `(opts?: { edit?: boolean }) => Promise<StopResponse>` | Stop session; `edit: true` holds it for editing before publication |
 | `rename` | `(name: string) => Promise<RenameSessionResponse>` | Rename the timelapse |
 | `getStatus` | `() => Promise<StatusResponse>` | Poll compilation status |
 | `getVideo` | `() => Promise<VideoResponse>` | Get video URL |
-| `getUnits` | `() => Promise<UnitsResponse>` | Editor metadata: unit map, cuts, presigned original-video URL |
-| `setCuts` | `(cuts: CutInterval[]) => Promise<SetCutsResponse>` | Replace the session's cut list (`[]` clears) |
-| `applyCuts` | `() => Promise<ApplyCutsResponse>` | Apply the cut list to the published video (cut-compile) |
+| `getUnits` | `() => Promise<UnitsResponse>` | Editor metadata: unit map, cuts, presigned preview-video URL |
+| `setCuts` | `(cuts: CutInterval[]) => Promise<SetCutsResponse>` | Replace the session's cut list (`[]` clears). Only during an edit hold |
+| `applyCuts` | `() => Promise<ApplyCutsResponse>` | Publish the held timelapse with its cuts baked in |
 
 ---
 

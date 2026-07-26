@@ -150,11 +150,18 @@ export interface UnitsResponse {
   units: VideoUnit[];
   /** Current cut list ([] = no edits). */
   cuts: CutInterval[];
-  /** Whether the session can (still) be edited: original video present,
-   *  recompile budget remaining. */
+  /** Whether the session is currently editable: an edit hold is active,
+   *  the original video is built, and recompile budget remains. Editing is
+   *  only possible during the hold — never after `complete`. */
   editable: boolean;
   /** Why `editable` is false (for UX copy); absent when editable. */
-  editableReason?: "no_original" | "recompiles_exhausted" | "not_complete";
+  editableReason?:
+    | "no_original"
+    | "recompiles_exhausted"
+    | "not_ready"
+    | "published";
+  /** When the edit hold auto-publishes; null when no hold is active. */
+  editHoldUntil?: string | null;
   /** Presigned GET URL (~1h) of the UNCUT original video — the editor's
    *  preview source. Token-gated by this endpoint; deliberately NOT the
    *  public media URL, which after an edit serves the cut version only.
@@ -246,10 +253,21 @@ export interface ResumeResponse {
   serverTime?: string;
 }
 
+export interface StopRequest {
+  /** Hold the session unpublished after compiling so the user can edit
+   *  (cut) it before programs see `complete`. The hold auto-publishes
+   *  after EDIT_HOLD_MINUTES if the user walks away. Only send this when
+   *  the stopping client can render the editor. */
+  edit?: boolean;
+}
+
 export interface StopResponse {
   status: "stopped";
   trackedSeconds: number;
   totalActiveSeconds: number;
+  /** When the edit hold auto-publishes; present only when the stop
+   *  requested `edit: true`. */
+  editHoldUntil?: string;
 }
 
 export interface StatusResponse {
@@ -263,8 +281,15 @@ export interface StatusResponse {
   /** Redirect hook URL — clients watching the compile open this when the
    *  status flips to "complete". Absent when the session has none. */
   redirectUrl?: string;
-  /** Whether the compiled timelapse can (still) be edited. */
+  /** Whether the session is editable RIGHT NOW: an edit hold is active and
+   *  its preview video has finished building. Only ever true while
+   *  `stopped` — never after `complete`, which is the point at which
+   *  programs consume the session's data. */
   editable?: boolean;
+  /** When the edit hold auto-publishes the session (uncut). Absent when no
+   *  hold is active. While this is set and `editable` is false, the
+   *  preview is still compiling — show "preparing", not "done". */
+  editHoldUntil?: string;
 }
 
 export interface VideoResponse {

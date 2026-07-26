@@ -360,7 +360,7 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     }
   }, [session.resume]);
 
-  const stop = useCallback(async (options?: { name?: string }) => {
+  const stop = useCallback(async (options?: { name?: string; edit?: boolean }) => {
     if (stopInFlightRef.current) return;
     stopInFlightRef.current = true;
     if (intervalRef.current) {
@@ -372,7 +372,7 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     capturingRef.current = false;
     capture.stopSharing();
     try {
-      await session.stop(options?.name);
+      await session.stop(options?.name, { edit: options?.edit });
       callbacksRef.current.onStop?.({
         trackedSeconds: session.trackedSeconds,
         totalActiveSeconds: session.totalActiveSeconds,

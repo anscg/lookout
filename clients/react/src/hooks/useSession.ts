@@ -142,7 +142,7 @@ export function useSession() {
     }
   }, [client, syncStatus]);
 
-  const stop = useCallback(async (name?: string) => {
+  const stop = useCallback(async (name?: string, opts?: { edit?: boolean }) => {
     // Optionally name the timelapse before stopping (non-fatal if it fails)
     if (name) {
       try {
@@ -156,7 +156,7 @@ export function useSession() {
     const RETRY_DELAYS = [1000, 2000, 4000];
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const data = await client.stop();
+        const data = await client.stop(opts);
         setState((s) => ({
           ...s,
           status: data.status,

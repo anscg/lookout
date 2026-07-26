@@ -28,9 +28,12 @@ import { colors, fontSize, fontWeight, radii, spacing } from "../ui/theme.js";
 export interface TimelapseEditorProps {
   token: string;
   apiBaseUrl: string;
-  /** Cuts were saved and the cut-compile started (or applied instantly).
+  /** The timelapse was published — with cuts baked in, or without them.
    *  The caller should return to its detail view and poll status. */
   onApplied?: () => void;
+  /** Optional "not now" escape. The timelapse stays held and publishes
+   *  itself when the hold expires, so this never loses anything. Omit it
+   *  in flows where publishing must be an explicit choice. */
   onCancel?: () => void;
 }
 
@@ -53,13 +56,16 @@ type DragState =
   | null;
 
 /**
- * Post-compile cut editor. Previews the UNCUT original video (1 second of
- * video = 1 capture unit = 1 real-world minute), lets the user drag out cut
- * regions on the timeline, and applies them via a fast server-side
- * cut-compile. Regions are first-class objects: draggable edges, selection,
- * delete key. A plain click on the timeline seeks; playback skips cut
- * regions so previewing shows the published result, while scrubbing passes
- * through them (dimmed) so cut edges can be judged.
+ * The "Edit & Save" step of stopping a recording. The session is compiled
+ * but deliberately UNPUBLISHED (held), so nothing downstream has consumed
+ * it yet; this view previews that video (1 second = 1 capture unit = 1
+ * real-world minute), lets the user drag out cut regions, and publishes —
+ * with the cuts baked in, or without them.
+ *
+ * Regions are first-class objects: draggable edges, selection, delete key.
+ * A plain click on the timeline seeks; playback skips cut regions so
+ * previewing shows the published result, while scrubbing passes through
+ * them (dimmed) so cut edges can be judged.
  */
 export function TimelapseEditor({
   token,
@@ -93,31 +99,70 @@ export function TimelapseEditor({
   const unitCount = units.length;
 
   // ── Load ────────────────────────────────────────────────────
+  // The preview video is built by the compile that ran at stop; while it's
+  // still building, /units reports the hold with editable=false. Poll until
+  // it's ready rather than sending the user away.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const load = async () => {
       try {
         const res = await client.getUnits();
         if (cancelled) return;
-        if (!res.editable || !res.originalVideoUrl) {
-          setLoadError(
-            res.editableReason === "recompiles_exhausted"
-              ? "This timelapse has reached its edit limit."
-              : "This timelapse can no longer be edited.",
-          );
+        if (res.editable && res.originalVideoUrl) {
+          setData(res);
+          setRegions(cutsToRegions(res.cuts, res.units));
           return;
         }
-        setData(res);
-        setRegions(cutsToRegions(res.cuts, res.units));
+        if (res.editableReason === "no_original" && res.editHoldUntil) {
+          // Still compiling inside the hold — check back shortly.
+          timer = setTimeout(load, 2000);
+          return;
+        }
+        setLoadError(
+          res.editableReason === "published"
+            ? "This timelapse has already been published, so it can't be edited."
+            : res.editableReason === "recompiles_exhausted"
+              ? "This timelapse has reached its edit limit."
+              : "This timelapse isn't available for editing.",
+        );
       } catch (err) {
         if (!cancelled)
           setLoadError(err instanceof Error ? err.message : String(err));
       }
-    })();
+    };
+
+    void load();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [client]);
+
+  // ── Hold countdown ──────────────────────────────────────────
+  // The session publishes itself when the hold expires. Surface the
+  // deadline (and bail out gracefully once it passes) instead of letting
+  // a Save silently 409.
+  const holdUntilMs = data?.editHoldUntil ? Date.parse(data.editHoldUntil) : null;
+  const [holdSecondsLeft, setHoldSecondsLeft] = useState<number | null>(null);
+  useEffect(() => {
+    if (holdUntilMs === null) return;
+    const tick = () => {
+      const left = Math.max(0, Math.round((holdUntilMs - Date.now()) / 1000));
+      setHoldSecondsLeft(left);
+      if (left === 0) {
+        // Auto-published underneath us — the timelapse is safe, just no
+        // longer editable.
+        setLoadError(
+          "The edit window closed, so your timelapse was published as recorded.",
+        );
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [holdUntilMs]);
 
   // ── Playhead tracking (rAF for a smooth 60fps playhead) ─────
   useEffect(() => {
@@ -401,22 +446,16 @@ export function TimelapseEditor({
     }
   }, [unitCount]);
 
-  // ── Save ────────────────────────────────────────────────────
-  const initialRegions = useMemo(
-    () => (data ? cutsToRegions(data.cuts, data.units) : []),
-    [data],
-  );
-  const isDirty = useMemo(
-    () => JSON.stringify(normalizeRegions(regions)) !== JSON.stringify(initialRegions),
-    [regions, initialRegions],
-  );
-
+  // ── Publish ─────────────────────────────────────────────────
   const save = useCallback(async () => {
     if (!data) return;
     setSaving(true);
     setSaveError(null);
     try {
       const cuts = regionsToCuts(normalizeRegions(regionsRef.current), data.units);
+      // Always write the list — an empty one is a meaningful "publish it
+      // as recorded" — then publish. The server bakes cuts in before the
+      // session ever reaches `complete`.
       await client.setCuts(cuts);
       await client.applyCuts();
       onApplied?.();
@@ -466,7 +505,7 @@ export function TimelapseEditor({
           fontSize: fontSize.md,
         }}
       >
-        <Spinner size="sm" /> Loading editor…
+        <Spinner size="sm" /> Preparing your timelapse…
       </div>
     );
   }
@@ -820,7 +859,7 @@ export function TimelapseEditor({
           )}
           {onCancel && (
             <Button variant="secondary" size="sm" onClick={onCancel} disabled={saving}>
-              Cancel
+              Not now
             </Button>
           )}
           <Button
@@ -828,27 +867,37 @@ export function TimelapseEditor({
             size="sm"
             onClick={save}
             loading={saving}
-            disabled={!isDirty || allCut}
-            title={
-              allCut
-                ? "You can't remove the entire timelapse"
-                : !isDirty
-                  ? "No changes to apply"
-                  : undefined
-            }
+            disabled={allCut}
+            title={allCut ? "You can't remove the entire timelapse" : undefined}
           >
-            {saving ? "Applying…" : "Save & apply"}
+            {saving
+              ? "Saving…"
+              : removedUnits > 0
+                ? "Save & publish"
+                : "Publish as recorded"}
           </Button>
         </div>
       </div>
 
-      {saveError && <ErrorDisplay error={saveError} variant="banner" title="Couldn't apply edits" />}
+      {saveError && (
+        <ErrorDisplay error={saveError} variant="banner" title="Couldn't save your edits" />
+      )}
 
-      {data.recompilesRemaining <= 2 && (
-        <div style={{ fontSize: fontSize.xs, color: colors.text.tertiary }}>
-          {data.recompilesRemaining} edit
-          {data.recompilesRemaining === 1 ? "" : "s"} remaining for this
-          timelapse.
+      {/* The hold is the promise that nothing gets lost — say so plainly,
+          and get louder as it runs out. */}
+      {holdSecondsLeft !== null && (
+        <div
+          style={{
+            fontSize: fontSize.xs,
+            color:
+              holdSecondsLeft < 120 ? colors.status.warning : colors.text.tertiary,
+          }}
+        >
+          {holdSecondsLeft < 120
+            ? `Publishing automatically in ${holdSecondsLeft}s — save now to keep your cuts.`
+            : `Not published yet. If you close this, it publishes as recorded in ${Math.round(
+                holdSecondsLeft / 60,
+              )} min.`}
         </div>
       )}
     </div>

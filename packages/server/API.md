@@ -417,22 +417,35 @@ Stops a session and enqueues video compilation if screenshots exist.
 |------|------|-------------|
 | `token` | string | 64-char hex session token |
 
+**Body (optional):**
+```json
+{ "edit": true }
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `edit` | boolean | Hold the timelapse unpublished after it compiles so the owner can cut it first. See [Edits (Cuts)](#edits-cuts). Omit for today's behavior. |
+
 **Response `200 OK`:**
 ```json
 {
   "status": "stopped",
   "trackedSeconds": 123,
-  "totalActiveSeconds": 300
+  "totalActiveSeconds": 300,
+  "editHoldUntil": "2026-07-26T14:35:00.000Z"
 }
 ```
+
+`editHoldUntil` is present only when the stop requested `edit: true` and the session actually has captures to edit.
 
 **Errors:**
 - `404` — Session not found
 - `409` — Session already in terminal state
 
 **Notes:**
-- Marks session `complete` immediately if no screenshots exist (skips compilation)
+- Marks session `failed` immediately if no screenshots exist (skips compilation), regardless of `edit`
 - Accumulates any remaining active time
+- Only send `edit: true` from a client that can render the editor. The hold auto-publishes when it expires, so an abandoned edit still yields a timelapse — but a client that requests a hold and then never shows an editor makes the user wait for no reason.
 
 ---
 
@@ -539,7 +552,7 @@ Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the
 
 ### Edits (Cuts)
 
-A completed timelapse can be **edited** by its owner: an edit is a **cut list** of absolute wall-clock intervals of the session that are removed from every output —
+When a user stops a recording they can review it before it goes out. An edit is a **cut list** of absolute wall-clock intervals of the session that are removed from every output —
 
 ```json
 [
@@ -558,9 +571,26 @@ Cuts are intervals (not video offsets) because Lookout is heartbeat-based — th
 
 **Membership rule:** a capture is cut iff its timestamp ∈ `[start, end)` of any interval. Granularity is effectively whole minutes (one capture unit ≈ one minute ≈ one second of video).
 
-**Mechanics:** the first compile always produces the **uncut original** video and records its unit map. Applying cuts is a *cut-compile*: a lossless stream-copy of the kept ranges of the original (seconds, even for 12-hour sessions; no quality loss; works after the 7-day screenshot purge). The original stays reachable only through the session token; **7 days after the last cut-compile** the retention job deletes the original of edited sessions, so the cut content is truly gone and editing freezes. Cutting can only *reduce* tracked time — there is no fraud surface.
+#### Editing happens before publication, never after
 
-Session responses (`GET /:token`, `/status`, internal) carry `cuts`, `cutSeconds`, `uncutTrackedSeconds`, and `editable`.
+`complete` is the status programs act on — forwarding heartbeats to Hackatime, accepting a submission, firing the redirect hook. So a session reaches `complete` **exactly once, with its cuts already applied**. There is no post-publication editing: the data a program reads is final the first time it sees it.
+
+That is what the **edit hold** is for. `POST /stop` with `{"edit": true}` marks the session; it compiles as usual, but the worker leaves it `stopped` with `videoUrl` still null instead of publishing. During the hold the owner previews the built video, sets a cut list, and publishes. The lifecycle programs observe is unchanged — `stopped → compiling → complete`, or `stopped → complete` when there was nothing to cut.
+
+```
+stop {edit:true} ─> stopped (hold, compiling internally)
+                      ├─ PUT /cuts … then POST /compile ─> compiling ─> complete
+                      ├─ POST /compile with no cuts ────────────────────> complete
+                      └─ hold expires (30 min) ────────────────────────> complete
+```
+
+The hold can only **delay** publication, never cancel it: if the user closes the app mid-edit, a background job publishes the timelapse as recorded when the hold expires. A stop without `{"edit": true}` behaves exactly as it always has, so existing clients are unaffected.
+
+**Mechanics:** the compile always produces the **uncut original** and records its unit map. Publishing with cuts is a lossless stream-copy of the kept ranges (seconds, even for 12-hour sessions, no quality loss), after which the uncut original is **deleted immediately** — cut content does not outlive the publish. Publishing without cuts just points the session at the original, with no worker round-trip.
+
+Cutting can only *reduce* tracked time — there is no fraud surface.
+
+Session responses (`GET /:token`, `/status`, internal) carry `cuts`, `cutSeconds`, `uncutTrackedSeconds`, `editable`, and `editHoldUntil`.
 
 #### Get Editor Units
 
@@ -576,14 +606,16 @@ Editor metadata. Rate limit: 10 req/min per token.
   "units": [ { "capturedAt": "2026-07-26T14:00:12.000Z", "screenshotId": "…" } ],
   "cuts": [],
   "editable": true,
+  "editHoldUntil": "2026-07-26T14:35:00.000Z",
   "originalVideoUrl": "https://…presigned, ~1h…",
   "recompilesRemaining": 5
 }
 ```
 
 - `units` — the capture units of the compiled **original** video, in output order. Array index = video second = real-world minute: the exact video-time ↔ wall-clock map.
-- `originalVideoUrl` — presigned GET for the UNCUT original (the editor's preview source). Deliberately not the public media URL: after an edit, cut content exists only here, gated by the secret token. `null` when not editable.
-- `editable` / `editableReason` — `false` with `"not_complete"`, `"no_original"` (compiled before edit support, or original purged), or `"recompiles_exhausted"`.
+- `originalVideoUrl` — presigned GET for the unpublished original (the editor's preview source). Deliberately not the public media URL, which is null until the session publishes. `null` when not editable.
+- `editable` / `editableReason` — `false` with `"no_original"` (the preview is still compiling — poll, since `editHoldUntil` is set), `"not_ready"` (no hold, or it lapsed), `"published"` (already `complete`, so editing is over), or `"recompiles_exhausted"`.
+- `editHoldUntil` — when the session auto-publishes; `null` when no hold is active.
 
 #### Set Cut List
 
@@ -592,7 +624,7 @@ PUT /api/sessions/:token/cuts
 Body: { "cuts": [{ "start": ISO-8601, "end": ISO-8601 }, …] }
 ```
 
-Replaces the whole cut list (idempotent; `[]` clears all edits). Only valid while `complete` and editable. The server normalizes (sorts, merges overlaps, clamps to the session envelope, caps at 120 intervals) and rejects a list that would remove **every** unit. Takes effect in `/timings` and `trackedSeconds` immediately; the published video updates on the next compile call. Rate limit: 20 req/min per token.
+Replaces the whole cut list (idempotent; `[]` clears all edits). **Only valid during an active edit hold** — a published session is immutable. The server normalizes (sorts, merges overlaps, clamps to the session envelope, caps at 120 intervals) and rejects a list that would remove **every** unit. The cuts are baked into the video by the publish call below. Rate limit: 20 req/min per token.
 
 **Response `200 OK`:**
 ```json
@@ -607,16 +639,21 @@ Replaces the whole cut list (idempotent; `[]` clears all edits). Only valid whil
 
 **Errors:** `400` invalid/entire-timelapse cut list · `409` compiling or not editable · `429` rate limit.
 
-#### Apply Cuts (Cut-Compile)
+#### Publish (End the Hold)
 
 ```
 POST /api/sessions/:token/compile
 ```
 
-Applies the current cut list to the published video. Flips the session `complete → compiling → complete` (poll [`/status`](#poll-compilation-status)); usually completes in seconds. Clearing all cuts when the original is already published returns `{ "instant": true }` with no compile. Each non-instant call burns one of **5** recompiles per session. Rate limit: 5 req/min per token.
+Ends the edit hold and publishes the timelapse with the current cut list baked in.
+
+- **With cuts:** `stopped → compiling → complete` (poll [`/status`](#poll-compilation-status)); the worker stream-copies the kept ranges, usually in seconds, then deletes the uncut original. Burns one of **5** publishes per session.
+- **Without cuts:** returns `{ "instant": true, "status": "complete" }` immediately — the built original is simply published, no worker involved.
+
+Rate limit: 5 req/min per token.
 
 **Response `200 OK`:** `{ "status": "compiling" | "complete", "instant": boolean, "recompilesRemaining": number }`
-**Errors:** `202` already compiling (safe to retry/poll) · `409` not editable or budget exhausted · `429` rate limit.
+**Errors:** `202` publish already running (safe to retry/poll) · `409` hold lapsed or not editable · `429` rate limit. Calling it on an already-published session is a no-op `200` with `instant: true`, so a client racing the expiry job never sees a spurious failure.
 
 ---
 

@@ -11,6 +11,89 @@ import { Card } from "../ui/Card.js";
 import { Badge } from "../ui/Badge.js";
 import { statusConfig, colors, spacing, fontSize, fontWeight, radii } from "../ui/theme.js";
 
+/**
+ * Shown while a session sits in its edit hold: compiled, but deliberately
+ * unpublished so the owner can cut it before anything downstream consumes
+ * it. Both exits are one click, and doing nothing publishes it anyway —
+ * the hold can delay publication, never cancel it.
+ */
+function HoldPanel({
+  editable,
+  holdUntil,
+  onEdit,
+  onPublish,
+}: {
+  editable: boolean;
+  holdUntil: string;
+  onEdit: () => void;
+  onPublish: () => void | Promise<void>;
+}) {
+  const [secondsLeft, setSecondsLeft] = useState(() =>
+    Math.max(0, Math.round((Date.parse(holdUntil) - Date.now()) / 1000)),
+  );
+  const [publishing, setPublishing] = useState(false);
+  useEffect(() => {
+    const id = setInterval(
+      () =>
+        setSecondsLeft(
+          Math.max(0, Math.round((Date.parse(holdUntil) - Date.now()) / 1000)),
+        ),
+      1000,
+    );
+    return () => clearInterval(id);
+  }, [holdUntil]);
+
+  const minutesLeft = Math.max(1, Math.round(secondsLeft / 60));
+
+  return (
+    <Card padding={spacing.lg} style={{ marginBottom: spacing.lg }}>
+      <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text.primary }}>
+        {editable ? "Ready to review" : "Preparing your timelapse…"}
+      </div>
+      <div
+        style={{
+          fontSize: fontSize.md,
+          color: colors.text.secondary,
+          marginTop: spacing.xs,
+          marginBottom: spacing.lg,
+        }}
+      >
+        {editable
+          ? "Cut out anything you don't want to share, then save. Nothing is published until you do."
+          : "Your recording is compiling. You'll be able to trim it in a moment."}
+        {" "}
+        {secondsLeft > 0 && (
+          <span style={{ color: secondsLeft < 120 ? colors.status.warning : colors.text.tertiary }}>
+            {secondsLeft < 120
+              ? `Publishing automatically in ${secondsLeft}s.`
+              : `Publishes automatically in ${minutesLeft} min.`}
+          </span>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: spacing.sm }}>
+        <Button variant="primary" size="md" onClick={onEdit} disabled={!editable || publishing}>
+          Edit &amp; save
+        </Button>
+        <Button
+          variant="secondary"
+          size="md"
+          loading={publishing}
+          onClick={async () => {
+            setPublishing(true);
+            try {
+              await onPublish();
+            } finally {
+              setPublishing(false);
+            }
+          }}
+        >
+          Publish as recorded
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 export interface SessionDetailProps {
   token: string;
   apiBaseUrl: string;
@@ -159,16 +242,6 @@ export function SessionDetail({
           </Button>
         )}
         <div style={{ display: "flex", gap: spacing.sm }}>
-          {status?.status === "complete" && status.editable && !editing && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => (onEdit ? onEdit() : setEditing(true))}
-              style={cardButtonStyle}
-            >
-              Edit
-            </Button>
-          )}
           {onArchive && (
             <Button variant="secondary" size="sm" onClick={onArchive} style={cardButtonStyle}>
               Archive
@@ -190,30 +263,52 @@ export function SessionDetail({
             apiBaseUrl={apiBaseUrl}
             onCancel={() => setEditing(false)}
             onApplied={() => {
-              // Back to the detail view; the status poll below picks up
-              // "compiling" and flips to the re-published video. Reset the
-              // cached video URL so the edited MP4 is re-fetched.
+              // Publishing flips the session compiling → complete (or
+              // straight to complete when there were no cuts); the poll
+              // below picks it up. Drop the cached URL so the published
+              // MP4 is re-fetched.
               setEditing(false);
               setVideoUrl(null);
-              setStatus((prev) =>
-                prev ? { ...prev, status: "compiling" } : prev,
-              );
               fetchStatus();
             }}
           />
         </div>
       )}
 
+      {/* Edit hold: the recording is compiled but deliberately not
+          published yet, so this is the user's one chance to cut it. */}
+      {status && !editing && status.editHoldUntil && (
+        <HoldPanel
+          editable={status.editable === true}
+          holdUntil={status.editHoldUntil}
+          onEdit={() => (onEdit ? onEdit() : setEditing(true))}
+          onPublish={async () => {
+            try {
+              await fetch(`${apiBaseUrl}/api/sessions/${token}/compile`, {
+                method: "POST",
+              });
+            } catch {
+              // Non-fatal: the hold publishes on its own if this fails.
+            }
+            fetchStatus();
+          }}
+        />
+      )}
+
       {status && !editing && (
         <>
-          {/* Video area */}
-          <div style={{ marginBottom: spacing.lg, borderRadius: radii.lg, overflow: "hidden" }}>
-            <ProcessingState
-              status={status.status}
-              trackedSeconds={status.trackedSeconds}
-              videoUrl={videoUrl}
-            />
-          </div>
+          {/* Video area. Suppressed during an edit hold: the session reads
+              as "stopped", but showing a compile spinner under a panel that
+              says "ready to review" would contradict it. */}
+          {!status.editHoldUntil && (
+            <div style={{ marginBottom: spacing.lg, borderRadius: radii.lg, overflow: "hidden" }}>
+              <ProcessingState
+                status={status.status}
+                trackedSeconds={status.trackedSeconds}
+                videoUrl={videoUrl}
+              />
+            </div>
+          )}
 
           {/* Session name + date */}
           {sessionInfo && (

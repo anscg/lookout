@@ -10,6 +10,7 @@ import {
   CLEANUP_SCREENSHOTS_JOB,
 } from "./queue.js";
 import { cleanupRateLimits } from "./timing.js";
+import { publishHeldSession } from "./publish.js";
 import {
   AUTO_PAUSE_AFTER_MINUTES,
   AUTO_STOP_AFTER_MINUTES,
@@ -50,8 +51,53 @@ export async function registerTimeoutJobs() {
   });
 }
 
+/**
+ * Publish sessions whose edit hold ran out. This is the promise that makes
+ * the "Edit & Save" flow safe to offer: a user who closes the app mid-edit
+ * still gets their timelapse, uncut, within EDIT_HOLD_MINUTES — the hold
+ * can delay publication, never cancel it.
+ */
+async function publishExpiredHolds() {
+  const expired = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.status, "stopped"),
+        isNotNull(schema.sessions.editHoldUntil),
+        lt(schema.sessions.editHoldUntil, new Date()),
+      ),
+    );
+
+  for (const session of expired) {
+    // The original exists once the build lands; if the compile is still
+    // running (or failed), leave the row alone — the build path publishes
+    // directly when it finds no live hold, and the stuck-compiling timeout
+    // covers genuine failures.
+    const published = await publishHeldSession(session.id);
+    if (published) {
+      console.log(`[edit-hold] auto-published ${session.id} (hold expired)`);
+    } else {
+      // No original yet: drop the hold so the next compile publishes
+      // normally instead of the session sitting in limbo.
+      await db
+        .update(schema.sessions)
+        .set({ editHoldUntil: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            eq(schema.sessions.status, "stopped"),
+            isNull(schema.sessions.originalVideoR2Key),
+          ),
+        );
+    }
+  }
+}
+
 async function checkTimeouts() {
   const now = new Date();
+
+  await publishExpiredHolds();
 
   // Auto-pause: active sessions with no screenshots for AUTO_PAUSE_AFTER_MINUTES
   const autoPauseThreshold = new Date(

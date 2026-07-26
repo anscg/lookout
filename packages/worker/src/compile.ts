@@ -465,10 +465,10 @@ export async function compileTimelapse(sessionId: string): Promise<{
     // Both assembly paths land on the pinned 1s closed-GOP grid.
     const videoCopyAligned = true;
 
-    // Step 4.25: apply cuts, if any. First compiles never have cuts (they're
-    // only settable on complete sessions) — this branch covers recompiles of
-    // sessions that lost their original (e.g. internal recompile of a failed
-    // edited compile).
+    // Step 4.25: apply cuts, if any. A first compile normally has none —
+    // cuts are authored during the edit hold, after this build hands the
+    // user a preview. This branch covers a re-run that lost its original
+    // (e.g. an internal recompile of a failed edited compile).
     const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
     const keptRanges = computeKeptRanges(unitTimesMs, cuts);
     const hasEffectiveCuts =
@@ -534,7 +534,15 @@ export async function compileTimelapse(sessionId: string): Promise<{
         )
       : 0;
 
-    // Step 6: Mark complete
+    // Step 6: Publish — or hold.
+    //
+    // A session stopped with `{edit: true}` must NOT reach `complete` yet:
+    // that status is what programs act on (forwarding heartbeats, accepting
+    // submissions, firing the redirect hook), so it may only appear once
+    // the user's cuts are baked in. Such a session goes back to `stopped`
+    // with everything built but `video_r2_key` still null — the editor
+    // opens on the original, and either the user's publish call or the
+    // hold-expiry job flips it to `complete`.
     const thumbnailUrl = R2_PUBLIC_DOMAIN
       ? `https://${R2_PUBLIC_DOMAIN}/${thumbnailR2Key}`
       : thumbnailR2Key;
@@ -543,12 +551,22 @@ export async function compileTimelapse(sessionId: string): Promise<{
       ? `https://${R2_PUBLIC_DOMAIN}/${publishR2Key}`
       : publishR2Key;
 
+    // Re-read the hold: the user may have let it lapse (or the expiry job
+    // may have cleared it) during the minutes this build was running.
+    const [current] = await db
+      .select({ editHoldUntil: schema.sessions.editHoldUntil })
+      .from(schema.sessions)
+      .where(eq(schema.sessions.id, sessionId));
+    const holdActive =
+      current?.editHoldUntil != null &&
+      current.editHoldUntil.getTime() > Date.now();
+
     await db
       .update(schema.sessions)
       .set({
-        status: "complete",
-        videoUrl,
-        videoR2Key: publishR2Key,
+        status: holdActive ? "stopped" : "complete",
+        videoUrl: holdActive ? null : videoUrl,
+        videoR2Key: holdActive ? null : publishR2Key,
         originalVideoR2Key: originalR2Key,
         videoUnits,
         videoCopyAligned,
@@ -559,6 +577,12 @@ export async function compileTimelapse(sessionId: string): Promise<{
         updatedAt: new Date(),
       })
       .where(eq(schema.sessions.id, sessionId));
+
+    if (holdActive) {
+      console.log(
+        `Session ${sessionId} built and held for editing until ${current!.editHoldUntil!.toISOString()}`,
+      );
+    }
 
     // Step 7: Cleanup unsampled screenshots from R2
     const unsampled = await db
@@ -599,10 +623,16 @@ export async function compileTimelapse(sessionId: string): Promise<{
 }
 
 /**
- * Half B of the compile job: the original video and its unit map already
- * exist, so apply (or clear) the session's cut list against it. Downloads a
- * single MP4, cuts it (usually a lossless stream copy), regenerates the
- * thumbnail, and republishes — no capture units involved.
+ * Half B of the compile job: bake the user's cuts into the already-built
+ * original and PUBLISH the session. Downloads a single MP4, cuts it
+ * (usually a lossless stream copy), regenerates the thumbnail, and flips
+ * the session `complete` — no capture units involved.
+ *
+ * This is the end of the edit hold, so the uncut original is deleted right
+ * after: the cut minutes are gone the moment the timelapse goes out, not
+ * seven days later. Recovering an edited session afterwards (admin
+ * recompile) falls back to Half A, which rebuilds from capture units and
+ * applies the same cut list.
  */
 async function applyCutCompile(
   session: typeof schema.sessions.$inferSelect,
@@ -701,15 +731,25 @@ async function applyCutCompile(
       videoUrl,
       videoR2Key: publishR2Key,
       cutSeconds,
-      // Cleared cuts stay [] (the user's choice); the window anchor still
-      // advances so the retention job eventually reclaims the original of a
-      // session that was ever edited.
+      // The hold ends here — the session is published and its numbers are
+      // final for every program reading them.
+      editHoldUntil: null,
+      // Cut content must not outlive the publish: once the edited video is
+      // out, the uncut original is deleted below and its key cleared.
+      ...(hasEffectiveCuts ? { originalVideoR2Key: null } : {}),
       lastEditCompileAt: new Date(),
       thumbnailUrl,
       thumbnailR2Key,
       updatedAt: new Date(),
     })
     .where(eq(schema.sessions.id, sessionId));
+
+  // Delete the uncut original only AFTER the edited video is published and
+  // the row committed — if this ordering flipped, a crash in between would
+  // leave a session pointing at bytes that no longer exist.
+  if (hasEffectiveCuts) {
+    await deleteObjectQuiet(originalR2Key);
+  }
 
   return { videoUrl, videoR2Key: publishR2Key, thumbnailUrl, thumbnailR2Key };
 }
