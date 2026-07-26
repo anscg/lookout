@@ -6,12 +6,11 @@ import {
   useState,
 } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import type { UnitsResponse } from "@lookout/shared";
+import type { CutInterval, UnitsResponse } from "@lookout/shared";
 import { createLookoutClient, type LookoutClient } from "../api/client.js";
 import {
   cutsToRegions,
   cutUnitCount,
-  formatUnitsDuration,
   gapIndices,
   normalizeRegions,
   regionAtTime,
@@ -27,6 +26,7 @@ import { useEditLease } from "../hooks/useEditLease.js";
 import { compileEstimateMs, estimateBuildProgress } from "../hooks/buildProgress.js";
 import { injectEditorStyles } from "./editorStyles.js";
 import { Button } from "../ui/Button.js";
+import { MinutesFlow } from "../ui/MinutesFlow.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ProgressRing } from "../ui/ProgressRing.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
@@ -38,10 +38,14 @@ export interface TimelapseEditorProps {
   /** The timelapse was published — with cuts baked in, or without them.
    *  The caller should return to its detail view and poll status. */
   onApplied?: () => void;
-  /** Optional "not now" escape. The session stays held and publishes
-   *  itself when the hold expires, so this never loses anything. Omit it
-   *  in flows where publishing must be an explicit choice. */
+  /** Dismiss the editor. Only offered when it can't load — there is no
+   *  "leave without deciding" exit, because closing the editor is itself
+   *  the decision: the session publishes. */
   onCancel?: () => void;
+  /** Fired whenever the cut list changes, with the normalized list and
+   *  whether it differs from what's saved. Lets a host (the desktop
+   *  window) publish the current edit when the user closes it. */
+  onCutsChange?: (cuts: CutInterval[], dirty: boolean) => void;
 }
 
 const STRIP_HEIGHT = 56;
@@ -94,6 +98,7 @@ export function TimelapseEditor({
   apiBaseUrl,
   onApplied,
   onCancel,
+  onCutsChange,
 }: TimelapseEditorProps) {
   const client = useMemo<LookoutClient>(
     () => createLookoutClient({ baseUrl: apiBaseUrl, token }),
@@ -525,13 +530,26 @@ export function TimelapseEditor({
     dragRef.current = null;
     if (!drag) return;
     if (drag.kind === "maybe") {
+      // A plain click on open track: seek there and drop any selection.
       seekTo(drag.downUnitF);
       setSelected(null);
       return;
     }
     if (drag.kind === "region") {
-      setRegions((prev) => normalizeRegions(prev));
-      setSelected(null);
+      // Keep the region selected after the gesture. Clearing it here meant
+      // a selection could never outlive the click that made it, so "Remove
+      // cut" was unreachable. Normalizing can merge regions and shift
+      // indices, so re-find the one the gesture ended on rather than
+      // trusting the old index.
+      const dragged = regionsRef.current[drag.index];
+      const next = normalizeRegions(regionsRef.current);
+      setRegions(next);
+      const idx = dragged
+        ? next.findIndex(
+            (r) => dragged.startUnit >= r.startUnit && dragged.startUnit < r.endUnit,
+          )
+        : -1;
+      setSelected(idx >= 0 ? idx : null);
     }
   }, [seekTo]);
 
@@ -644,6 +662,17 @@ export function TimelapseEditor({
   const inCutNow = regionAtTime(time, normalized) !== null;
   const pct = (u: number) => `${(u / Math.max(1, unitCount)) * 100}%`;
 
+  // Keep the host informed of the working cut list, so closing the
+  // window can publish exactly what's on screen.
+  const onCutsChangeRef = useRef(onCutsChange);
+  onCutsChangeRef.current = onCutsChange;
+  useEffect(() => {
+    if (!data) return;
+    const cuts = regionsToCuts(normalized, data.units);
+    const saved = JSON.stringify(data.cuts ?? []);
+    onCutsChangeRef.current?.(cuts, JSON.stringify(cuts) !== saved);
+  }, [normalized, data]);
+
   // ── Render ──────────────────────────────────────────────────
   if (loadError) {
     return (
@@ -676,10 +705,7 @@ export function TimelapseEditor({
         }}
       >
         {preparingUnits !== null ? (
-          <ProgressRing
-            progress={buildProgress}
-            label={`${Math.min(99, Math.floor(buildProgress * 100))}%`}
-          />
+          <ProgressRing progress={buildProgress} showPercent />
         ) : (
           <Spinner size="lg" />
         )}
@@ -871,28 +897,6 @@ export function TimelapseEditor({
 
           <div style={{ flex: 1 }} />
 
-          <button
-            className="lk-ed-iconbtn"
-            onClick={cutHere}
-            style={{
-              height: 30,
-              borderRadius: radii.md,
-              padding: `0 ${spacing.md}px`,
-              gap: 6,
-              fontSize: fontSize.sm,
-              fontWeight: fontWeight.medium,
-              fontFamily: "inherit",
-            }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <circle cx="6" cy="6" r="3" />
-              <circle cx="6" cy="18" r="3" />
-              <line x1="20" y1="4" x2="8.12" y2="15.88" />
-              <line x1="14.47" y1="14.48" x2="20" y2="20" />
-              <line x1="8.12" y1="8.12" x2="12" y2="12" />
-            </svg>
-            Cut minute
-          </button>
         </div>
 
         {/* Timeline */}
@@ -1148,26 +1152,22 @@ export function TimelapseEditor({
             marginTop: spacing.xs,
           }}
         >
-          <div style={{ minWidth: 0 }}>
-            <div
-              style={{
-                fontSize: fontSize.lg,
-                color: colors.text.primary,
-                fontWeight: fontWeight.semibold,
-                letterSpacing: "-0.01em",
-              }}
-            >
-              {formatUnitsDuration(keptUnits)} kept
-              {removedUnits > 0 && (
-                <span style={{ color: colors.editor.cutBorder, fontWeight: fontWeight.medium }}>
-                  {" · "}
-                  {formatUnitsDuration(removedUnits)} removed
-                </span>
-              )}
-            </div>
-            <div style={{ fontSize: fontSize.xs, color: colors.text.tertiary, marginTop: 2 }}>
-              Drag the strip to cut · Space to preview · X to cut a minute
-            </div>
+          <div
+            style={{
+              minWidth: 0,
+              fontSize: fontSize.lg,
+              color: colors.text.primary,
+              fontWeight: fontWeight.semibold,
+              letterSpacing: "-0.01em",
+            }}
+          >
+            <MinutesFlow minutes={keptUnits} /> kept
+            {removedUnits > 0 && (
+              <span style={{ color: colors.editor.cutBorder, fontWeight: fontWeight.medium }}>
+                {" · "}
+                <MinutesFlow minutes={removedUnits} color={colors.editor.cutBorder} /> removed
+              </span>
+            )}
           </div>
 
           <div style={{ flex: 1, minWidth: spacing.md }} />
@@ -1196,11 +1196,6 @@ export function TimelapseEditor({
               Clear all
             </Button>
           )}
-          {onCancel && (
-            <Button variant="secondary" size="sm" onClick={onCancel} disabled={saving}>
-              Not now
-            </Button>
-          )}
           <Button
             variant="primary"
             size="sm"
@@ -1209,11 +1204,7 @@ export function TimelapseEditor({
             disabled={allCut}
             title={allCut ? "You can't remove the entire timelapse" : undefined}
           >
-            {saving
-              ? "Saving…"
-              : removedUnits > 0
-                ? "Save & publish"
-                : "Publish as recorded"}
+            {saving ? "Saving…" : "Save"}
           </Button>
         </div>
 

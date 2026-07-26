@@ -1,3 +1,4 @@
+import NumberFlow from "@number-flow/react";
 import { colors, fontSize, fontWeight } from "./theme.js";
 
 export interface ProgressRingProps {
@@ -5,8 +6,9 @@ export interface ProgressRingProps {
   progress: number;
   size?: number;
   strokeWidth?: number;
-  /** Centre label. Omit for a bare ring. */
-  label?: string;
+  /** Percentage shown in the centre, with rolling digits. Omit for a
+   *  bare ring. */
+  showPercent?: boolean;
   color?: string;
 }
 
@@ -18,7 +20,7 @@ export function ProgressRing({
   progress,
   size = 72,
   strokeWidth = 5,
-  label,
+  showPercent = false,
   color,
 }: ProgressRingProps) {
   const clamped = Math.max(0, Math.min(1, progress));
@@ -58,7 +60,7 @@ export function ProgressRing({
           style={{ transition: "stroke-dashoffset 0.25s linear" }}
         />
       </svg>
-      {label && (
+      {showPercent && (
         <div
           style={{
             position: "absolute",
@@ -72,7 +74,7 @@ export function ProgressRing({
             fontVariantNumeric: "tabular-nums",
           }}
         >
-          {label}
+          <NumberFlow value={Math.min(99, Math.floor(clamped * 100))} />%
         </div>
       )}
     </div>

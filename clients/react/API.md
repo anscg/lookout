@@ -802,7 +802,8 @@ baked in (a lossless server-side stream copy) or without them. Standalone
 | `token` | `string` | Session token |
 | `apiBaseUrl` | `string` | Server API base URL |
 | `onApplied` | `() => void?` | The timelapse was published — return to your detail view and poll `/status` |
-| `onCancel` | `() => void?` | Optional "not now". The session stays held and publishes itself when the hold expires, so nothing is lost. Omit where publishing should be an explicit choice |
+| `onCancel` | `() => void?` | Dismiss the editor. Only surfaced when it can't load; there is no "leave without deciding" exit |
+| `onCutsChange` | `((cuts, dirty) => void)?` | Fires on every cut-list change, so a host can publish the working edit when the user closes it |
 
 The editor normally opens **before** the preview video exists — the compile
 starts at stop and takes tens of seconds — so it polls through that state
@@ -926,7 +927,8 @@ The SDK exports styled UI primitives used by its components. All use inline styl
 |--------|-------------|
 | `Button` | Styled button with variants: `primary`, `secondary`, `success`, `warning`, `danger`, `ghost` and sizes: `sm`, `md`, `lg` |
 | `Spinner` | Loading spinner with sizes: `sm`, `md`, `lg` |
-| `ProgressRing` | Determinate circular progress (`progress` 0–1, optional centre `label`) — for waits long enough that a spinner under-informs |
+| `ProgressRing` | Determinate circular progress (`progress` 0–1, optional `showPercent`) — for waits long enough that a spinner under-informs |
+| `MinutesFlow` | A minute count with rolling digits (`@number-flow/react`), splitting into hours past 60 |
 | `Badge` | Status badge with variants: `default`, `overlay` |
 | `Card` | Styled card container |
 | `ErrorDisplay` | Error message display with variants: `inline`, `banner`, `page` |

@@ -96,7 +96,7 @@ export type {
 } from "./types.js";
 
 // Re-export shared types consumers need
-export type { SessionStatus, SessionSummary } from "@lookout/shared";
+export type { SessionStatus, SessionSummary, CutInterval } from "@lookout/shared";
 export { SESSION_STATUSES } from "@lookout/shared";
 
 // UI primitives
