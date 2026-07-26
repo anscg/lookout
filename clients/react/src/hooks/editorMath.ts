@@ -30,12 +30,29 @@ export function regionsToCuts(
 ): CutInterval[] {
   return regions
     .filter((r) => r.endUnit > r.startUnit)
-    .map((r) => ({
-      start: units[r.startUnit].capturedAt,
-      end: new Date(
-        Date.parse(units[r.endUnit - 1].capturedAt) + SCREENSHOT_INTERVAL_MS,
-      ).toISOString(),
-    }));
+    .map((r) => {
+      const lastCut = Date.parse(units[r.endUnit - 1].capturedAt);
+      const nextKept =
+        r.endUnit < units.length ? Date.parse(units[r.endUnit].capturedAt) : null;
+      // The end is exclusive, so anchoring it to the next KEPT capture's
+      // real timestamp excludes that capture exactly. Assuming a 60s
+      // stride instead was wrong: captures jitter (the server credits
+      // anything within ±30s of the mark), so a neighbour landing at +57s
+      // fell inside the interval and the server counted one more unit cut
+      // than the editor showed — enough, on a short recording, to look
+      // like the whole thing was selected.
+      //
+      // Still capped at one interval: across a pause the next capture can
+      // be hours later, and the cut shouldn't swallow that whole span.
+      const end =
+        nextKept === null
+          ? lastCut + SCREENSHOT_INTERVAL_MS
+          : Math.min(nextKept, lastCut + SCREENSHOT_INTERVAL_MS);
+      return {
+        start: units[r.startUnit].capturedAt,
+        end: new Date(end).toISOString(),
+      };
+    });
 }
 
 /**

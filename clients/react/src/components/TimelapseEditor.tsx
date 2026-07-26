@@ -6,11 +6,10 @@ import {
   useState,
 } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import type { CutInterval, UnitsResponse } from "@lookout/shared";
+import { countCutUnits, type CutInterval, type UnitsResponse } from "@lookout/shared";
 import { createLookoutClient, type LookoutClient } from "../api/client.js";
 import {
   cutsToRegions,
-  cutUnitCount,
   gapIndices,
   normalizeRegions,
   regionAtTime,
@@ -658,7 +657,23 @@ export function TimelapseEditor({
 
   // ── Derived display values ──────────────────────────────────
   const normalized = useMemo(() => normalizeRegions(regions), [regions]);
-  const removedUnits = cutUnitCount(normalized);
+  // Count what the SERVER will count. The footer used to count region
+  // widths in unit space while the server counted timestamp membership on
+  // the serialized intervals — so the two could disagree, and the editor
+  // would happily offer a Save the server then rejected. Same input, same
+  // shared function, no daylight between them.
+  const serializedCuts = useMemo(
+    () => (data ? regionsToCuts(normalized, data.units) : []),
+    [normalized, data],
+  );
+  const unitTimesMs = useMemo(
+    () => units.map((u) => Date.parse(u.capturedAt)),
+    [units],
+  );
+  const removedUnits = useMemo(
+    () => countCutUnits(unitTimesMs, serializedCuts),
+    [unitTimesMs, serializedCuts],
+  );
   const keptUnits = unitCount - removedUnits;
   const allCut = unitCount > 0 && keptUnits === 0;
   const gaps = useMemo(() => (data ? gapIndices(data.units) : []), [data]);
@@ -677,10 +692,12 @@ export function TimelapseEditor({
   onCutsChangeRef.current = onCutsChange;
   useEffect(() => {
     if (!data) return;
-    const cuts = regionsToCuts(normalized, data.units);
     const saved = JSON.stringify(data.cuts ?? []);
-    onCutsChangeRef.current?.(cuts, JSON.stringify(cuts) !== saved);
-  }, [normalized, data]);
+    onCutsChangeRef.current?.(
+      serializedCuts,
+      JSON.stringify(serializedCuts) !== saved,
+    );
+  }, [serializedCuts, data]);
 
   // ── Render ──────────────────────────────────────────────────
   if (loadError) {
@@ -741,8 +758,8 @@ export function TimelapseEditor({
             {preparingUnits !== null && preparingUnits > 0
               ? `Stitching ${preparingUnits} minute${
                   preparingUnits === 1 ? "" : "s"
-                } of footage. Nothing is published until you save.`
-              : "Nothing is published until you save."}
+                } of footage.`
+              : "oooooooooooo"}
           </div>
         </div>
       </div>
