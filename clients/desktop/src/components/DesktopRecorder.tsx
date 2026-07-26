@@ -87,7 +87,7 @@ function RecorderPreviewItem({
           color: colors.badge.overlayText, background: colors.badge.overlayBg,
           padding: "2px 6px", borderRadius: radii.sm,
         }}>
-          {showingLive ? "Live preview" : captureUrl ? "Latest capture" : "Live preview"}
+          {showingLive ? "Preview" : captureUrl ? "Latest capture" : "Preview"}
         </span>
       )}
     </div>
@@ -97,9 +97,8 @@ function RecorderPreviewItem({
 function formatTimeTray(totalSeconds: number): string {
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
-  
+
   if (h > 0) return `${h}h ${m}m`;
-  if (m === 0) return `< 1m`;
   return `${m}m`;
 }
 
@@ -364,7 +363,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
   // The Rust tray ticker is the authoritative source for the menu-bar title
   // and runs at 1s cadence; calling update_tray_time from JS every second
   // creates two writers fighting over the title, which produces the visible
-  // flicker between "<1m"/"1m" and "1m"/"2m" at the minute boundaries
+  // flicker between "0m"/"1m" and "1m"/"2m" at the minute boundaries
   // (JS interpolates to one second, Rust to another).
   //
   // We still split the writes:
@@ -515,7 +514,9 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
           </span>
         </div>
         <span style={{ fontSize: fontSize.md, color: colors.text.secondary }}>
-          {screenshotCount} {screenshotCount === 1 ? "screenshot" : "screenshots"}
+          {/* One capture unit per recorded minute — a JPEG screenshot on
+              legacy sessions, a ~15-frame clip on clips sessions. */}
+          {screenshotCount} {screenshotCount === 1 ? "capture" : "captures"}
         </span>
       </div>
 
@@ -558,7 +559,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
               color: colors.badge.overlayText, background: colors.badge.overlayBg,
               padding: "2px 6px", borderRadius: radii.sm,
             }}>
-              {windowFocused && !isCamera ? "Live preview" : "Latest capture"}
+              {windowFocused && !isCamera ? "Preview" : "Latest capture"}
             </span>
           </div>
         ) : (
