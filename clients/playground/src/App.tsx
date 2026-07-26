@@ -311,35 +311,59 @@ function ServerTruth({
     });
   }, [settings.apiBaseUrl, settings.token]);
 
+  // /status is the endpoint built for polling (60/min). /units presigns a
+  // URL and allows only 10/min, so it is fetched on load, when /status
+  // reports a change worth re-reading, and on demand — never on a timer.
+  const [unitsAt, setUnitsAt] = useState(0);
+  const lastUnitsRef = useRef(0);
+  const signatureRef = useRef("");
+
+  const loadUnits = useCallback(async () => {
+    // Hard floor between reads so no combination of triggers can walk
+    // into the limit.
+    if (Date.now() - lastUnitsRef.current < 6000) return;
+    lastUnitsRef.current = Date.now();
+    try {
+      const r = await fetch(
+        `${settings.apiBaseUrl}/api/sessions/${settings.token}/units`,
+      );
+      const u = (await r.json()) as Record<string, unknown>;
+      const { units: list, originalVideoUrl: _url, ...rest } = u;
+      setUnits({ ...rest, unitCount: Array.isArray(list) ? list.length : 0 });
+      setUnitsAt(Date.now());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [settings.apiBaseUrl, settings.token]);
+
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       try {
-        const [s, u] = await Promise.all([
-          fetch(`${settings.apiBaseUrl}/api/sessions/${settings.token}/status`).then((r) =>
-            r.json(),
-          ),
-          fetch(`${settings.apiBaseUrl}/api/sessions/${settings.token}/units`).then((r) =>
-            r.json(),
-          ),
-        ]);
+        const r = await fetch(
+          `${settings.apiBaseUrl}/api/sessions/${settings.token}/status`,
+        );
+        const s = (await r.json()) as Record<string, unknown>;
         if (cancelled) return;
         setError(null);
         setStatus(s);
-        // The unit list is long and not the interesting part.
-        const { units: list, originalVideoUrl, ...rest } = u as Record<string, unknown>;
-        setUnits({ ...rest, unitCount: Array.isArray(list) ? list.length : 0 });
+        // Re-read /units only when something that changes it changed.
+        const sig = `${s.status}:${s.editable}`;
+        if (sig !== signatureRef.current) {
+          signatureRef.current = sig;
+          void loadUnits();
+        }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
     };
     void tick();
-    const id = setInterval(tick, 2000);
+    const id = setInterval(tick, 3000);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [settings.apiBaseUrl, settings.token]);
+  }, [settings.apiBaseUrl, settings.token, loadUnits]);
 
   // Dry-run the cut list the editor most recently reported, so the
   // server's own arithmetic sits next to the editor's footer.
@@ -379,8 +403,9 @@ function ServerTruth({
         Server truth
       </div>
       <div style={{ fontSize: fontSize.xs, color: colors.text.tertiary, lineHeight: 1.5 }}>
-        Polled every 2s. Compare <code>editable</code> and the tracked-time
-        pair against what the editor shows.
+        <code>/status</code> every 3s; <code>/units</code> only on change
+        or demand (10/min limit). Compare <code>editable</code> and the
+        tracked-time pair against what the editor shows.
       </div>
 
       {error && <div style={{ ...box, color: colors.text.error }}>{error}</div>}
@@ -388,7 +413,27 @@ function ServerTruth({
       <Label>GET /status</Label>
       <div style={box}>{JSON.stringify(status, null, 1)}</div>
 
-      <Label>GET /units</Label>
+      <Label>
+        GET /units{" "}
+        <button
+          onClick={() => void loadUnits()}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: colors.text.secondary,
+            cursor: "pointer",
+            font: "inherit",
+            textDecoration: "underline",
+            padding: 0,
+          }}
+        >
+          refresh
+        </button>
+      </Label>
+      <div style={{ fontSize: fontSize.xs, color: colors.text.tertiary }}>
+        {unitsAt ? `read ${new Date(unitsAt).toLocaleTimeString()}` : "not read yet"}
+        {" · 10/min limit, so not polled"}
+      </div>
       <div style={box}>{JSON.stringify(units, null, 1)}</div>
 
       <Label>PUT /cuts</Label>

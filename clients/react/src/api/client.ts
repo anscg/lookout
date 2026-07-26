@@ -170,8 +170,32 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
       }
       if (!res.ok) {
         const text = await res.text().catch(() => "");
+        // R2 answers with S3-style XML. A bare "403" is unactionable and
+        // every cause has a different fix, so name the cause rather than
+        // making the next person bisect it.
+        const code = /<Code>([^<]+)<\/Code>/.exec(text)?.[1] ?? "";
+        const detail = /<Message>([^<]+)<\/Message>/.exec(text)?.[1] ?? "";
+        const hint =
+          code === "SignatureDoesNotMatch"
+            ? " The request didn't match the presigned URL — something between the client and R2 is altering the request (a proxy, or a rewritten method/headers)."
+            : code === "RequestTimeTooSkewed"
+              ? " The signing server's clock is off relative to R2; fix NTP on the API server."
+              : code === "AccessDenied" || /expire/i.test(detail)
+                ? " The presigned URL had expired (they last ~2 minutes) or the credentials can't write this key. A slow upload of a large clip can outrun the expiry."
+                : res.status === 403 && !text
+                  ? " Empty 403 body usually means CORS stripped the response: check the R2 bucket's CORS rules allow PUT from this origin."
+                  : "";
+        // The UI truncates; make the whole thing reachable in the console.
+        console.error("[lookout] R2 upload failed", {
+          status: res.status,
+          code,
+          detail,
+          body: text.slice(0, 1000),
+        });
         throw new Error(
-          `R2 upload failed: HTTP ${res.status}${text ? " — " + text.slice(0, 200) : ""}`,
+          `R2 upload failed: HTTP ${res.status}${code ? ` (${code})` : ""}${
+            detail ? ` — ${detail}` : text ? " — " + text.slice(0, 200) : ""
+          }${hint}`,
         );
       }
     },
