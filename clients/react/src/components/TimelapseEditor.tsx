@@ -21,6 +21,7 @@ import {
   type UnitRegion,
 } from "../hooks/editorMath.js";
 import { useEditLease } from "../hooks/useEditLease.js";
+import { compileEstimateMs, estimateBuildProgress } from "../hooks/buildProgress.js";
 import { injectEditorStyles } from "./editorStyles.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -55,11 +56,6 @@ const PREVIEW_W = 192;
  *  nothing visible here and triples the decode cost. */
 const pixelRatio = () =>
   Math.min(2, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
-/** Fixed cost of a compile: claim, sampling query, assembly, upload. */
-const COMPILE_BASE_MS = 6_000;
-/** Marginal cost per capture unit (download + 1s segment encode, across
- *  the worker's 8-way pool). Only used to size the progress estimate. */
-const COMPILE_MS_PER_UNIT = 350;
 
 type DragState =
   | { kind: "maybe"; downUnitF: number }
@@ -100,9 +96,15 @@ export function TimelapseEditor({
 
   const [data, setData] = useState<UnitsResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  /** Non-null while the preview video is still compiling. */
-  const [preparing, setPreparing] = useState<{ expectedUnits: number } | null>(null);
+  /** Unit count while the preview video is still compiling; null once it's
+   *  ready. Deliberately a NUMBER, not an object: the poll below re-sets it
+   *  every 1.5s, and a fresh object literal would change identity on every
+   *  poll, re-running the progress effect and restarting the ring at 0. */
+  const [preparingUnits, setPreparingUnits] = useState<number | null>(null);
   const [buildProgress, setBuildProgress] = useState(0);
+  /** Anchored once per preparing spell, so even a genuine change in the
+   *  unit count can't restart the estimate. */
+  const prepareStartRef = useRef<number | null>(null);
   const [regions, setRegions] = useState<UnitRegion[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [time, setTime] = useState(0);
@@ -141,13 +143,15 @@ export function TimelapseEditor({
         const res = await client.getUnits();
         if (cancelled) return;
         if (res.editable && res.originalVideoUrl) {
-          setPreparing(null);
+          setPreparingUnits(null);
           setData(res);
           setRegions(cutsToRegions(res.cuts, res.units));
           return;
         }
         if (res.editableReason === "preparing" || res.editableReason === "no_original") {
-          setPreparing({ expectedUnits: res.expectedUnits ?? 0 });
+          // Same number on every poll ⇒ React bails out, no re-render, and
+          // the progress effect below is left running undisturbed.
+          setPreparingUnits(res.expectedUnits ?? 0);
           timer = setTimeout(load, 1500);
           return;
         }
@@ -179,17 +183,21 @@ export function TimelapseEditor({
   // short of — 100%, and only completes when the real thing does; a ring
   // that sat at 100% while the user waited would be worse than none.
   useEffect(() => {
-    if (!preparing) return;
-    const startedAt = Date.now();
-    const estimateMs = COMPILE_BASE_MS + preparing.expectedUnits * COMPILE_MS_PER_UNIT;
+    if (preparingUnits === null) {
+      prepareStartRef.current = null;
+      return;
+    }
+    if (prepareStartRef.current === null) prepareStartRef.current = Date.now();
+    const startedAt = prepareStartRef.current;
+    const estimateMs = compileEstimateMs(preparingUnits);
     const tick = () => {
-      const elapsed = Date.now() - startedAt;
-      setBuildProgress(1 - Math.exp(-2.2 * (elapsed / estimateMs)));
+      const next = estimateBuildProgress(Date.now() - startedAt, estimateMs);
+      setBuildProgress((prev) => Math.max(prev, next));
     };
     tick();
     const id = setInterval(tick, 200);
     return () => clearInterval(id);
-  }, [preparing]);
+  }, [preparingUnits]);
 
   // ── Edit lease ──────────────────────────────────────────────
   // This editor being open IS the signal that editing is in progress, so
@@ -740,7 +748,7 @@ export function TimelapseEditor({
           padding: spacing.xl,
         }}
       >
-        {preparing ? (
+        {preparingUnits !== null ? (
           <ProgressRing
             progress={buildProgress}
             label={`${Math.min(99, Math.floor(buildProgress * 100))}%`}
@@ -768,9 +776,9 @@ export function TimelapseEditor({
               lineHeight: 1.5,
             }}
           >
-            {preparing && preparing.expectedUnits > 0
-              ? `Stitching ${preparing.expectedUnits} minute${
-                  preparing.expectedUnits === 1 ? "" : "s"
+            {preparingUnits !== null && preparingUnits > 0
+              ? `Stitching ${preparingUnits} minute${
+                  preparingUnits === 1 ? "" : "s"
                 } of footage. Nothing is published until you save.`
               : "Nothing is published until you save."}
           </div>
