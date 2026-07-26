@@ -36,6 +36,15 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       --color-archive-border: rgba(255, 255, 255, 0.1);
       --color-archive-hover-bg: rgba(255, 255, 255, 0.1);
       --color-archive-hover-border: rgba(255, 255, 255, 0.2);
+      /* Editor: a recessed well the footage sits in, and the removed-region
+         vocabulary. Deliberately translucent so the window's vibrancy still
+         reads through the chrome. */
+      --color-well: rgba(0, 0, 0, 0.45);
+      --color-well-border: rgba(255, 255, 255, 0.08);
+      --color-cut-fill: rgba(248, 113, 113, 0.26);
+      --color-cut-fill-hover: rgba(248, 113, 113, 0.36);
+      --color-cut-border: #f87171;
+      --color-track: rgba(255, 255, 255, 0.06);
     }
     @media (prefers-color-scheme: light) {
       :root:not([data-theme="dark"]) {
@@ -69,6 +78,12 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
         --color-archive-border: rgba(0, 0, 0, 0.1);
         --color-archive-hover-bg: rgba(255, 255, 255, 1);
         --color-archive-hover-border: rgba(0, 0, 0, 0.2);
+        --color-well: rgba(0, 0, 0, 0.10);
+        --color-well-border: rgba(0, 0, 0, 0.08);
+        --color-cut-fill: rgba(220, 38, 38, 0.20);
+        --color-cut-fill-hover: rgba(220, 38, 38, 0.30);
+        --color-cut-border: #dc2626;
+        --color-track: rgba(0, 0, 0, 0.06);
       }
     }
     :root[data-theme="light"] {
@@ -102,6 +117,12 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       --color-archive-border: rgba(0, 0, 0, 0.1);
       --color-archive-hover-bg: rgba(255, 255, 255, 1);
       --color-archive-hover-border: rgba(0, 0, 0, 0.2);
+      --color-well: rgba(0, 0, 0, 0.10);
+      --color-well-border: rgba(0, 0, 0, 0.08);
+      --color-cut-fill: rgba(220, 38, 38, 0.20);
+      --color-cut-fill-hover: rgba(220, 38, 38, 0.30);
+      --color-cut-border: #dc2626;
+      --color-track: rgba(0, 0, 0, 0.06);
     }`;
   document.head.appendChild(style);
 }
@@ -112,6 +133,16 @@ export const colors = {
   border: { default: "var(--color-border-default)", hover: "var(--color-border-hover)", selected: "var(--color-border-selected)" },
   icon: { selected: "var(--color-icon-selected)" },
   spinner: { base: "var(--color-spinner-base)", track: "var(--color-spinner-track)" },
+  /** Editor surfaces: the recessed well footage sits in, the timeline
+   *  track, and the removed-region vocabulary. */
+  editor: {
+    well: "var(--color-well)",
+    wellBorder: "var(--color-well-border)",
+    track: "var(--color-track)",
+    cutFill: "var(--color-cut-fill)",
+    cutFillHover: "var(--color-cut-fill-hover)",
+    cutBorder: "var(--color-cut-border)",
+  },
   skeleton: { bg: "var(--color-skeleton-bg)", shimmer: "var(--color-skeleton-shimmer)" },
   badge: { 
     primaryBg: "var(--color-badge-primary-bg)", 
