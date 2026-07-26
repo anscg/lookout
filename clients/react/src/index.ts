@@ -24,7 +24,7 @@ export { VideoPlayer } from "./components/VideoPlayer.js";
 
 // Gallery components
 export { Gallery } from "./components/Gallery.js";
-export type { GalleryProps } from "./components/Gallery.js";
+export type { GalleryProps, AddAnchor } from "./components/Gallery.js";
 export { SessionCard } from "./components/SessionCard.js";
 export type { SessionCardProps } from "./components/SessionCard.js";
 export { SessionDetail } from "./components/SessionDetail.js";

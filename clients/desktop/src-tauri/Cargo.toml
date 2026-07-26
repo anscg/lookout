@@ -21,6 +21,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Compiles swift/lookout-tray (SwiftUI menu-bar item with numericText digit
+# animation) and links it into the macOS binary; no-op on other targets.
+swift-rs = { version = "1.0.7", features = ["build"] }
 
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "devtools", "tray-icon", "image-png"] }

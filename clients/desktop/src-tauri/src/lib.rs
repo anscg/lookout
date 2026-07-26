@@ -1,6 +1,9 @@
 mod capture;
 mod clips;
 mod crop;
+mod native_menu;
+#[cfg(target_os = "macos")]
+mod native_tray;
 mod pipewire;
 mod screencast;
 mod tray;
@@ -2083,15 +2086,13 @@ const SLEEP_THRESHOLD_SECS: u64 = CAPTURE_INTERVAL_SECS * 2 + 30; // 150s
 const DEFAULT_FRAME_INTERVAL_MS: u64 = 4_000;
 
 /// Format seconds into the same tray title format as the JS side:
-/// >0h: "{h}h {m}m", 0m: "< 1m", else: "{m}m"
+/// >0h: "{h}h {m}m", else: "{m}m"
 fn format_tray_time(total_seconds: i64) -> String {
     let total = total_seconds.max(0) as u64;
     let h = total / 3600;
     let m = (total % 3600) / 60;
     if h > 0 {
         format!("{h}h {m}m")
-    } else if m == 0 {
-        "< 1m".to_string()
     } else {
         format!("{m}m")
     }
@@ -2140,6 +2141,14 @@ async fn tray_timer_task(
 
         let time_text = format_tray_time(display_seconds);
         if was_paused || last_title.as_deref() != Some(time_text.as_str()) {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = &app;
+                // None = keep the current pause state; the Swift side
+                // renders the tooltip and the numericText digit roll.
+                let _ = crate::native_tray::update(&time_text, None);
+            }
+            #[cfg(not(target_os = "macos"))]
             if let Some(tray) = app.tray_by_id("timelapse_tray") {
                 let _ = tray.set_title(Some(&time_text));
                 // Windows doesn't render tray titles — the hover tooltip is
@@ -3312,6 +3321,7 @@ pub fn run() {
             disable_vibrancy,
             is_wayland,
             open_external_url,
+            native_menu::show_add_menu,
             request_screencast,
             add_screencast,
             set_blacklisted_apps,

@@ -275,6 +275,11 @@ function rowHtml(p) {
   var nameCell = p.displayName
     ? esc(p.displayName) + '<br><span class="muted">' + esc(p.name) + "</span>"
     : esc(p.name);
+  if (p.iconUrl) {
+    nameCell = '<img src="' + esc(p.iconUrl) +
+      '" alt="" style="width:16px;height:16px;border-radius:4px;vertical-align:-3px;margin-right:6px">' +
+      nameCell;
+  }
   return "<tr>" +
     "<td>" + nameCell + "</td>" +
     "<td>" + urlHtml(p.newSessionUrl) + "</td>" +
@@ -289,6 +294,8 @@ function rowHtml(p) {
         '" data-current="' + esc(p.displayName || "") + '">set name</button>' +
       '<button class="secondary" data-url="' + esc(p.id) + '" data-name="' + esc(p.name) +
         '" data-current="' + esc(p.newSessionUrl || "") + '">set URL</button>' +
+      '<button class="secondary" data-icon="' + esc(p.id) + '" data-name="' + esc(p.name) +
+        '" data-current="' + esc(p.iconUrl || "") + '">set icon</button>' +
       '<button class="danger" data-del="' + esc(p.id) + '" data-name="' + esc(p.name) +
         '">delete</button></td>' +
     "</tr>";
@@ -484,6 +491,27 @@ rows.addEventListener("click", async function (ev) {
         newSessionUrl: next.trim(),
       });
       flash("Updated new-session URL.");
+      await load();
+    } catch (e) {
+      flash(e.message, true);
+    }
+    return;
+  }
+
+  var iconBtn = ev.target.closest("[data-icon]");
+  if (iconBtn) {
+    var currentIcon = iconBtn.getAttribute("data-current");
+    var nextIcon = prompt(
+      'Icon URL for "' + iconBtn.getAttribute("data-name") +
+        '" (small square logo; leave blank to clear):',
+      currentIcon,
+    );
+    if (nextIcon === null) return; // cancelled
+    try {
+      await api("PATCH", "/api/admin/programs/" + iconBtn.getAttribute("data-icon"), {
+        iconUrl: nextIcon.trim(),
+      });
+      flash("Updated icon URL.");
       await load();
     } catch (e) {
       flash(e.message, true);

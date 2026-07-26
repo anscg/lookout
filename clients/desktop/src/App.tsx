@@ -11,6 +11,7 @@ import {
   useTokenStore,
   useGallery,
   useHashRouter,
+  type AddAnchor,
 } from "@lookout/react";
 import { getVersion } from "@tauri-apps/api/app";
 import { isValidToken, extractToken } from "./utils.js";
@@ -33,6 +34,13 @@ import { getApiBase } from "./serverConfig.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
+
+interface Program {
+  name: string;
+  displayName?: string;
+  newSessionUrl: string;
+  iconUrl?: string | null;
+}
 
 /** Pause a session by token. Fire-and-forget, logs errors. */
 async function pauseSession(token: string): Promise<void> {
@@ -127,6 +135,70 @@ function MainWindowApp() {
   useEffect(() => {
     invoke<boolean>("is_wayland").then(setIsWayland).catch(() => {});
   }, []);
+
+  // Program registry cache for the + button's native popup menu. Warmed at
+  // launch and refreshed on every open so the menu appears instantly with
+  // whatever we have; the AddSessionPage stays the fallback (paste-a-link,
+  // empty registry, non-macOS).
+  const programsRef = React.useRef<Program[]>([]);
+  const fetchPrograms = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/programs`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.programs)) programsRef.current = data.programs;
+    } catch (e) {
+      console.warn("[programs] failed to load registry:", e);
+    }
+  }, []);
+  useEffect(() => {
+    void fetchPrograms();
+  }, [fetchPrograms]);
+
+  const handleAdd = useCallback(
+    async (anchor: AddAnchor) => {
+      const programs = programsRef.current;
+      void fetchPrograms(); // refresh behind the menu for next open
+      if (!isMacOS || programs.length === 0) {
+        navigate({ page: "add" });
+        return;
+      }
+      const entries = [
+        ...programs.map((p) => ({
+          id: `program:${p.name}`,
+          label: p.displayName || p.name,
+          // The symbol stays as the fallback while the icon loads or when a
+          // program has none.
+          symbol: "arrow.up.forward.app",
+          iconUrl: p.iconUrl ?? undefined,
+        })),
+        { separator: true },
+        { id: "create-new", label: "Create new timelapse", symbol: "plus" },
+      ];
+      let choice: string | null;
+      try {
+        choice = await invoke<string | null>("show_add_menu", { entries, anchor });
+      } catch (e) {
+        console.warn("[add-menu] native menu failed, falling back to page:", e);
+        navigate({ page: "add" });
+        return;
+      }
+      if (!choice) return; // dismissed
+      if (choice === "create-new") {
+        navigate({ page: "add" });
+        return;
+      }
+      const program = programs.find((p) => `program:${p.name}` === choice);
+      if (!program) return;
+      try {
+        await invoke("open_external_url", { url: program.newSessionUrl });
+      } catch (e) {
+        console.error("[add-menu] failed to open program url:", e);
+        navigate({ page: "add" });
+      }
+    },
+    [isMacOS, fetchPrograms, navigate],
+  );
 
   // Deep link handler -- saves token and navigates appropriately.
   // If currently recording another session, pauses it first.
@@ -356,7 +428,7 @@ function MainWindowApp() {
                 gallery.refresh();
               }
             }}
-            onAdd={() => navigate({ page: "add" })}
+            onAdd={handleAdd}
             // Always available: the Server subpage works everywhere; only the
             // Filtered Apps subpage is Wayland-restricted (it shows a notice).
             onSettings={() => navigate({ page: "settings" })}
@@ -401,6 +473,13 @@ function MainWindowApp() {
             key={route.token}
             token={route.token}
             apiBaseUrl={API_BASE}
+            onComplete={({ redirectUrl }) => {
+              // Redirect hook: the session's creator asked us to send the
+              // user somewhere once their timelapse is ready.
+              if (redirectUrl) {
+                invoke("open_external_url", { url: redirectUrl }).catch(() => {});
+              }
+            }}
             onBack={() => {
               gallery.refresh();
               navigate({ page: "gallery" });

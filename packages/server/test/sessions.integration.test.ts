@@ -907,3 +907,78 @@ describe("latency — sustained recording under jitter", () => {
     expect(c4.body.trackedSeconds).toBe(120); // +60 from the new streak
   });
 });
+
+// ────────────────────────────────────────────────────────────
+// Redirect hook — per-session URL opened by the client when the
+// timelapse finishes compiling
+// ────────────────────────────────────────────────────────────
+
+describe("redirect hook", () => {
+  async function makeApiKey(): Promise<string> {
+    const [row] = await db
+      .insert(schema.apiKeys)
+      .values({ name: `redirect-test-${Date.now()}-${Math.random()}` })
+      .returning({ key: schema.apiKeys.key });
+    return row.key;
+  }
+
+  it("internal create persists redirectUrl and public endpoints expose it", async () => {
+    const key = await makeApiKey();
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: { name: "redirect-on", redirectUrl: "https://example.com/done?id=42" },
+    });
+    expect(created.statusCode).toBe(201);
+    const { token, sessionId } = created.json();
+
+    const row = await loadSession(sessionId);
+    expect(row?.redirectUrl).toBe("https://example.com/done?id=42");
+
+    // Session-recovery fetch carries it.
+    const get = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().redirectUrl).toBe("https://example.com/done?id=42");
+
+    // Status poll (what clients watch during compile) carries it.
+    const status = await app.inject({ method: "GET", url: `/api/sessions/${token}/status` });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().redirectUrl).toBe("https://example.com/done?id=42");
+  });
+
+  it("defaults to null and is absent from the status response", async () => {
+    const key = await makeApiKey();
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: { name: "no-redirect" },
+    });
+    expect(created.statusCode).toBe(201);
+    const { token, sessionId } = created.json();
+
+    const row = await loadSession(sessionId);
+    expect(row?.redirectUrl).toBeNull();
+
+    const status = await app.inject({ method: "GET", url: `/api/sessions/${token}/status` });
+    expect(status.statusCode).toBe(200);
+    expect("redirectUrl" in status.json()).toBe(false);
+  });
+
+  it("rejects non-http(s) redirect URLs", async () => {
+    const key = await makeApiKey();
+
+    for (const bad of ["javascript:alert(1)", "file:///etc/passwd", "not-a-url"]) {
+      const r = await app.inject({
+        method: "POST",
+        url: "/api/internal/sessions",
+        headers: { "x-api-key": key },
+        payload: { name: "bad-redirect", redirectUrl: bad },
+      });
+      expect(r.statusCode).toBe(400);
+    }
+  });
+});

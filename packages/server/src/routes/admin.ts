@@ -59,6 +59,20 @@ function normalizeNewSessionUrl(raw: unknown): string | null | undefined {
   return trimmed;
 }
 
+// Same validation for a program's icon URL: empty/whitespace clears it,
+// anything else must be http(s).
+function normalizeIconUrl(raw: unknown): string | null | undefined {
+  if (raw === undefined) return undefined; // not provided → leave unchanged
+  if (raw === null) return null;
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (!/^https?:\/\//i.test(trimmed)) {
+    throw new Error("iconUrl must be an http(s) URL");
+  }
+  return trimmed;
+}
+
 // Trim a display name; empty/whitespace means "unset" (NULL → falls back to
 // the raw program name). `undefined` means "leave unchanged" on patch.
 function normalizeDisplayName(raw: unknown): string | null | undefined {
@@ -75,6 +89,7 @@ const createProgramBodySchema = {
     name: { type: "string" as const, minLength: 1, maxLength: 255 },
     displayName: { type: "string" as const, maxLength: 255 },
     newSessionUrl: { type: "string" as const, maxLength: 2048 },
+    iconUrl: { type: "string" as const, maxLength: 2048 },
   },
   required: ["name"] as const,
   additionalProperties: false,
@@ -87,6 +102,8 @@ const patchProgramBodySchema = {
     newSessionUrl: { type: ["string", "null"] as const, maxLength: 2048 },
     // Pass "" to clear the display name (UIs fall back to the raw name).
     displayName: { type: ["string", "null"] as const, maxLength: 255 },
+    // Pass "" to clear the icon (pickers fall back to a generic glyph).
+    iconUrl: { type: ["string", "null"] as const, maxLength: 2048 },
   },
   additionalProperties: false,
 };
@@ -199,6 +216,7 @@ export async function adminRoutes(app: FastifyInstance) {
         name: schema.programs.name,
         displayName: schema.programs.displayName,
         newSessionUrl: schema.programs.newSessionUrl,
+        iconUrl: schema.programs.iconUrl,
         createdAt: schema.programs.createdAt,
       })
       .from(schema.programs)
@@ -325,6 +343,7 @@ export async function adminRoutes(app: FastifyInstance) {
         name: p.name,
         displayName: p.displayName,
         newSessionUrl: p.newSessionUrl,
+        iconUrl: p.iconUrl,
         createdAt: p.createdAt,
         keys: (keysByProgram.get(p.id) ?? []).map((k) => ({
           id: k.id,
@@ -368,7 +387,9 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // Create a program and its first API key.
-  app.post<{ Body: { name: string; displayName?: string; newSessionUrl?: string } }>(
+  app.post<{
+    Body: { name: string; displayName?: string; newSessionUrl?: string; iconUrl?: string };
+  }>(
     "/api/admin/programs",
     { schema: { body: createProgramBodySchema } },
     async (request, reply) => {
@@ -378,12 +399,14 @@ export async function adminRoutes(app: FastifyInstance) {
       }
       const displayName = normalizeDisplayName(request.body.displayName) ?? null;
       let newSessionUrl: string | null;
+      let iconUrl: string | null;
       try {
         newSessionUrl = normalizeNewSessionUrl(request.body.newSessionUrl) ?? null;
+        iconUrl = normalizeIconUrl(request.body.iconUrl) ?? null;
       } catch (e) {
         return reply
           .code(400)
-          .send({ error: e instanceof Error ? e.message : "invalid newSessionUrl" });
+          .send({ error: e instanceof Error ? e.message : "invalid URL" });
       }
 
       const existing = await db.query.programs.findFirst({
@@ -402,7 +425,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const result = await db.transaction(async (tx) => {
         const [program] = await tx
           .insert(schema.programs)
-          .values({ name, displayName, newSessionUrl })
+          .values({ name, displayName, newSessionUrl, iconUrl })
           .returning();
         const [key] = await tx
           .insert(schema.apiKeys)
@@ -416,6 +439,7 @@ export async function adminRoutes(app: FastifyInstance) {
         name: result.program.name,
         displayName: result.program.displayName,
         newSessionUrl: result.program.newSessionUrl,
+        iconUrl: result.program.iconUrl,
         key: result.key.key,
       });
     },
@@ -424,29 +448,40 @@ export async function adminRoutes(app: FastifyInstance) {
   // Update a program's display name and/or new-session URL (set or clear each).
   app.patch<{
     Params: { id: string };
-    Body: { newSessionUrl?: string | null; displayName?: string | null };
+    Body: {
+      newSessionUrl?: string | null;
+      displayName?: string | null;
+      iconUrl?: string | null;
+    };
   }>(
     "/api/admin/programs/:id",
     { schema: { params: programIdParamSchema, body: patchProgramBodySchema } },
     async (request, reply) => {
       let newSessionUrl: string | null | undefined;
+      let iconUrl: string | null | undefined;
       try {
         newSessionUrl = normalizeNewSessionUrl(request.body.newSessionUrl);
+        iconUrl = normalizeIconUrl(request.body.iconUrl);
       } catch (e) {
         return reply
           .code(400)
-          .send({ error: e instanceof Error ? e.message : "invalid newSessionUrl" });
+          .send({ error: e instanceof Error ? e.message : "invalid URL" });
       }
       const displayName = normalizeDisplayName(request.body.displayName);
 
       // Build a partial update from only the fields the caller provided.
-      const set: { newSessionUrl?: string | null; displayName?: string | null } = {};
+      const set: {
+        newSessionUrl?: string | null;
+        displayName?: string | null;
+        iconUrl?: string | null;
+      } = {};
       if (newSessionUrl !== undefined) set.newSessionUrl = newSessionUrl;
       if (displayName !== undefined) set.displayName = displayName;
+      if (iconUrl !== undefined) set.iconUrl = iconUrl;
       if (Object.keys(set).length === 0) {
         return reply
           .code(400)
-          .send({ error: "Provide newSessionUrl and/or displayName" });
+          .send({ error: "Provide newSessionUrl, displayName and/or iconUrl" });
       }
 
       const [updated] = await db
@@ -458,6 +493,7 @@ export async function adminRoutes(app: FastifyInstance) {
           name: schema.programs.name,
           displayName: schema.programs.displayName,
           newSessionUrl: schema.programs.newSessionUrl,
+          iconUrl: schema.programs.iconUrl,
         });
 
       if (!updated) {
