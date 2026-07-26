@@ -14,6 +14,7 @@ import {
   type AddAnchor,
 } from "@lookout/react";
 import { getVersion } from "@tauri-apps/api/app";
+import { ArrowSquareOutIcon, PlusIcon } from "@phosphor-icons/react";
 import { isValidToken, extractToken } from "./utils.js";
 import {
   checkCameraPermission,
@@ -29,6 +30,7 @@ import { useAppUpdate } from "./hooks/useAppUpdate.js";
 import { useAnnouncement } from "./hooks/useAnnouncement.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
 import { UpdatePill } from "./components/UpdatePill.js";
+import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.js";
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 import { getApiBase } from "./serverConfig.js";
 
@@ -148,29 +150,80 @@ function MainWindowApp() {
       const data = await res.json();
       if (Array.isArray(data.programs)) {
         programsRef.current = data.programs;
-        // Warm the native icon cache so the menu never opens with fallback
-        // symbols while images load.
+        // Warm the icon cache so the menu never opens with fallback symbols
+        // while images load — the Swift-side cache on macOS, the browser's
+        // HTTP cache for the DOM popup elsewhere.
         const urls = programsRef.current
           .map((p) => p.iconUrl)
           .filter((u): u is string => !!u);
         if (urls.length) {
-          invoke("prefetch_add_menu_icons", { urls }).catch(() => {});
+          if (isMacOS) {
+            invoke("prefetch_add_menu_icons", { urls }).catch(() => {});
+          } else {
+            for (const url of urls) new Image().src = url;
+          }
         }
       }
     } catch (e) {
       console.warn("[programs] failed to load registry:", e);
     }
-  }, []);
+  }, [isMacOS]);
   useEffect(() => {
     void fetchPrograms();
   }, [fetchPrograms]);
 
+  // Windows/Linux add menu — a DOM replica of the macOS NSPanel popup.
+  const [addMenu, setAddMenu] = useState<{ items: AddMenuPopupItem[]; anchor: AddAnchor } | null>(null);
+
+  /** Acts on an add-menu choice, from either the native panel or the DOM popup. */
+  const handleMenuChoice = useCallback(
+    async (choice: string | null) => {
+      if (!choice) return; // dismissed
+      if (choice === "create-new") {
+        navigate({ page: "add" });
+        return;
+      }
+      const program = programsRef.current.find((p) => `program:${p.name}` === choice);
+      if (!program) return;
+      try {
+        await invoke("open_external_url", { url: program.newSessionUrl });
+      } catch (e) {
+        console.error("[add-menu] failed to open program url:", e);
+        navigate({ page: "add" });
+      }
+    },
+    [navigate],
+  );
+
   const handleAdd = useCallback(
     async (anchor: AddAnchor) => {
+      // Clicking the + while the DOM popup is open toggles it closed (the
+      // popup ignores pointerdowns on the anchor so this click reaches us).
+      if (addMenu) {
+        setAddMenu(null);
+        return;
+      }
       const programs = programsRef.current;
       void fetchPrograms(); // refresh behind the menu for next open
-      if (!isMacOS || programs.length === 0) {
+      if (programs.length === 0) {
         navigate({ page: "add" });
+        return;
+      }
+      if (!isMacOS) {
+        setAddMenu({
+          items: [
+            ...programs.map((p) => ({
+              id: `program:${p.name}`,
+              label: p.displayName || p.name,
+              iconUrl: p.iconUrl ?? undefined,
+              // Stays visible while the icon loads or when a program has none.
+              fallbackIcon: <ArrowSquareOutIcon size={15} weight="bold" />,
+            })),
+            { separator: true },
+            { id: "create-new", label: "Create new timelapse", fallbackIcon: <PlusIcon size={15} weight="bold" /> },
+          ],
+          anchor,
+        });
         return;
       }
       const entries = [
@@ -193,21 +246,9 @@ function MainWindowApp() {
         navigate({ page: "add" });
         return;
       }
-      if (!choice) return; // dismissed
-      if (choice === "create-new") {
-        navigate({ page: "add" });
-        return;
-      }
-      const program = programs.find((p) => `program:${p.name}` === choice);
-      if (!program) return;
-      try {
-        await invoke("open_external_url", { url: program.newSessionUrl });
-      } catch (e) {
-        console.error("[add-menu] failed to open program url:", e);
-        navigate({ page: "add" });
-      }
+      await handleMenuChoice(choice);
     },
-    [isMacOS, fetchPrograms, navigate],
+    [isMacOS, addMenu, fetchPrograms, navigate, handleMenuChoice],
   );
 
   // Deep link handler -- saves token and navigates appropriately.
@@ -559,6 +600,20 @@ function MainWindowApp() {
           <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} origin="bottom" />
         </div>
       )}
+      {/* Windows/Linux + menu. Rendered here, outside the route transition's
+          transformed wrapper, so position:fixed anchors to the viewport. */}
+      <AnimatePresence>
+        {addMenu && (
+          <AddMenuPopup
+            items={addMenu.items}
+            anchor={addMenu.anchor}
+            onSelect={(choice) => {
+              setAddMenu(null);
+              void handleMenuChoice(choice);
+            }}
+          />
+        )}
+      </AnimatePresence>
       <div style={{
         flex: 1,
         overflow: "hidden",
