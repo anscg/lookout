@@ -25,6 +25,33 @@ struct AddMenuEntry: Decodable {
     var isSeparator: Bool { separator == true }
 }
 
+/// In-memory icon store, warmed via lookout_add_menu_prefetch_icons when the
+/// frontend loads the program registry — AsyncImage alone re-fetches on every
+/// open, which showed the fallback symbol for ~0.5s each time. Main-thread
+/// access only.
+final class AddMenuIconCache {
+    static let shared = AddMenuIconCache()
+    private var images: [String: NSImage] = [:]
+    private var inflight: Set<String> = []
+
+    func image(for url: String) -> NSImage? { images[url] }
+
+    func prefetch(_ urls: [String]) {
+        for u in urls where images[u] == nil && !inflight.contains(u) {
+            guard let url = URL(string: u) else { continue }
+            inflight.insert(u)
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                DispatchQueue.main.async {
+                    self.inflight.remove(u)
+                    if let data, let img = NSImage(data: data) {
+                        self.images[u] = img
+                    }
+                }
+            }.resume()
+        }
+    }
+}
+
 @available(macOS 12.0, *)
 final class AddMenuModel: ObservableObject {
     let entries: [AddMenuEntry]
@@ -101,7 +128,15 @@ private struct AddMenuRow: View {
     /// (and as the placeholder while the image loads or if it fails).
     @ViewBuilder
     private var icon: some View {
-        if let iconUrl = entry.iconUrl, let url = URL(string: iconUrl) {
+        if let iconUrl = entry.iconUrl, let cached = AddMenuIconCache.shared.image(for: iconUrl) {
+            Image(nsImage: cached)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .frame(width: 18, height: 18)
+        } else if let iconUrl = entry.iconUrl, let url = URL(string: iconUrl) {
+            // Cold miss (first open before the prefetch landed) — load in
+            // place, symbol as the placeholder.
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
                     image
@@ -319,6 +354,17 @@ final class AddMenuController: NSObject, NSWindowDelegate {
         }, completionHandler: {
             panel.orderOut(nil)
         })
+    }
+}
+
+@_cdecl("lookout_add_menu_prefetch_icons")
+public func lookoutAddMenuPrefetchIcons(_ urlsJson: UnsafePointer<CChar>) {
+    let json = String(cString: urlsJson)
+    DispatchQueue.main.async {
+        guard let data = json.data(using: .utf8),
+              let urls = try? JSONDecoder().decode([String].self, from: data)
+        else { return }
+        AddMenuIconCache.shared.prefetch(urls)
     }
 }
 

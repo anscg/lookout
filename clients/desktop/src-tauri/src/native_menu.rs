@@ -44,6 +44,14 @@ mod imp {
             h: f64,
             cb: extern "C" fn(*const c_char),
         );
+        fn lookout_add_menu_prefetch_icons(urls_json: *const c_char);
+    }
+
+    pub fn prefetch_icons(urls: &[String]) -> Result<(), String> {
+        let json = serde_json::to_string(urls).map_err(|e| e.to_string())?;
+        let json = CString::new(json).map_err(|e| e.to_string())?;
+        unsafe { lookout_add_menu_prefetch_icons(json.as_ptr()) };
+        Ok(())
     }
 
     /// Only one menu can be open; replacing the sender cancels the previous
@@ -87,6 +95,21 @@ mod imp {
             }
         }
         Ok(rx.await.unwrap_or(None))
+    }
+}
+
+/// Warm the Swift-side icon cache so the menu never shows fallback symbols
+/// for programs whose icons are known ahead of time. No-op off macOS.
+#[tauri::command]
+pub fn prefetch_add_menu_icons(urls: Vec<String>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        imp::prefetch_icons(&urls)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = urls;
+        Ok(())
     }
 }
 
