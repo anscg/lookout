@@ -7,6 +7,14 @@ import { ErrorDisplay } from "../ui/ErrorDisplay.js";
 import { GallerySkeleton } from "../ui/Skeleton.js";
 import { colors, spacing, fontSize, fontWeight, radii } from "../ui/theme.js";
 
+/** Viewport-relative rect of the + button, for hosts that anchor a popup to it. */
+export interface AddAnchor {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface GalleryProps {
   sessions: SessionSummary[];
   loading: boolean;
@@ -14,7 +22,7 @@ export interface GalleryProps {
   onSessionClick?: (token: string) => void;
   onArchive?: (token: string) => void;
   onRefresh?: () => void;
-  onAdd?: () => void;
+  onAdd?: (anchor: AddAnchor) => void;
   onSettings?: () => void;
   /** Optional content rendered just below the header (e.g. an update banner). */
   banner?: React.ReactNode;
@@ -31,7 +39,7 @@ const addButtonStyle: React.CSSProperties = {
   justifyContent: "center",
 };
 
-function GalleryHeader({ onAdd, onSettings }: { onAdd?: () => void; onSettings?: () => void }) {
+function GalleryHeader({ onAdd, onSettings }: { onAdd?: (anchor: AddAnchor) => void; onSettings?: () => void }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: spacing.lg, paddingBottom: 0, flexShrink: 0 }}>
       <h2 style={{ fontSize: fontSize.heading, fontWeight: fontWeight.bold, color: colors.text.primary, margin: 0 }}>Your Timelapses</h2>
@@ -42,7 +50,17 @@ function GalleryHeader({ onAdd, onSettings }: { onAdd?: () => void; onSettings?:
           </Button>
         )}
         {onAdd && (
-          <Button variant="ghost" size="sm" onClick={onAdd} title="Start" aria-label="Start" style={addButtonStyle}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              onAdd({ x: r.left, y: r.top, width: r.width, height: r.height });
+            }}
+            title="Start"
+            aria-label="Start"
+            style={addButtonStyle}
+          >
             <PlusIcon size={28} weight="bold" aria-hidden="true" />
           </Button>
         )}

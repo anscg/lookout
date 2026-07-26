@@ -15,6 +15,11 @@ export interface SessionDetailProps {
   apiBaseUrl: string;
   onBack?: () => void;
   onArchive?: () => void;
+  /** Fired once when the session is observed transitioning to "complete"
+   *  while this view is polling (i.e. the timelapse just finished compiling).
+   *  NOT fired when opening a session that is already complete. Carries the
+   *  session's redirect-hook URL, if one was set at creation. */
+  onComplete?: (info: { redirectUrl: string | null }) => void;
 }
 
 export function SessionDetail({
@@ -22,6 +27,7 @@ export function SessionDetail({
   apiBaseUrl,
   onBack,
   onArchive,
+  onComplete,
 }: SessionDetailProps) {
   const [sessionInfo, setSessionInfo] = useState<{ name: string; createdAt: string } | null>(null);
   const [isRenaming, setIsRenaming] = useState(false);
@@ -58,6 +64,14 @@ export function SessionDetail({
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Completion detection for the redirect hook: only a live transition from
+  // an in-flight state counts — a session opened when already "complete"
+  // must not re-fire. Refs (not state) so fetchStatus stays stable.
+  const prevStatusRef = useRef<StatusResponse["status"] | null>(null);
+  const completeFiredRef = useRef(false);
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
+
   // Fetch session info (name, createdAt) once
   useEffect(() => {
     (async () => {
@@ -82,6 +96,17 @@ export function SessionDetail({
       }
       const data: StatusResponse = await res.json();
       setStatus(data);
+
+      const prevStatus = prevStatusRef.current;
+      prevStatusRef.current = data.status;
+      if (
+        data.status === "complete" &&
+        (prevStatus === "stopped" || prevStatus === "compiling") &&
+        !completeFiredRef.current
+      ) {
+        completeFiredRef.current = true;
+        onCompleteRef.current?.({ redirectUrl: data.redirectUrl ?? null });
+      }
 
       // Fetch video URL when complete
       if (data.status === "complete" && !videoUrl) {

@@ -202,6 +202,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         // opening frame in the timelapse). Old clients ignore these.
         clipsEnabled: session.clipsEnabled,
         frameIntervalMs: CLIP_FRAME_INTERVAL_MS,
+        redirectUrl: session.redirectUrl,
         metadata: session.metadata ?? {},
       };
     },
@@ -1046,6 +1047,9 @@ export async function sessionRoutes(app: FastifyInstance) {
           ? `${baseUrl}/please-update.webm`
           : undefined,
         trackedSeconds,
+        // Redirect hook — clients watching the compile open this once the
+        // status flips to "complete". Absent when the session has none.
+        redirectUrl: session.redirectUrl ?? undefined,
       };
     },
   );

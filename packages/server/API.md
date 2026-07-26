@@ -191,6 +191,7 @@ Returns the current state of a session.
   "videoUrl": "https://...",
   "clipsEnabled": false,
   "frameIntervalMs": 4000,
+  "redirectUrl": null,
   "metadata": {}
 }
 ```
@@ -198,6 +199,8 @@ Returns the current state of a session.
 `clientInfo` is the [client telemetry string](#client-info) recorded on the session's **first** screenshot upload. It is `null` for sessions recorded before this was added, or where the client sent none.
 
 `clipsEnabled` / `frameIntervalMs` are the [clips](#clips) capability signal. This endpoint is the session-recovery fetch clients make before recording, so a clip-capable client knows **before its first capture** whether to record clips (and at what cadence) — the very first upload of a clips session is already a clip.
+
+`redirectUrl` is the session's [redirect hook](#create-session) (`null` when unset): clients watching the compile open it once the status flips to `complete`.
 
 ---
 
@@ -464,6 +467,10 @@ When complete:
 }
 ```
 
+Sessions created with a [redirect hook](#create-session) additionally carry
+`redirectUrl` (absent otherwise) — clients watching the compile open it when
+the status flips to `complete`.
+
 ---
 
 ### Get Capture Timings
@@ -668,6 +675,7 @@ Creates a new session in `pending` state.
 | `name` | string | no | Session name (1-255 chars) |
 | `metadata` | object | no | Arbitrary JSON metadata to attach to the session (max 50 properties) |
 | `clips` | boolean | no | Allow [clip uploads](#clips) (~15 frames/min video) for this session. Default `false` = legacy 1 JPEG/min. **Immutable after creation.** |
+| `redirectUrl` | string | no | Redirect hook: http(s) URL (max 2048 chars) the recording client opens in the user's browser once the timelapse finishes compiling. Fires at most once, only for a live completion (not on re-opening a finished session). **Immutable after creation.** |
 
 **Response `201 Created`:**
 ```json

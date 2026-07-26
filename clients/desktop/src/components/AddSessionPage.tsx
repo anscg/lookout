@@ -24,6 +24,7 @@ interface Program {
   // unset, so this is always present, but guard anyway for older servers.
   displayName?: string;
   newSessionUrl: string;
+  iconUrl?: string | null;
 }
 
 interface AddSessionPageProps {
@@ -212,6 +213,19 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
                   disabled={loading || (launched !== null && launched !== programLabel(p))}
                   onClick={() => handleOpenProgram(p)}
                 >
+                  {p.iconUrl && (
+                    <img
+                      src={p.iconUrl}
+                      alt=""
+                      style={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: 5,
+                        marginRight: 8,
+                        verticalAlign: -4,
+                      }}
+                    />
+                  )}
                   {programLabel(p)}
                 </Button>
               ))}

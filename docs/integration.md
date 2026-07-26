@@ -63,6 +63,35 @@ Response:
 - `sessionUrl` — a convenience URL you can redirect the user to.
 - `metadata` — any JSON you want to associate with the session (user info, project, etc.)
 - `clips` — opt this session into [clips](#clips-15-frames-per-minute) (~15 frames/min video capture instead of 1 JPEG/min → 15× smoother timelapses). Default `false`; immutable after creation.
+- `redirectUrl` — optional [redirect hook](#redirect-hook): an http(s) URL the recording client sends the user to once their timelapse finishes compiling. Immutable after creation.
+
+### Redirect hook
+
+Pass `redirectUrl` when creating a session to send the user somewhere when
+their timelapse is done — e.g. back to your submission form:
+
+```bash
+curl -X POST https://lookout.hackclub.com/api/internal/sessions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"metadata": {"userId": "user_123"}, "redirectUrl": "https://yourprogram.example/submit?step=timelapse-done"}'
+```
+
+How it behaves:
+
+- The URL must be `http(s)` (max 2048 chars) — anything else is rejected with
+  a 400 at creation time.
+- The desktop app opens the URL in the user's default browser the moment it
+  sees the session flip to `complete` while the user is watching the compile
+  (i.e. right after they stop recording). It fires at most once per session,
+  and does **not** fire when someone later re-opens an already-completed
+  session from their gallery.
+- The URL is surfaced to clients on `GET /api/sessions/:token` and
+  `GET /api/sessions/:token/status` as `redirectUrl`, so custom clients can
+  implement the same behavior.
+- Older desktop clients ignore the field — treat the redirect as a
+  convenience, not a guaranteed callback. For server-side certainty, poll
+  [session status](#get-session-info) instead.
 
 ### Clips (15 frames per minute)
 

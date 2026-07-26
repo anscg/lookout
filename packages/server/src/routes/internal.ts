@@ -19,7 +19,12 @@ export async function internalRoutes(app: FastifyInstance) {
 
   // Create a new session
   app.post<{
-    Body: { name?: string; metadata?: Record<string, unknown>; clips?: boolean };
+    Body: {
+      name?: string;
+      metadata?: Record<string, unknown>;
+      clips?: boolean;
+      redirectUrl?: string;
+    };
   }>(
     "/api/internal/sessions",
     {
@@ -33,13 +38,21 @@ export async function internalRoutes(app: FastifyInstance) {
             // frames). Default false = legacy 1 JPEG/min. Immutable after
             // creation — a session's capture character never changes.
             clips: { type: "boolean" as const },
+            // Redirect hook: once the timelapse finishes compiling, the
+            // recording client sends the user here (desktop opens it in the
+            // default browser). Immutable after creation.
+            redirectUrl: {
+              type: "string" as const,
+              pattern: "^https?://",
+              maxLength: 2048,
+            },
           },
           additionalProperties: false,
         },
       },
     },
     async (request, reply) => {
-      const { name, metadata, clips } = request.body || {};
+      const { name, metadata, clips, redirectUrl } = request.body || {};
 
       const [session] = await db
         .insert(schema.sessions)
@@ -47,6 +60,7 @@ export async function internalRoutes(app: FastifyInstance) {
           ...(name ? { name } : {}),
           metadata: metadata ?? {},
           clipsEnabled: clips ?? false,
+          redirectUrl: redirectUrl ?? null,
           // Attribution: tag with the creating program (null for global key).
           // `program` (name) is dual-written for backward compatibility;
           // `programId` is the canonical attribution.

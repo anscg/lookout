@@ -69,6 +69,9 @@ export const programs = pgTable("programs", {
   // https://fallout.hackclub.com/lookout_session/new?desktop=true). NULL means
   // the program isn't listed in the desktop picker.
   newSessionUrl: text("new_session_url"),
+  // URL of a small square logo shown next to the program in pickers (e.g. the
+  // desktop's + menu). NULL means clients fall back to a generic glyph.
+  iconUrl: text("icon_url"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -118,6 +121,11 @@ export const sessions = pgTable(
     // (disallowed formats are downgraded to jpeg), and immutable thereafter —
     // a session's capture character never changes mid-recording.
     clipsEnabled: boolean("clips_enabled").notNull().default(false),
+    // Redirect hook: http(s) URL the recording client sends the user to once
+    // the timelapse finishes compiling. Set at creation by the program's
+    // backend (internal API `redirectUrl`), immutable thereafter. NULL = no
+    // redirect.
+    redirectUrl: text("redirect_url"),
     // Set when the retention job has deleted this session's screenshot R2
     // objects (after SCREENSHOT_RETENTION_DAYS). The screenshot *rows* are
     // kept so capture timings stay queryable; this flag stops the job from

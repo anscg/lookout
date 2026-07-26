@@ -64,6 +64,10 @@ export interface CreateSessionRequest {
    *  ~15 frames) instead of one JPEG per minute. Default false.
    *  Immutable after creation. */
   clips?: boolean;
+  /** Redirect hook: http(s) URL the recording client sends the user to once
+   *  the timelapse finishes compiling (the desktop app opens it in the
+   *  default browser). Immutable after creation. */
+  redirectUrl?: string;
 }
 
 export interface CreateSessionResponse {
@@ -97,6 +101,9 @@ export interface SessionResponse {
   /** Server-authoritative clip cadence (ms between frames). Absent on
    *  pre-clips servers. */
   frameIntervalMs?: number;
+  /** Redirect hook URL to open once the timelapse completes; `null`/absent
+   *  when the session has none. */
+  redirectUrl?: string | null;
   metadata: Record<string, unknown>;
 }
 
@@ -184,6 +191,9 @@ export interface StatusResponse {
    * points at a static "please update" message video. */
   videoWebmUrl?: string;
   trackedSeconds: number;
+  /** Redirect hook URL — clients watching the compile open this when the
+   *  status flips to "complete". Absent when the session has none. */
+  redirectUrl?: string;
 }
 
 export interface VideoResponse {
