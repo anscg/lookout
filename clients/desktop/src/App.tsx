@@ -25,6 +25,7 @@ import { RecordPage } from "./components/RecordPage.js";
 import { AddSessionPage } from "./components/AddSessionPage.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { TrayApp } from "./components/TrayApp.js";
+import { EditorWindow, openEditorWindow, EDITED_EVENT } from "./components/EditorWindow.js";
 import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
 import { useAppUpdate } from "./hooks/useAppUpdate.js";
 import { useAnnouncement } from "./hooks/useAnnouncement.js";
@@ -72,6 +73,13 @@ export function App() {
   if (isTray) {
     return <TrayApp />;
   }
+  // Dedicated editor window (see EditorWindow.tsx). Branches before
+  // MainWindowApp so it skips the permission gates, vibrancy, deep-link
+  // handlers, and the rest of the main-window machinery.
+  const editorMatch = window.location.hash.match(/^#\/?editor\?token=([0-9a-fA-F]{64})/);
+  if (editorMatch) {
+    return <EditorWindow token={editorMatch[1]} />;
+  }
   return <MainWindowApp />;
 }
 
@@ -113,6 +121,22 @@ function MainWindowApp() {
     apiBaseUrl: API_BASE,
     tokens: tokenStore.getAllTokenValues(),
   });
+
+  // Bumped when an editor window applies cuts — remounts the open
+  // SessionDetail so it re-fetches (picks up the compiling → complete flip
+  // and the recompiled video) and refreshes gallery thumbnails.
+  const [editNonce, setEditNonce] = useState(0);
+  const galleryRefreshRef = React.useRef(gallery.refresh);
+  galleryRefreshRef.current = gallery.refresh;
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen(EDITED_EVENT, () => {
+      console.log("[app] editor window applied cuts — refreshing");
+      setEditNonce((n) => n + 1);
+      galleryRefreshRef.current();
+    }).then((fn) => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
+  }, []);
 
   // Initialize blacklisted apps sync from localStorage to Rust backend
   useBlacklistedApps();
@@ -368,14 +392,14 @@ function MainWindowApp() {
       // So we just rely on standard browser matchMedia to get the universal native standard.
       const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
       const getSystemTheme = () => mediaQuery.matches ? "dark" : "light";
-      
+
       const applyTheme = () => {
         const theme = getSystemTheme();
         updateTheme(theme);
         // Force the Tauri window GTK decorations to match the media query since winit is confused
         getCurrentWindow().setTheme(theme).catch(() => {});
       };
-      
+
       applyTheme();
 
       const listener = () => applyTheme();
@@ -424,7 +448,7 @@ function MainWindowApp() {
     const prevRootBg = root?.style.background ?? "";
 
     let effectsApplied = false;
-    
+
     const isLinux = navigator.userAgent.toLowerCase().includes("linux");
     if (!isLinux) {
       invoke("enable_vibrancy")
@@ -521,9 +545,10 @@ function MainWindowApp() {
       case "session":
         return (
           <SessionDetail
-            key={route.token}
+            key={`${route.token}:${editNonce}`}
             token={route.token}
             apiBaseUrl={API_BASE}
+            onEdit={() => { void openEditorWindow(route.token); }}
             onComplete={({ redirectUrl }) => {
               // Redirect hook: the session's creator asked us to send the
               // user somewhere once their timelapse is ready.

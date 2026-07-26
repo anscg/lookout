@@ -6,6 +6,7 @@ export type Route =
   | { page: "settings" }
   | { page: "record"; token: string }
   | { page: "session"; token: string }
+  | { page: "editor"; token: string }
   | { page: "tray" };
 
 function parseHash(hash: string): Route {
@@ -21,6 +22,7 @@ function parseHash(hash: string): Route {
   if (path === "tray") return { page: "tray" };
   if (path === "record" && token) return { page: "record", token };
   if (path === "session" && token) return { page: "session", token };
+  if (path === "editor" && token) return { page: "editor", token };
 
   return { page: "gallery" };
 }
@@ -39,6 +41,8 @@ function routeToHash(route: Route): string {
       return `#/record?token=${route.token}`;
     case "session":
       return `#/session?token=${route.token}`;
+    case "editor":
+      return `#/editor?token=${route.token}`;
   }
 }
 
@@ -62,6 +66,11 @@ export function useHashRouter() {
       ) {
         return;
       }
+
+      // A view that owns these keys (e.g. the cut editor, where Backspace
+      // deletes a region) prevents default in a capture-phase listener —
+      // never navigate away underneath it.
+      if (e.defaultPrevented) return;
 
       if (e.key === "Escape" || e.key === "Backspace") {
         const currentRoute = parseHash(window.location.hash);

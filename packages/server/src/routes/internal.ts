@@ -110,16 +110,29 @@ export async function internalRoutes(app: FastifyInstance) {
           ),
         );
 
-      // Exclude internal R2 storage keys and build proper media URLs
+      // Exclude internal R2 storage keys (and the editor's unit map, which
+      // is bulky plumbing) and build proper media URLs
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
-      const { videoR2Key, thumbnailR2Key, ...sessionData } = session;
+      const {
+        videoR2Key,
+        thumbnailR2Key,
+        originalVideoR2Key: _originalVideoR2Key,
+        videoUnits: _videoUnits,
+        ...sessionData
+      } = session;
       // Bucket-mode: tracked = (distinct buckets - 1) * 60.
       // Credit-mode: read session.trackedSeconds directly (maintained per-credit).
       const liveBucketTracked = Math.max(0, (Number(count) - 1) * 60);
-      const trackedSeconds =
+      const uncutTrackedSeconds =
         session.trackingMode === "credit"
           ? session.trackedSeconds ?? 0
           : session.trackedSeconds ?? liveBucketTracked;
+      // Reported tracked time honors the session's cut list (user edits can
+      // only shrink it); the raw value is surfaced alongside.
+      const trackedSeconds = Math.max(
+        0,
+        uncutTrackedSeconds - (session.cutSeconds ?? 0),
+      );
       const [{ confirmedCount }] = await db
         .select({ confirmedCount: sql<number>`count(*)::int` })
         .from(schema.screenshots)
@@ -166,6 +179,7 @@ export async function internalRoutes(app: FastifyInstance) {
             : null,
         },
         trackedSeconds,
+        uncutTrackedSeconds,
         screenshotCount: Number(confirmedCount),
         clientInfo: firstClient?.clientInfo ?? null,
         ja4: firstJa4?.ja4 ?? null,

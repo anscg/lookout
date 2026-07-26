@@ -2,7 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for the Lookout desktop app",
-  "windows": ["main", "tray"],
+  "windows": [
+    "main",
+    "tray",
+    "editor-*"
+  ],
   "permissions": [
     "core:default",
     "liquid-glass:default",
@@ -18,11 +22,18 @@
     "macos-permissions:default",
     "updater:default",
     "notification:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
     {
       "identifier": "http:default",
       "allow": [
-        { "url": "http://localhost:*" },
-        { "url": "https://**" }
+        {
+          "url": "http://localhost:*"
+        },
+        {
+          "url": "https://**"
+        }
       ]
     }
   ]

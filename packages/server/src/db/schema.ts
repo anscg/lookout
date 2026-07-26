@@ -138,6 +138,40 @@ export const sessions = pgTable(
     thumbnailUrl: text("thumbnail_url"),
     thumbnailR2Key: text("thumbnail_r2_key"),
     compileAttempts: integer("compile_attempts").notNull().default(0),
+    // ── Edits (cuts) ──
+    // Normalized cut list: [{start, end}] ISO wall-clock intervals removed
+    // from every output (video, /timings, trackedSeconds). NULL/[] = no
+    // edits. Canonical semantics live in @lookout/shared cuts.ts.
+    cuts: jsonb("cuts").$type<{ start: string; end: string }[]>(),
+    // Credited seconds removed by `cuts`. Reported trackedSeconds is
+    // tracked_seconds − cut_seconds (raw value stays untouched as the audit
+    // trail). Recomputed on every cuts write; authoritative at cut-compile.
+    cutSeconds: integer("cut_seconds"),
+    // Units that actually made it into the compiled ORIGINAL video, in
+    // output order: [{capturedAt, screenshotId}]. Array index = video
+    // second = real-world minute — THE video-time ↔ wall-clock map (sampled
+    // rows alone can't provide it: compile skips undecodable units). NULL
+    // for sessions compiled before edit support (not editable).
+    videoUnits: jsonb("video_units").$type<
+      { capturedAt: string; screenshotId: string }[]
+    >(),
+    // The UNCUT compiled video. Equal to video_r2_key until an edited
+    // compile repoints video_r2_key at edited.mp4. Cut-compiles always
+    // start from this file, so edits never compound quality loss. NULLed by
+    // the retention job once an edited session's edit window closes (the
+    // cut content must eventually be truly gone).
+    originalVideoR2Key: text("original_video_r2_key"),
+    // True when assembly used the stream-copy path, guaranteeing the pinned
+    // 1s closed-GOP grid that makes lossless second-boundary cutting
+    // possible. False → the cut-compile re-encodes instead.
+    videoCopyAligned: boolean("video_copy_aligned"),
+    // User-initiated cut-compiles, capped at MAX_USER_RECOMPILES.
+    recompileCount: integer("recompile_count").notNull().default(0),
+    // When the last cut-compile finished; anchors the EDIT_WINDOW_DAYS
+    // original-video retention for edited sessions.
+    lastEditCompileAt: timestamp("last_edit_compile_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

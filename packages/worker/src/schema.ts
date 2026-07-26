@@ -39,11 +39,26 @@ export const sessions = pgTable(
     resumedAt: timestamp("resumed_at", { withTimezone: true }),
     totalActiveSeconds: integer("total_active_seconds").notNull().default(0),
     trackedSeconds: integer("tracked_seconds"),
+    // 'bucket' (legacy distinct-minute count) or 'credit' (per-capture
+    // acceptance window). Needed for cut-seconds math at cut-compile.
+    trackingMode: text("tracking_mode").notNull().default("bucket"),
     videoUrl: text("video_url"),
     videoR2Key: text("video_r2_key"),
     thumbnailUrl: text("thumbnail_url"),
     thumbnailR2Key: text("thumbnail_r2_key"),
     compileAttempts: integer("compile_attempts").notNull().default(0),
+    // ── Edits (cuts) — see the server schema for full docs ──
+    cuts: jsonb("cuts").$type<{ start: string; end: string }[]>(),
+    cutSeconds: integer("cut_seconds"),
+    videoUnits: jsonb("video_units").$type<
+      { capturedAt: string; screenshotId: string }[]
+    >(),
+    originalVideoR2Key: text("original_video_r2_key"),
+    videoCopyAligned: boolean("video_copy_aligned"),
+    recompileCount: integer("recompile_count").notNull().default(0),
+    lastEditCompileAt: timestamp("last_edit_compile_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -78,6 +93,11 @@ export const screenshots = pgTable(
     format: text("format").notNull().default("jpeg"),
     // Client-reported frames per clip; the compiler demuxes for the truth.
     frameCount: integer("frame_count"),
+    // Client-attested capture time; NULL for pre-migration rows (fall back
+    // to requestedAt — same coalesce the timings endpoint uses).
+    capturedAt: timestamp("captured_at", { withTimezone: true }),
+    // Credit-mode only: 0 or 60. NULL for bucket-mode rows.
+    creditedSeconds: integer("credited_seconds"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

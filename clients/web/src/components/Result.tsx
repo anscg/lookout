@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../api/client.js";
 import { formatTime } from "@lookout/react";
-import { VideoPlayer } from "@lookout/react";
+import { VideoPlayer, TimelapseEditor } from "@lookout/react";
 import type { SessionStatus } from "@lookout/shared";
 
 interface ResultProps {
@@ -9,16 +9,30 @@ interface ResultProps {
   trackedSeconds: number;
 }
 
-export function Result({ status, trackedSeconds }: ResultProps) {
+/** Hosted recorder result view. Also owns the post-compile cut editor:
+ *  the edit affordance shows on completed sessions unless the embedding
+ *  program disabled it with `?edit=false` on the recorder URL. */
+export function Result({ status: statusProp, trackedSeconds }: ResultProps) {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editable, setEditable] = useState(false);
+  // After an edit is applied the parent's polling has already stopped, so
+  // this view tracks the cut-compile itself: null = mirror the prop.
+  const [localStatus, setLocalStatus] = useState<SessionStatus | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval>>();
+
+  const status = localStatus ?? statusProp;
+
+  const editingAllowed =
+    new URLSearchParams(window.location.search).get("edit") !== "false";
 
   useEffect(() => {
     if (status === "complete") {
       api
         .getVideo()
         .then((data) => {
-          if (data.videoUrl && !data.videoUrl.startsWith("https://")) {
+          if (data.videoUrl && !data.videoUrl.startsWith("https://") && !data.videoUrl.startsWith("/")) {
             throw new Error("Invalid video URL: must be HTTPS.");
           }
           setVideoUrl(data.videoUrl);
@@ -26,8 +40,47 @@ export function Result({ status, trackedSeconds }: ResultProps) {
         .catch((err) =>
           setError(err instanceof Error ? err.message : "Failed to load video"),
         );
+      if (editingAllowed) {
+        api
+          .getStatus()
+          .then((s) => setEditable((s as { editable?: boolean }).editable === true))
+          .catch(() => {});
+      }
     }
-  }, [status]);
+  }, [status, editingAllowed]);
+
+  useEffect(() => () => clearInterval(pollRef.current), []);
+
+  const onApplied = () => {
+    setEditing(false);
+    setEditable(false);
+    setVideoUrl(null);
+    setLocalStatus("compiling");
+    pollRef.current = setInterval(async () => {
+      try {
+        const s = await api.getStatus();
+        if (s.status === "complete" || s.status === "failed") {
+          clearInterval(pollRef.current);
+          setLocalStatus(s.status);
+        }
+      } catch {
+        // Ignore poll errors — next tick retries.
+      }
+    }, 3000);
+  };
+
+  if (editing) {
+    return (
+      <div style={{ ...styles.container, textAlign: "left" }}>
+        <TimelapseEditor
+          token={api.getToken()}
+          apiBaseUrl=""
+          onCancel={() => setEditing(false)}
+          onApplied={onApplied}
+        />
+      </div>
+    );
+  }
 
   if (status === "stopped" || status === "compiling") {
     return (
@@ -68,6 +121,11 @@ export function Result({ status, trackedSeconds }: ResultProps) {
             <VideoPlayer src={videoUrl} />
           </div>
         )}
+        {editingAllowed && editable && (
+          <button style={styles.editButton} onClick={() => setEditing(true)}>
+            Edit timelapse
+          </button>
+        )}
       </div>
     );
   }
@@ -98,6 +156,17 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 8,
     background: "#000",
     overflow: "hidden",
+  },
+  editButton: {
+    marginTop: 16,
+    padding: "8px 16px",
+    fontSize: 13,
+    fontWeight: 600,
+    color: "#ccc",
+    background: "transparent",
+    border: "1px solid #444",
+    borderRadius: 8,
+    cursor: "pointer",
   },
   spinner: {
     width: 40,

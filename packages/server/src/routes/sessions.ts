@@ -1,6 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { eq, sql, and, inArray, isNotNull } from "drizzle-orm";
-import { PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
+import {
+  PutObjectCommand,
+  HeadObjectCommand,
+  GetObjectCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
@@ -26,7 +30,15 @@ import {
   CLIENT_INFO_MAX_BYTES,
   CAPTURE_FORMATS,
   CAPTURE_FORMAT_CONTENT_TYPES,
+  MAX_USER_RECOMPILES,
+  normalizeCuts,
+  isCutAt,
+  countCutUnits,
+  computeCutSeconds,
   type CaptureFormat,
+  type CaptureRowForCuts,
+  type CutInterval,
+  type VideoUnit,
 } from "@lookout/shared";
 
 /** Tracked-seconds dispatcher. Routes to bucket-count math for legacy
@@ -56,6 +68,76 @@ async function getTrackedSecondsBucket(sessionId: string): Promise<number> {
       ),
     );
   return Math.max(0, (Number(count) - 1) * 60);
+}
+
+/** Reported tracked seconds: raw minus what the session's cut list removed.
+ *  Cuts are user edits — they can only shrink the number, and /timings
+ *  excludes the same captures, so every consumer tells one story. The raw
+ *  value stays untouched in the DB (and is surfaced as
+ *  uncutTrackedSeconds). */
+function reportedTrackedSeconds(
+  rawTrackedSeconds: number,
+  session: { cutSeconds: number | null },
+): number {
+  return Math.max(0, rawTrackedSeconds - (session.cutSeconds ?? 0));
+}
+
+/** The session's cut list, always as an array. */
+function sessionCuts(session: { cuts: unknown }): CutInterval[] {
+  return Array.isArray(session.cuts) ? (session.cuts as CutInterval[]) : [];
+}
+
+/** Whether the compiled timelapse can (still) be edited, and why not. */
+function sessionEditability(session: {
+  status: string;
+  videoUnits: unknown;
+  originalVideoR2Key: string | null;
+  recompileCount: number;
+}): { editable: boolean; reason?: "no_original" | "recompiles_exhausted" | "not_complete" } {
+  if (session.status !== "complete") {
+    return { editable: false, reason: "not_complete" };
+  }
+  // videoUnits is written by every post-edit-feature compile; its absence
+  // means the video predates edit support (no unit map to cut against).
+  // A null originalVideoR2Key means the retention job reclaimed the uncut
+  // original of an edited session — the source material is gone.
+  if (
+    !Array.isArray(session.videoUnits) ||
+    session.videoUnits.length === 0 ||
+    !session.originalVideoR2Key
+  ) {
+    return { editable: false, reason: "no_original" };
+  }
+  if (session.recompileCount >= MAX_USER_RECOMPILES) {
+    return { editable: false, reason: "recompiles_exhausted" };
+  }
+  return { editable: true };
+}
+
+/** Confirmed capture rows in the shape the shared cut math expects —
+ *  the same coalesce and rows the worker uses, so PUT /cuts previews are
+ *  exactly what the cut-compile persists. */
+async function getCaptureRowsForCuts(
+  sessionId: string,
+): Promise<CaptureRowForCuts[]> {
+  const rows = await db
+    .select({
+      ts: sql<Date | string>`coalesce(${schema.screenshots.capturedAt}, ${schema.screenshots.requestedAt})`,
+      creditedSeconds: schema.screenshots.creditedSeconds,
+      minuteBucket: schema.screenshots.minuteBucket,
+    })
+    .from(schema.screenshots)
+    .where(
+      and(
+        eq(schema.screenshots.sessionId, sessionId),
+        eq(schema.screenshots.confirmed, true),
+      ),
+    );
+  return rows.map((r) => ({
+    timeMs: (r.ts instanceof Date ? r.ts : new Date(r.ts)).getTime(),
+    creditedSeconds: r.creditedSeconds,
+    minuteBucket: r.minuteBucket,
+  }));
 }
 
 // ── Shared schema fragments ─────────────────────────────────
@@ -171,16 +253,21 @@ export async function sessionRoutes(app: FastifyInstance) {
       const ja4 = await getFirstJa4(session.id);
       // Prefer stored value (survives screenshot cleanup), fall back to live count.
       // For credit mode, both paths read sessions.tracked_seconds so they match.
-      const trackedSeconds =
+      const rawTrackedSeconds =
         session.trackingMode === "credit"
           ? liveTrackedSeconds
           : session.trackedSeconds ?? liveTrackedSeconds;
+      const trackedSeconds = reportedTrackedSeconds(rawTrackedSeconds, session);
 
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
       return {
         name: session.name,
         status: session.status,
         trackedSeconds,
+        cuts: sessionCuts(session),
+        cutSeconds: session.cutSeconds ?? 0,
+        uncutTrackedSeconds: rawTrackedSeconds,
+        editable: sessionEditability(session).editable,
         screenshotCount,
         clientInfo,
         ja4,
@@ -1031,7 +1118,7 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const liveTrackedSeconds = await getTrackedSecondsForSession(session);
       // For credit mode, dispatcher already reads from session.trackedSeconds.
-      const trackedSeconds =
+      const rawTrackedSeconds =
         session.trackingMode === "credit"
           ? liveTrackedSeconds
           : session.trackedSeconds ?? liveTrackedSeconds;
@@ -1046,10 +1133,11 @@ export async function sessionRoutes(app: FastifyInstance) {
         videoWebmUrl: session.videoR2Key
           ? `${baseUrl}/please-update.webm`
           : undefined,
-        trackedSeconds,
+        trackedSeconds: reportedTrackedSeconds(rawTrackedSeconds, session),
         // Redirect hook — clients watching the compile open this once the
         // status flips to "complete". Absent when the session has none.
         redirectUrl: session.redirectUrl ?? undefined,
+        editable: sessionEditability(session).editable,
       };
     },
   );
@@ -1059,10 +1147,23 @@ export async function sessionRoutes(app: FastifyInstance) {
   // the session, oldest first. Uses captured_at (client-attested capture
   // moment); pre-migration rows that predate captured_at fall back to
   // requested_at so the array is never sparse.
-  app.get<{ Params: { token: string } }>(
+  //
+  // Captures inside the session's cut list are EXCLUDED from `timestamps` by
+  // default, so heartbeat forwarders (→ Hackatime) respect user edits with
+  // no code changes. The removed points are available via ?includeCut=true.
+  app.get<{ Params: { token: string }; Querystring: { includeCut?: boolean } }>(
     "/api/sessions/:token/timings",
     {
-      schema: { params: tokenParamSchema },
+      schema: {
+        params: tokenParamSchema,
+        querystring: {
+          type: "object" as const,
+          properties: {
+            includeCut: { type: "boolean" as const },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request, reply) => {
       // Rate limit: 30 req/min per token (read-only, potentially large body)
@@ -1094,9 +1195,21 @@ export async function sessionRoutes(app: FastifyInstance) {
         );
 
       // node-postgres may hand timestamps back as strings; coerce before toISOString.
-      const timestamps = rows.map((r) =>
+      const allTimestamps = rows.map((r) =>
         (r.ts instanceof Date ? r.ts : new Date(r.ts)).toISOString(),
       );
+
+      // Partition by the cut list (kept is the default view).
+      const cuts = sessionCuts(session);
+      const timestamps: string[] = [];
+      const cutTimestamps: string[] = [];
+      for (const iso of allTimestamps) {
+        if (cuts.length > 0 && isCutAt(Date.parse(iso), cuts)) {
+          cutTimestamps.push(iso);
+        } else {
+          timestamps.push(iso);
+        }
+      }
 
       const clientInfo = await getFirstClientInfo(session.id);
       const ja4 = await getFirstJa4(session.id);
@@ -1112,6 +1225,280 @@ export async function sessionRoutes(app: FastifyInstance) {
         clientInfo,
         ja4,
         timestamps,
+        cuts,
+        cutCount: cutTimestamps.length,
+        ...(request.query.includeCut ? { cutTimestamps } : {}),
+      };
+    },
+  );
+
+  // ── Edits (cuts) ─────────────────────────────────────────────
+  // An edit is a cut list of absolute wall-clock intervals removed from
+  // every output: the published video, /timings, and trackedSeconds. See
+  // @lookout/shared cuts.ts for the canonical semantics and
+  // docs/edit-feature-plan.md for the architecture.
+
+  // Editor metadata: the original video's unit map (video second i ↔ wall
+  // clock), current cuts, and a presigned URL for the UNCUT original.
+  // Deliberately NOT the public media URL — after an edit, cut content
+  // exists only in the original, which must stay reachable through the
+  // secret token alone.
+  app.get<{ Params: { token: string } }>(
+    "/api/sessions/:token/units",
+    {
+      schema: { params: tokenParamSchema },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-units", request.params.token, 10);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      const { editable, reason } = sessionEditability(session);
+
+      let originalVideoUrl: string | null = null;
+      if (editable) {
+        originalVideoUrl = await getSignedUrl(
+          r2Client,
+          new GetObjectCommand({
+            Bucket: R2_BUCKET,
+            Key: session.originalVideoR2Key!,
+          }),
+          { expiresIn: 3600 },
+        );
+      }
+
+      return {
+        units: (session.videoUnits as VideoUnit[] | null) ?? [],
+        cuts: sessionCuts(session),
+        editable,
+        ...(editable ? {} : { editableReason: reason }),
+        originalVideoUrl,
+        recompilesRemaining: Math.max(
+          0,
+          MAX_USER_RECOMPILES - session.recompileCount,
+        ),
+      };
+    },
+  );
+
+  // Replace the session's cut list. Idempotent full replace — no patch
+  // semantics (the list is small). `[]` clears all edits. The cuts take
+  // effect in /timings and trackedSeconds immediately; the published video
+  // updates on the next POST /compile.
+  app.put<{
+    Params: { token: string };
+    Body: { cuts: Array<{ start: string; end: string }> };
+  }>(
+    "/api/sessions/:token/cuts",
+    {
+      schema: {
+        params: tokenParamSchema,
+        body: {
+          type: "object" as const,
+          required: ["cuts"] as const,
+          properties: {
+            cuts: {
+              type: "array" as const,
+              maxItems: 200,
+              items: {
+                type: "object" as const,
+                required: ["start", "end"] as const,
+                properties: {
+                  start: { type: "string" as const },
+                  end: { type: "string" as const },
+                },
+                additionalProperties: false,
+              },
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-cuts", request.params.token, 20);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      if (session.status === "compiling") {
+        return reply
+          .code(409)
+          .send({ error: "Session is compiling — retry once it completes" });
+      }
+      const { editable, reason } = sessionEditability(session);
+      if (!editable) {
+        return reply
+          .code(409)
+          .send({ error: `Session is not editable (${reason})` });
+      }
+
+      const boundsMin = session.startedAt?.getTime();
+      const boundsMax = (session.stoppedAt ?? session.updatedAt)?.getTime();
+      const normalized = normalizeCuts(
+        request.body.cuts,
+        boundsMin !== undefined && boundsMax !== undefined
+          ? { minMs: boundsMin, maxMs: boundsMax }
+          : undefined,
+      );
+      if (!normalized.ok) {
+        return reply.code(400).send({ error: normalized.error });
+      }
+
+      const videoUnits = session.videoUnits as VideoUnit[];
+      const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
+      const unitsCut = countCutUnits(unitTimesMs, normalized.cuts);
+      if (normalized.cuts.length > 0 && unitsCut >= videoUnits.length) {
+        return reply
+          .code(400)
+          .send({ error: "Cut list would remove the entire timelapse" });
+      }
+
+      // Same rows + same pure function as the worker's authoritative
+      // cut-compile write, so this preview is exactly what lands.
+      const liveTrackedSeconds = await getTrackedSecondsForSession(session);
+      const rawTrackedSeconds =
+        session.trackingMode === "credit"
+          ? liveTrackedSeconds
+          : session.trackedSeconds ?? liveTrackedSeconds;
+      const cutSeconds = computeCutSeconds(
+        await getCaptureRowsForCuts(session.id),
+        session.trackingMode === "credit" ? "credit" : "bucket",
+        rawTrackedSeconds,
+        normalized.cuts,
+      );
+
+      const [updated] = await db
+        .update(schema.sessions)
+        .set({
+          cuts: normalized.cuts,
+          cutSeconds,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            eq(schema.sessions.status, "complete"),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      if (!updated) {
+        return reply
+          .code(409)
+          .send({ error: "Session state changed concurrently, please retry" });
+      }
+
+      return {
+        cuts: normalized.cuts,
+        unitsTotal: videoUnits.length,
+        unitsCut,
+        trackedSeconds: Math.max(0, rawTrackedSeconds - cutSeconds),
+        uncutTrackedSeconds: rawTrackedSeconds,
+      };
+    },
+  );
+
+  // Apply the current cut list to the published video (a cut-compile).
+  // Usually a lossless stream-copy of the kept ranges of the original —
+  // seconds, not minutes. Clearing all cuts when the original is already
+  // published is a pure no-op ("instant").
+  app.post<{ Params: { token: string } }>(
+    "/api/sessions/:token/compile",
+    {
+      schema: { params: tokenParamSchema },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-compile", request.params.token, 5);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      if (session.status === "compiling") {
+        // Already applying — treat as success so client retries are safe.
+        return reply.code(202).send({
+          status: "compiling" as const,
+          instant: false,
+          recompilesRemaining: Math.max(
+            0,
+            MAX_USER_RECOMPILES - session.recompileCount,
+          ),
+        });
+      }
+      const { editable, reason } = sessionEditability(session);
+      if (!editable) {
+        return reply
+          .code(409)
+          .send({ error: `Session is not editable (${reason})` });
+      }
+
+      const cuts = sessionCuts(session);
+      const publishedIsOriginal =
+        session.videoR2Key === session.originalVideoR2Key;
+      if (cuts.length === 0 && publishedIsOriginal) {
+        // Nothing to change: no cuts, original already published.
+        return {
+          status: "complete" as const,
+          instant: true,
+          recompilesRemaining: Math.max(
+            0,
+            MAX_USER_RECOMPILES - session.recompileCount,
+          ),
+        };
+      }
+
+      // Atomically claim: complete → compiling, burn one recompile. The
+      // worker's own claim accepts re-entry from 'compiling'.
+      const [updated] = await db
+        .update(schema.sessions)
+        .set({
+          status: "compiling",
+          recompileCount: session.recompileCount + 1,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            eq(schema.sessions.status, "complete"),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      if (!updated) {
+        return reply
+          .code(409)
+          .send({ error: "Session state changed concurrently, please retry" });
+      }
+
+      await boss.send(COMPILE_JOB, { sessionId: session.id });
+
+      return {
+        status: "compiling" as const,
+        instant: false,
+        recompilesRemaining: Math.max(
+          0,
+          MAX_USER_RECOMPILES - (session.recompileCount + 1),
+        ),
       };
     },
   );
@@ -1281,7 +1668,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           // Credit-mode: trust sessions.tracked_seconds (maintained per-credit).
           // Bucket-mode: prefer stored value (survives screenshot cleanup),
           // fall back to live screenshot bucket count for active sessions.
-          const trackedSeconds =
+          const rawTrackedSeconds =
             s.trackingMode === "credit"
               ? s.trackedSeconds ?? 0
               : s.trackedSeconds ?? c.bucketTrackedSeconds;
@@ -1289,7 +1676,7 @@ export async function sessionRoutes(app: FastifyInstance) {
             token: s.token,
             name: s.name,
             status: s.status,
-            trackedSeconds,
+            trackedSeconds: reportedTrackedSeconds(rawTrackedSeconds, s),
             screenshotCount: c.screenshotCount,
             startedAt: s.startedAt?.toISOString() ?? null,
             createdAt: s.createdAt.toISOString(),
