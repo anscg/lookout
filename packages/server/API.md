@@ -607,15 +607,27 @@ Editor metadata. Rate limit: 10 req/min per token.
   "cuts": [],
   "editable": true,
   "editHoldUntil": "2026-07-26T14:35:00.000Z",
+  "expectedUnits": 47,
   "originalVideoUrl": "https://…presigned, ~1h…",
   "recompilesRemaining": 5
 }
 ```
 
-- `units` — the capture units of the compiled **original** video, in output order. Array index = video second = real-world minute: the exact video-time ↔ wall-clock map.
+- `units` — the capture units of the compiled **original** video, in output order. Array index = video second = real-world minute: the exact video-time ↔ wall-clock map. Empty until the preview finishes building.
 - `originalVideoUrl` — presigned GET for the unpublished original (the editor's preview source). Deliberately not the public media URL, which is null until the session publishes. `null` when not editable.
-- `editable` / `editableReason` — `false` with `"no_original"` (the preview is still compiling — poll, since `editHoldUntil` is set), `"not_ready"` (no hold, or it lapsed), `"published"` (already `complete`, so editing is over), or `"recompiles_exhausted"`.
+- `editable` / `editableReason` — `false` with one of:
+
+  | Reason | Meaning | What a client should do |
+  |--------|---------|-------------------------|
+  | `preparing` | Hold is active; the preview video is still compiling (the session reads `stopped` or `compiling`) | **Poll** — this is the normal state right after a stop, not an error. Show progress |
+  | `no_original` | Hold active but no original recorded | Poll; same as above |
+  | `not_ready` | No hold, or it lapsed | Editing isn't on offer |
+  | `published` | Already `complete` | Editing is over — by design |
+  | `failed` | The compile failed | Show the failure; there's nothing to edit |
+  | `recompiles_exhausted` | Publish budget spent | Editing is over |
+
 - `editHoldUntil` — when the session auto-publishes; `null` when no hold is active.
+- `expectedUnits` — confirmed captures ≈ units the finished video will hold. Lets a client waiting on the build size a progress estimate (compile time scales with unit count).
 
 #### Set Cut List
 
@@ -649,6 +661,7 @@ Ends the edit hold and publishes the timelapse with the current cut list baked i
 
 - **With cuts:** `stopped → compiling → complete` (poll [`/status`](#poll-compilation-status)); the worker stream-copies the kept ranges, usually in seconds, then deletes the uncut original. Burns one of **5** publishes per session.
 - **Without cuts:** returns `{ "instant": true, "status": "complete" }` immediately — the built original is simply published, no worker involved.
+- **Before the preview finishes building** (`editableReason: "preparing"`): drops the hold and returns `200` with `instant: false`. The in-flight compile publishes normally when it lands, so "publish as recorded" works without waiting for a preview the user just declined.
 
 Rate limit: 5 req/min per token.
 

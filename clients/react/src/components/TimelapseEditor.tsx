@@ -22,6 +22,7 @@ import {
 } from "../hooks/editorMath.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
+import { ProgressRing } from "../ui/ProgressRing.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
 import { colors, fontSize, fontWeight, radii, spacing } from "../ui/theme.js";
 
@@ -40,6 +41,11 @@ export interface TimelapseEditorProps {
 const TIMELINE_HEIGHT = 64;
 const RULER_HEIGHT = 22;
 const FILMSTRIP_SAMPLES = 60;
+/** Fixed cost of a compile: claim, sampling query, assembly, upload. */
+const COMPILE_BASE_MS = 6_000;
+/** Marginal cost per capture unit (download + 1s segment encode, across
+ *  the worker's 8-way pool). Only used to size the progress estimate. */
+const COMPILE_MS_PER_UNIT = 350;
 const CUT_FILL = "rgba(239, 68, 68, 0.38)";
 const CUT_BORDER = "#ef4444";
 
@@ -80,6 +86,9 @@ export function TimelapseEditor({
 
   const [data, setData] = useState<UnitsResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** Non-null while the preview video is still compiling. */
+  const [preparing, setPreparing] = useState<{ expectedUnits: number } | null>(null);
+  const [buildProgress, setBuildProgress] = useState(0);
   const [regions, setRegions] = useState<UnitRegion[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [time, setTime] = useState(0);
@@ -99,9 +108,10 @@ export function TimelapseEditor({
   const unitCount = units.length;
 
   // ── Load ────────────────────────────────────────────────────
-  // The preview video is built by the compile that ran at stop; while it's
-  // still building, /units reports the hold with editable=false. Poll until
-  // it's ready rather than sending the user away.
+  // The preview video is built by the compile that ran at stop, so the
+  // editor almost always opens BEFORE it exists: `/units` reports
+  // `preparing` for the whole build. Poll through that instead of
+  // showing an error — this is the normal path, not a failure.
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -111,21 +121,24 @@ export function TimelapseEditor({
         const res = await client.getUnits();
         if (cancelled) return;
         if (res.editable && res.originalVideoUrl) {
+          setPreparing(null);
           setData(res);
           setRegions(cutsToRegions(res.cuts, res.units));
           return;
         }
-        if (res.editableReason === "no_original" && res.editHoldUntil) {
-          // Still compiling inside the hold — check back shortly.
-          timer = setTimeout(load, 2000);
+        if (res.editableReason === "preparing" || res.editableReason === "no_original") {
+          setPreparing({ expectedUnits: res.expectedUnits ?? 0 });
+          timer = setTimeout(load, 1500);
           return;
         }
         setLoadError(
           res.editableReason === "published"
             ? "This timelapse has already been published, so it can't be edited."
-            : res.editableReason === "recompiles_exhausted"
-              ? "This timelapse has reached its edit limit."
-              : "This timelapse isn't available for editing.",
+            : res.editableReason === "failed"
+              ? "This timelapse couldn't be compiled, so there's nothing to edit."
+              : res.editableReason === "recompiles_exhausted"
+                ? "This timelapse has reached its edit limit."
+                : "This timelapse isn't available for editing.",
         );
       } catch (err) {
         if (!cancelled)
@@ -139,6 +152,25 @@ export function TimelapseEditor({
       if (timer) clearTimeout(timer);
     };
   }, [client]);
+
+  // ── Build progress ──────────────────────────────────────────
+  // The worker doesn't report progress, so this is a time estimate scaled
+  // by how much footage there is to compile. It eases toward — and stops
+  // short of — 100%, and only completes when the real thing does; a ring
+  // that sat at 100% while the user waited would be worse than none.
+  useEffect(() => {
+    if (!preparing) return;
+    const startedAt = Date.now();
+    const estimateMs = COMPILE_BASE_MS + preparing.expectedUnits * COMPILE_MS_PER_UNIT;
+    const tick = () => {
+      const elapsed = Date.now() - startedAt;
+      // Asymptotic: fast at first, never quite arriving.
+      setBuildProgress(1 - Math.exp(-2.2 * (elapsed / estimateMs)));
+    };
+    tick();
+    const id = setInterval(tick, 200);
+    return () => clearInterval(id);
+  }, [preparing]);
 
   // ── Hold countdown ──────────────────────────────────────────
   // The session publishes itself when the hold expires. Surface the
@@ -497,15 +529,47 @@ export function TimelapseEditor({
       <div
         style={{
           display: "flex",
+          flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
-          minHeight: 260,
-          gap: spacing.sm,
-          color: colors.text.secondary,
-          fontSize: fontSize.md,
+          minHeight: 300,
+          gap: spacing.lg,
+          textAlign: "center",
         }}
       >
-        <Spinner size="sm" /> Preparing your timelapse…
+        {preparing ? (
+          <ProgressRing
+            progress={buildProgress}
+            label={`${Math.min(99, Math.floor(buildProgress * 100))}%`}
+          />
+        ) : (
+          <Spinner size="lg" />
+        )}
+        <div>
+          <div
+            style={{
+              fontSize: fontSize.lg,
+              fontWeight: fontWeight.bold,
+              color: colors.text.primary,
+            }}
+          >
+            Preparing your timelapse…
+          </div>
+          <div
+            style={{
+              fontSize: fontSize.md,
+              color: colors.text.secondary,
+              marginTop: spacing.xs,
+              maxWidth: 380,
+            }}
+          >
+            {preparing && preparing.expectedUnits > 0
+              ? `Stitching ${preparing.expectedUnits} minute${
+                  preparing.expectedUnits === 1 ? "" : "s"
+                } of footage. Nothing is published until you save.`
+              : "Nothing is published until you save."}
+          </div>
+        </div>
       </div>
     );
   }

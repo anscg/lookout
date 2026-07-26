@@ -3,7 +3,8 @@ import { invoke } from "../logger.js";
 import { listen, emit } from "@tauri-apps/api/event";
 import {
   useSession,
-  useSessionTimer,
+  useSessionTimerState,
+  computeBestTrackedSeconds,
   formatTime,
   Button,
   ErrorDisplay,
@@ -129,6 +130,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     source,
     isCamera ? cameraFrameCapture : undefined,
     handleSessionTerminated,
+    session.trackedSeconds,
   );
 
   // Native OS notifications: alert the user when a session pauses, errors,
@@ -164,10 +166,23 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     };
   }, [capture.isCapturing, capture.lastCaptureAt]);
 
-  const displaySeconds = useSessionTimer(
-    capture.trackedSeconds || session.trackedSeconds,
-    capture.isCapturing,
-  );
+  // The single authoritative baseline for every surface that shows the time
+  // (main window, menu-bar title, tray popup). Both inputs are server-derived;
+  // `max` rather than `||` so a capture-local value that hasn't caught up with
+  // the session poll yet can't drag the baseline down.
+  const bestTrackedSeconds = computeBestTrackedSeconds({
+    sessionTrackedSeconds: session.trackedSeconds,
+    uploaderTrackedSeconds: capture.trackedSeconds,
+  });
+
+  const timer = useSessionTimerState(bestTrackedSeconds, capture.isCapturing);
+  const displaySeconds = timer.displaySeconds;
+
+  // Read the baseline from a ref inside async handlers: `session.resume()`
+  // awaits a round trip that itself refreshes `session.trackedSeconds`, so the
+  // value captured at render time is stale by the time we seed the ticker.
+  const bestTrackedRef = useRef(bestTrackedSeconds);
+  bestTrackedRef.current = bestTrackedSeconds;
 
   const [pauseLoading, setPauseLoading] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
@@ -218,7 +233,11 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
         await startCameraAndWait();
         // Camera sources use JS-side capture loop, so we need to
         // explicitly start the Rust tray ticker for the menu bar time.
-        invoke("start_tray_ticker", { trackedSeconds: 0 }).catch(console.error);
+        // Seed it with the session's existing time — hardcoding 0 made the
+        // menu bar restart from "0m" when recording an already-started session.
+        invoke("start_tray_ticker", {
+          trackedSeconds: session.trackedSeconds,
+        }).catch(console.error);
       }
       capture.startCapturing();
     })();
@@ -308,7 +327,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
       console.log(`[session] restarting camera stream for device ${cameraDeviceId}`);
       await startCameraAndWait();
     }
-    invoke("resume_tray_ticker", { trackedSeconds: capture.trackedSeconds }).catch(console.error);
+    invoke("resume_tray_ticker", { trackedSeconds: bestTrackedRef.current }).catch(console.error);
     await capture.startCapturing();
     console.log("[session] resumed");
     setResumeLoading(false);
@@ -333,7 +352,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     if (isCamera) {
       await startCameraAndWait();
     }
-    invoke("resume_tray_ticker", { trackedSeconds: capture.trackedSeconds }).catch(console.error);
+    invoke("resume_tray_ticker", { trackedSeconds: bestTrackedRef.current }).catch(console.error);
     await capture.startCapturing();
     setResumeLoading(false);
   }, [capture, session, isCamera, cameraDeviceId, camera, startCameraAndWait]);
@@ -357,11 +376,27 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
 
   const screenshotCount = session.screenshotCount + capture.screenshotCount;
 
-  // Keep a ref of the latest state. `updatedAt` matters: the tray window
-  // extrapolates the ticking clock from it, so omitting it (as the tray-ready
-  // fallback used to) made the tray compute NaN until the next sync.
-  const trayStateRef = useRef({ displaySeconds, screenshotCount, controlMode, updatedAt: Date.now() });
-  trayStateRef.current = { displaySeconds, screenshotCount, controlMode, updatedAt: Date.now() };
+  // Keep a ref of the latest state for the tray popup.
+  //
+  // This carries the interpolation ANCHOR (`baseSeconds` + `anchorAt`), never
+  // `displaySeconds`. The popup ticks its own clock, so handing it an
+  // already-interpolated value made it extrapolate on top of an
+  // extrapolation — it drifted ahead of the main window and never came back.
+  // `anchorAt` must likewise be when the base last advanced, not `Date.now()`
+  // at push time: re-stamping it on every push restarted the popup's
+  // interpolation window and lost the seconds the main window kept.
+  const trayStateRef = useRef({
+    baseSeconds: timer.baseSeconds,
+    screenshotCount,
+    controlMode,
+    anchorAt: timer.anchorAt,
+  });
+  trayStateRef.current = {
+    baseSeconds: timer.baseSeconds,
+    screenshotCount,
+    controlMode,
+    anchorAt: timer.anchorAt,
+  };
 
   // Listen for tray requesting initial state (fallback)
   useEffect(() => {
@@ -402,25 +437,32 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
 
   // Tray-window state sync — event-driven, NOT per-second.
   //
-  // The tray window ticks its own clock by extrapolating from `updatedAt`,
-  // and the Rust ticker owns the menu-bar title. So the only things worth
-  // pushing over IPC are the ones the tray can't derive locally: screenshot
-  // count changes, pause/resume, and server time corrections. Syncing every
+  // The tray window ticks its own clock from the anchor we push, and the Rust
+  // ticker owns the menu-bar title. So the only things worth pushing over IPC
+  // are the ones the tray can't derive locally: screenshot count changes,
+  // pause/resume, and a new anchor when the server credits time. Syncing every
   // second (3 IPC calls + a broadcast event) was pure overhead that also
   // drowned the debug log in [ipc] noise.
   useEffect(() => {
     const state = trayStateRef.current;
     invoke("set_tray_state", { state }).catch(console.error);
     emit("tray-state", state).catch(console.error);
-  }, [screenshotCount, controlMode, capture.trackedSeconds]);
+  }, [screenshotCount, controlMode, timer.baseSeconds, timer.anchorAt]);
 
-  // Sync tracked seconds to the Rust tray timer when the server corrects it
-  // (arrives with each confirmed capture, ~once a minute).
+  // Sync the baseline to the Rust tray timer whenever it advances. Rust
+  // ratchets and re-anchors on its own, so pushing the same value twice is a
+  // no-op there.
+  //
+  // Uses `bestTrackedSeconds`, not `capture.trackedSeconds`: the latter is
+  // hook-local state that starts at 0, so resuming a session that already had
+  // recorded time (app reopened on a paused session) seeded the menu bar with
+  // 0 and it showed "0m" next to a main window reading 25:00 until the first
+  // confirm landed.
   useEffect(() => {
-    if (capture.trackedSeconds > 0) {
-      invoke("sync_tray_tracked_seconds", { trackedSeconds: capture.trackedSeconds }).catch(console.error);
+    if (bestTrackedSeconds > 0) {
+      invoke("sync_tray_tracked_seconds", { trackedSeconds: bestTrackedSeconds }).catch(console.error);
     }
-  }, [capture.trackedSeconds]);
+  }, [bestTrackedSeconds]);
 
   // Hide tray on unmount or session end
   useEffect(() => {

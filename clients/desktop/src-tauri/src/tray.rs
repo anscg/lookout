@@ -6,13 +6,23 @@ use tauri::image::Image;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
 
+/// State handed to the tray popup window, which ticks its own clock so it
+/// stays live while the main WebView is throttled.
+///
+/// It carries the interpolation *anchor*, not a display value: the popup
+/// re-derives the ticking time with the same rules as the main window
+/// (see `useSessionTimerState` in @lookout/react). Passing the main
+/// window's already-interpolated `displaySeconds` here meant the popup
+/// extrapolated on top of an extrapolation and drifted ahead of it.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrayState {
-    pub display_seconds: u32,
+    /// Ratcheted server-authoritative tracked seconds.
+    pub base_seconds: u32,
     pub screenshot_count: u32,
     pub control_mode: String,
-    pub updated_at: u64,
+    /// `Date.now()` (ms) when `base_seconds` last advanced.
+    pub anchor_at: u64,
 }
 
 impl Default for TrayState {
@@ -23,10 +33,10 @@ impl Default for TrayState {
             .unwrap()
             .as_millis() as u64;
         Self {
-            display_seconds: 0,
+            base_seconds: 0,
             screenshot_count: 0,
             control_mode: "recording".to_string(),
-            updated_at: now,
+            anchor_at: now,
         }
     }
 }

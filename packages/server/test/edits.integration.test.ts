@@ -172,13 +172,38 @@ describe("GET /units", () => {
     expect(body.editHoldUntil).toBeTruthy();
   });
 
-  it("reports 'still building' while the compile is in flight", async () => {
+  it("reports 'preparing' while the compile is in flight", async () => {
     const s = await seedHeldSession({ videoUnits: null, originalVideoR2Key: null });
     const body = await getJson(`/api/sessions/${s.token}/units`);
     expect(body.editable).toBe(false);
-    expect(body.editableReason).toBe("no_original");
+    expect(body.editableReason).toBe("preparing");
     // The hold is still surfaced so clients wait rather than give up.
     expect(body.editHoldUntil).toBeTruthy();
+  });
+
+  it("reports 'preparing' — not a hard failure — once the worker claims the job", async () => {
+    // Regression: the worker flips a held session to `compiling` within a
+    // second of the stop, which is the state the editor almost always
+    // opens into. Reporting it as un-editable made "Edit & save" fail
+    // immediately for every user.
+    const s = await seedHeldSession({
+      status: "compiling",
+      videoUnits: null,
+      originalVideoR2Key: null,
+    });
+    const body = await getJson(`/api/sessions/${s.token}/units`);
+    expect(body.editable).toBe(false);
+    expect(body.editableReason).toBe("preparing");
+    expect(body.editHoldUntil).toBeTruthy();
+    // The client needs this to size its progress estimate.
+    expect(body.expectedUnits).toBe(UNITS);
+  });
+
+  it("reports a failed compile as failed, not as something to wait for", async () => {
+    const s = await seedHeldSession({ status: "failed" });
+    const body = await getJson(`/api/sessions/${s.token}/units`);
+    expect(body.editable).toBe(false);
+    expect(body.editableReason).toBe("failed");
   });
 
   it("refuses editing once the session is published", async () => {
@@ -349,6 +374,22 @@ describe("POST /compile (publish)", () => {
     const s = await seedHeldSession({ editHoldUntil: new Date(Date.now() - 1000) });
     const r = await app.inject({ method: "POST", url: `/api/sessions/${s.token}/compile` });
     expect(r.statusCode).toBe(409);
+  });
+
+  it("lets the user publish mid-compile by dropping the hold", async () => {
+    // "I don't want to edit after all" must work even while the preview is
+    // still building: clearing the hold makes the in-flight build publish
+    // when it finishes, instead of making the user wait for a preview they
+    // just declined.
+    const s = await seedHeldSession({
+      status: "compiling",
+      videoUnits: null,
+      originalVideoR2Key: null,
+    });
+    const r = await app.inject({ method: "POST", url: `/api/sessions/${s.token}/compile` });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().instant).toBe(false);
+    expect((await load(s.id))!.editHoldUntil).toBeNull();
   });
 });
 

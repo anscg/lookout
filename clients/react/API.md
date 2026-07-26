@@ -367,6 +367,33 @@ const displaySeconds = useSessionTimer(trackedSeconds, isActive);
 
 ---
 
+### `useSessionTimerState(serverTrackedSeconds, isActive)`
+
+Same timer, but returns the interpolation **anchor** alongside the display value. Use this when another surface has to tick its own copy of the clock — the desktop app's menu-bar title (Rust) and tray popup window both do, so they stay live while the main WebView is throttled.
+
+**Returns:** `SessionTimerState`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `displaySeconds` | `number` | What to render |
+| `baseSeconds` | `number` | The ratcheted server-authoritative value the display is anchored to |
+| `anchorAt` | `number` | `Date.now()` when `baseSeconds` last advanced |
+
+### `deriveDisplaySeconds(baseSeconds, anchorAt, isActive, now)`
+
+The pure function behind the hook, exported so independently-ticking surfaces derive the clock identically instead of reimplementing it:
+
+```ts
+const seconds = deriveDisplaySeconds(baseSeconds, anchorAt, isRecording, Date.now());
+```
+
+Any surface ticking its own clock must go through this (or mirror it exactly — see `tray_display_seconds` in the desktop crate). Two rules are easy to get wrong and both produce a visibly wrong clock:
+
+- **Interpolate from `baseSeconds`, never from `displaySeconds`.** The latter already contains the interpolated remainder, so extrapolating from it double-counts and the surface drifts ahead of the main window.
+- **Pass through `anchorAt` unchanged.** It marks when the base last advanced; re-stamping it to "now" on each push restarts the interpolation window and loses time the main window is still counting.
+
+---
+
 ### `useTokenStore()`
 
 Manages session tokens in `localStorage` with cross-tab sync. No provider required.
@@ -764,7 +791,10 @@ baked in (a lossless server-side stream copy) or without them. Standalone
 | `onApplied` | `() => void?` | The timelapse was published — return to your detail view and poll `/status` |
 | `onCancel` | `() => void?` | Optional "not now". The session stays held and publishes itself when the hold expires, so nothing is lost. Omit where publishing should be an explicit choice |
 
-It polls while the preview is still compiling, and shows a countdown to the
+The editor normally opens **before** the preview video exists — the compile
+starts at stop and takes tens of seconds — so it polls through that state
+and shows a `<ProgressRing>` sized from the session's capture count, then
+swaps to the timeline when the video lands. It also counts down to the
 hold's auto-publish (getting louder in the last two minutes).
 
 **Interactions:**
@@ -876,6 +906,7 @@ The SDK exports styled UI primitives used by its components. All use inline styl
 |--------|-------------|
 | `Button` | Styled button with variants: `primary`, `secondary`, `success`, `warning`, `danger`, `ghost` and sizes: `sm`, `md`, `lg` |
 | `Spinner` | Loading spinner with sizes: `sm`, `md`, `lg` |
+| `ProgressRing` | Determinate circular progress (`progress` 0–1, optional centre `label`) — for waits long enough that a spinner under-informs |
 | `Badge` | Status badge with variants: `default`, `overlay` |
 | `Card` | Styled card container |
 | `ErrorDisplay` | Error message display with variants: `inline`, `banner`, `page` |

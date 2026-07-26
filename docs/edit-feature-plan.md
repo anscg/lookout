@@ -246,9 +246,17 @@ their single video file forever, as today.
     now", and a primary button that reads **"Save & publish"** with cuts or
     **"Publish as recorded"** without — publishing is the way out, not an
     optional extra step.
-  - Polls `/units` while the preview is still compiling, and counts down to
-    the hold's auto-publish (louder in the last two minutes) so the user
-    always knows the timelapse is safe but not yet out.
+  - **The editor opens before the preview exists** — the compile starts at
+    stop and runs for tens of seconds — so `preparing` is the normal
+    opening state, not an error. It polls through it behind a
+    `<ProgressRing>` sized from `expectedUnits` (compile time scales with
+    unit count), then swaps to the timeline. It also counts down to the
+    hold's auto-publish (louder in the last two minutes) so the user always
+    knows the timelapse is safe but not yet out.
+  - The ring is a time estimate, not worker-reported progress: it eases
+    asymptotically toward 100% and only completes when `/units` actually
+    reports the video ready, so it can never sit at 100% while the user
+    waits.
 - **`<StopChoiceModal>`**: the stop confirmation — keep recording / stop &
   save / edit & save. This is where editing is offered; there is no
   post-publication entry point.

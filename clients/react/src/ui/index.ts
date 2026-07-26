@@ -2,6 +2,8 @@ export { Button } from "./Button.js";
 export type { ButtonProps } from "./Button.js";
 export { Spinner } from "./Spinner.js";
 export type { SpinnerProps } from "./Spinner.js";
+export { ProgressRing } from "./ProgressRing.js";
+export type { ProgressRingProps } from "./ProgressRing.js";
 export { Badge } from "./Badge.js";
 export type { BadgeProps } from "./Badge.js";
 export { ErrorDisplay } from "./ErrorDisplay.js";

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "motion/react";
 import type { StatusResponse, VideoResponse, SessionResponse } from "@lookout/shared";
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
 import { Button } from "../ui/Button.js";
+import { ProgressRing } from "../ui/ProgressRing.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
 import { ProcessingState } from "./ProcessingState.js";
 import { TimelapseEditor } from "./TimelapseEditor.js";
@@ -43,34 +44,54 @@ function HoldPanel({
     return () => clearInterval(id);
   }, [holdUntil]);
 
+  // Same asymptotic estimate the editor uses (the worker reports no real
+  // progress); it eases toward 100% and the `editable` flip is what
+  // actually ends it.
+  const [buildProgress, setBuildProgress] = useState(0);
+  useEffect(() => {
+    if (editable) return;
+    const startedAt = Date.now();
+    const tick = () =>
+      setBuildProgress(1 - Math.exp(-2.2 * ((Date.now() - startedAt) / 30_000)));
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [editable]);
+
   const minutesLeft = Math.max(1, Math.round(secondsLeft / 60));
 
   return (
     <Card padding={spacing.lg} style={{ marginBottom: spacing.lg }}>
-      <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text.primary }}>
-        {editable ? "Ready to review" : "Preparing your timelapse…"}
-      </div>
-      <div
-        style={{
-          fontSize: fontSize.md,
-          color: colors.text.secondary,
-          marginTop: spacing.xs,
-          marginBottom: spacing.lg,
-        }}
-      >
-        {editable
-          ? "Cut out anything you don't want to share, then save. Nothing is published until you do."
-          : "Your recording is compiling. You'll be able to trim it in a moment."}
-        {" "}
-        {secondsLeft > 0 && (
-          <span style={{ color: secondsLeft < 120 ? colors.status.warning : colors.text.tertiary }}>
-            {secondsLeft < 120
-              ? `Publishing automatically in ${secondsLeft}s.`
-              : `Publishes automatically in ${minutesLeft} min.`}
-          </span>
+      <div style={{ display: "flex", alignItems: "center", gap: spacing.lg }}>
+        {!editable && (
+          <ProgressRing size={48} strokeWidth={4} progress={buildProgress} />
         )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text.primary }}>
+            {editable ? "Ready to review" : "Preparing your timelapse…"}
+          </div>
+          <div
+            style={{
+              fontSize: fontSize.md,
+              color: colors.text.secondary,
+              marginTop: spacing.xs,
+            }}
+          >
+            {editable
+              ? "Cut out anything you don't want to share, then save. Nothing is published until you do."
+              : "Your recording is compiling. You'll be able to trim it in a moment."}
+            {" "}
+            {secondsLeft > 0 && (
+              <span style={{ color: secondsLeft < 120 ? colors.status.warning : colors.text.tertiary }}>
+                {secondsLeft < 120
+                  ? `Publishing automatically in ${secondsLeft}s.`
+                  : `Publishes automatically in ${minutesLeft} min.`}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
-      <div style={{ display: "flex", gap: spacing.sm }}>
+      <div style={{ display: "flex", gap: spacing.sm, marginTop: spacing.lg }}>
         <Button variant="primary" size="md" onClick={onEdit} disabled={!editable || publishing}>
           Edit &amp; save
         </Button>
@@ -226,6 +247,11 @@ export function SessionDetail({
     return () => clearInterval(interval);
   }, [status?.status, fetchStatus]);
 
+  // A live edit hold owns the view: the review panel replaces the compile
+  // spinner. A failed compile is not a hold worth waiting on, even if the
+  // deadline hasn't passed yet — show the normal failure state instead.
+  const inHold = Boolean(status?.editHoldUntil) && status?.status !== "failed";
+
   const cardButtonStyle: React.CSSProperties = {
     background: colors.bg.surface,
     border: `1px solid ${colors.border.default}`,
@@ -277,10 +303,10 @@ export function SessionDetail({
 
       {/* Edit hold: the recording is compiled but deliberately not
           published yet, so this is the user's one chance to cut it. */}
-      {status && !editing && status.editHoldUntil && (
+      {status && !editing && inHold && (
         <HoldPanel
           editable={status.editable === true}
-          holdUntil={status.editHoldUntil}
+          holdUntil={status.editHoldUntil!}
           onEdit={() => (onEdit ? onEdit() : setEditing(true))}
           onPublish={async () => {
             try {
@@ -300,7 +326,7 @@ export function SessionDetail({
           {/* Video area. Suppressed during an edit hold: the session reads
               as "stopped", but showing a compile spinner under a panel that
               says "ready to review" would contradict it. */}
-          {!status.editHoldUntil && (
+          {!inHold && (
             <div style={{ marginBottom: spacing.lg, borderRadius: radii.lg, overflow: "hidden" }}>
               <ProcessingState
                 status={status.status}

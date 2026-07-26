@@ -55,6 +55,11 @@ export function useNativeCapture(
   cameraCapture?: CameraFrameCapture,
   /** Called when the capture loop discovers the server moved the session to a terminal state. */
   onSessionTerminated?: (status: string) => void,
+  /** The session's server-known tracked seconds, used to seed a freshly
+   *  started Rust tray timer. Needed because `trackedSeconds` below is
+   *  hook-local state that starts at 0 — on a session that already has
+   *  recorded time it can't seed anything until the first confirm lands. */
+  sessionTrackedSeconds = 0,
 ) {
   const [isCapturing, setIsCapturing] = useState(false);
   const [trackedSeconds, setTrackedSeconds] = useState(0);
@@ -71,9 +76,11 @@ export function useNativeCapture(
   // check if the user intentionally stopped (avoids auto-resume race).
   const capturingRef = useRef(false);
 
-  // Latest tracked seconds, for seeding a freshly started Rust tray timer.
+  // Best known tracked seconds, for seeding a freshly started Rust tray timer.
+  // Both inputs are server-derived; take the higher one so neither a
+  // not-yet-confirmed capture nor a lagging session poll seeds a low baseline.
   const trackedSecondsRef = useRef(0);
-  trackedSecondsRef.current = trackedSeconds;
+  trackedSecondsRef.current = Math.max(trackedSeconds, sessionTrackedSeconds);
 
   // Track blob URL for cleanup
   const blobUrlRef = useRef<string | null>(null);

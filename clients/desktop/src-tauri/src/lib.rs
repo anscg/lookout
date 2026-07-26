@@ -107,10 +107,20 @@ struct CaptureLoopHandle {
 /// Shared state for the Rust-side tray title timer.
 /// Uses atomics so the capture loop can update tracked_seconds
 /// without acquiring a mutex on every tick.
+///
+/// This mirrors `useSessionTimerState` in @lookout/react. The menu bar,
+/// the tray popup and the main window each tick their own clock (so a
+/// throttled WebView can't stall the menu bar), which only works if all
+/// three apply the *same* rules to the same anchor: ratchet the base
+/// forward, cap interpolation at one capture interval, and drop the
+/// interpolated remainder while paused. Diverge on any of those and the
+/// menu bar visibly disagrees with the main window.
 struct TrayTimerState {
     /// Authoritative tracked seconds from the last server response.
+    /// Ratchets forward only — see `sync_tray_timer`.
     tracked_seconds: AtomicI64,
-    /// Wall-clock instant when tracking started (or last synced).
+    /// Wall-clock instant `tracked_seconds` last advanced (the
+    /// interpolation anchor).
     started_at: Mutex<StdInstant>,
     /// Whether the timer is actively ticking (false = paused).
     is_running: AtomicBool,
@@ -2085,6 +2095,25 @@ const SLEEP_THRESHOLD_SECS: u64 = CAPTURE_INTERVAL_SECS * 2 + 30; // 150s
 /// and the JPEG preview side is only produced while the window is focused.
 const DEFAULT_FRAME_INTERVAL_MS: u64 = 4_000;
 
+/// Max seconds the menu-bar time may run ahead of the last server-credited
+/// `tracked_seconds`. Must equal `MAX_INTERPOLATION_S` in
+/// @lookout/react's useSessionTimer — one capture interval. Without the cap
+/// the menu bar kept counting through a capture stall while the main window
+/// froze at base + 60, and the two never reconverged.
+const MAX_TRAY_INTERPOLATION_SECS: i64 = CAPTURE_INTERVAL_SECS as i64;
+
+/// The Rust mirror of `deriveDisplaySeconds` in @lookout/react. Keep the two
+/// in step: the menu bar and the main window each tick their own clock, so any
+/// difference here is directly visible as the two showing different times.
+fn tray_display_seconds(base_seconds: i64, elapsed_secs: i64, running: bool) -> i64 {
+    if !running {
+        // Paused drops the interpolated remainder rather than freezing it,
+        // matching the main window's snap-down.
+        return base_seconds;
+    }
+    base_seconds + elapsed_secs.clamp(0, MAX_TRAY_INTERPOLATION_SECS)
+}
+
 /// Format seconds into the same tray title format as the JS side:
 /// >0h: "{h}h {m}m", else: "{m}m"
 fn format_tray_time(total_seconds: i64) -> String {
@@ -2127,37 +2156,51 @@ async fn tray_timer_task(
             }
         }
 
-        if !timer_state.is_running.load(Ordering::Relaxed) {
-            was_paused = true;
-            continue;
-        }
-
         let base_seconds = timer_state.tracked_seconds.load(Ordering::Relaxed);
+        let running = timer_state.is_running.load(Ordering::Relaxed);
+
         let elapsed = {
             let started = timer_state.started_at.lock().unwrap();
             started.elapsed().as_secs() as i64
         };
-        let display_seconds = base_seconds + elapsed;
+        let display_seconds = tray_display_seconds(base_seconds, elapsed, running);
 
         let time_text = format_tray_time(display_seconds);
+
+        if !running {
+            // Write the frozen value once (a pause snaps the title down by
+            // the dropped remainder), then idle until resume.
+            if last_title.as_deref() != Some(time_text.as_str()) {
+                set_tray_title(&app, &time_text);
+                last_title = Some(time_text);
+            }
+            was_paused = true;
+            continue;
+        }
+
         if was_paused || last_title.as_deref() != Some(time_text.as_str()) {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = &app;
-                // None = keep the current pause state; the Swift side
-                // renders the tooltip and the numericText digit roll.
-                let _ = crate::native_tray::update(&time_text, None);
-            }
-            #[cfg(not(target_os = "macos"))]
-            if let Some(tray) = app.tray_by_id("timelapse_tray") {
-                let _ = tray.set_title(Some(&time_text));
-                // Windows doesn't render tray titles — the hover tooltip is
-                // the only way to see the recorded time there.
-                let _ = tray.set_tooltip(Some(format!("Lookout — {time_text} recorded")));
-            }
+            set_tray_title(&app, &time_text);
             last_title = Some(time_text);
         }
         was_paused = false;
+    }
+}
+
+/// Write the menu-bar time text (and, off macOS, the hover tooltip).
+fn set_tray_title(app: &AppHandle, time_text: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        // None = keep the current pause state; the Swift side renders the
+        // tooltip and the numericText digit roll.
+        let _ = crate::native_tray::update(time_text, None);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(tray) = app.tray_by_id("timelapse_tray") {
+        let _ = tray.set_title(Some(time_text));
+        // Windows doesn't render tray titles — the hover tooltip is the
+        // only way to see the recorded time there.
+        let _ = tray.set_tooltip(Some(format!("Lookout — {time_text} recorded")));
     }
 }
 
@@ -2217,21 +2260,37 @@ fn stop_tray_timer(state: &AppState) {
     }
 }
 
-/// Sync the tray timer to a new authoritative tracked_seconds value
-/// (typically from a capture result). Resets the elapsed counter.
-fn sync_tray_timer(state: &AppState, tracked_seconds: i64) {
-    let guard = state.tray_timer.lock().unwrap();
-    if let Some(ref handle) = *guard {
-        handle
-            .state
-            .tracked_seconds
-            .store(tracked_seconds, Ordering::Relaxed);
-        let mut started = handle.state.started_at.lock().unwrap();
+/// Ratchet `tracked_seconds` to a new authoritative value, re-anchoring the
+/// elapsed counter **only if the value actually advanced**.
+///
+/// Both halves matter for staying in step with the main window:
+///   - Ratchet: an idempotent retry can confirm against a stale read and
+///     return a *lower* `trackedSeconds`. JS keeps the higher value, so
+///     storing the lower one here made the menu bar jump backwards and sit
+///     a minute behind until the next credit.
+///   - Anchor only on advance: a repeated reading must not restart the
+///     interpolation window, or the menu bar loses time the main window keeps.
+fn ratchet_tray_tracked_seconds(timer_state: &TrayTimerState, tracked_seconds: i64) {
+    let prev = timer_state
+        .tracked_seconds
+        .fetch_max(tracked_seconds, Ordering::Relaxed);
+    if tracked_seconds > prev {
+        let mut started = timer_state.started_at.lock().unwrap();
         *started = StdInstant::now();
     }
 }
 
-/// Pause the tray timer (freeze the displayed time).
+/// Sync the tray timer to a new authoritative tracked_seconds value
+/// (typically from a capture result).
+fn sync_tray_timer(state: &AppState, tracked_seconds: i64) {
+    let guard = state.tray_timer.lock().unwrap();
+    if let Some(ref handle) = *guard {
+        ratchet_tray_tracked_seconds(&handle.state, tracked_seconds);
+    }
+}
+
+/// Pause the tray timer. The next tick drops the interpolated remainder and
+/// shows the bare `tracked_seconds`, matching the main window's snap-down.
 fn pause_tray_timer(state: &AppState) {
     let guard = state.tray_timer.lock().unwrap();
     if let Some(ref handle) = *guard {
@@ -2239,7 +2298,7 @@ fn pause_tray_timer(state: &AppState) {
     }
 }
 
-/// Resume the tray timer. Resets the elapsed counter so it continues
+/// Resume the tray timer. Re-anchors the elapsed counter so it continues
 /// from the current tracked_seconds.
 fn resume_tray_timer(state: &AppState) {
     let guard = state.tray_timer.lock().unwrap();
@@ -3087,9 +3146,14 @@ async fn start_tray_ticker(
     app: AppHandle,
 ) -> Result<(), String> {
     let timer_state = start_tray_timer(&app, &state);
-    timer_state.tracked_seconds.store(tracked_seconds, Ordering::Relaxed);
-    let mut started = timer_state.started_at.lock().unwrap();
-    *started = StdInstant::now();
+    // Ratchet, don't store: `start_tray_timer` returns the *existing* state
+    // if a session is already being tracked, and a re-entrant call with a
+    // stale (or zero) baseline would knock the menu bar backwards.
+    ratchet_tray_tracked_seconds(&timer_state, tracked_seconds);
+    {
+        let mut started = timer_state.started_at.lock().unwrap();
+        *started = StdInstant::now();
+    }
     timer_state.is_running.store(true, Ordering::Relaxed);
     Ok(())
 }
@@ -3107,12 +3171,7 @@ fn resume_tray_ticker(
     tracked_seconds: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    {
-        let guard = state.tray_timer.lock().unwrap();
-        if let Some(ref handle) = *guard {
-            handle.state.tracked_seconds.store(tracked_seconds, Ordering::Relaxed);
-        }
-    }
+    sync_tray_timer(&state, tracked_seconds);
     resume_tray_timer(&state);
     Ok(())
 }
@@ -3567,6 +3626,88 @@ pub fn run() {
 //      `lib.rs`) still accept the new server's JSON. This is the load-bearing
 //      compat guarantee: an unupgraded user's binary in the wild keeps working.
 // ──────────────────────────────────────────────────────────────────
+
+/// The menu-bar clock must agree with the main window's clock. Both tick
+/// independently, so they only stay together if these rules match
+/// `deriveDisplaySeconds` / `useSessionTimerState` in @lookout/react.
+#[cfg(test)]
+mod tray_timer_tests {
+    use super::{
+        format_tray_time, ratchet_tray_tracked_seconds, tray_display_seconds, TrayTimerState,
+        MAX_TRAY_INTERPOLATION_SECS,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    fn state(tracked: i64) -> TrayTimerState {
+        TrayTimerState {
+            tracked_seconds: AtomicI64::new(tracked),
+            started_at: Mutex::new(Instant::now()),
+            is_running: AtomicBool::new(true),
+        }
+    }
+
+    #[test]
+    fn cap_matches_the_js_side() {
+        // MAX_INTERPOLATION_S in useSessionTimer.ts is
+        // SCREENSHOT_INTERVAL_MS / 1000 = 60.
+        assert_eq!(MAX_TRAY_INTERPOLATION_SECS, 60);
+    }
+
+    #[test]
+    fn interpolates_at_wall_clock_rate() {
+        assert_eq!(tray_display_seconds(120, 0, true), 120);
+        assert_eq!(tray_display_seconds(120, 30, true), 150);
+    }
+
+    #[test]
+    fn interpolation_is_capped_at_one_interval() {
+        // Without the cap the menu bar kept counting through a capture stall
+        // while the main window froze at base + 60, and the two never
+        // reconverged — the reported "menu bar shows a different time".
+        assert_eq!(tray_display_seconds(120, 90, true), 180);
+        assert_eq!(tray_display_seconds(120, 600, true), 180);
+    }
+
+    #[test]
+    fn pause_drops_the_interpolated_remainder() {
+        // The main window snaps down to the base on pause. Freezing at the
+        // interpolated value here left the menu bar up to a minute ahead for
+        // the whole pause.
+        assert_eq!(tray_display_seconds(120, 45, false), 120);
+        assert_eq!(format_tray_time(tray_display_seconds(299, 59, false)), "4m");
+    }
+
+    #[test]
+    fn ratchet_ignores_a_stale_lower_reading() {
+        // An idempotent retry can confirm against a stale read and return a
+        // lower trackedSeconds. JS keeps the higher value; storing the lower
+        // one here made the menu bar jump backwards and sit behind.
+        let s = state(120);
+        ratchet_tray_tracked_seconds(&s, 60);
+        assert_eq!(s.tracked_seconds.load(Ordering::Relaxed), 120);
+        ratchet_tray_tracked_seconds(&s, 180);
+        assert_eq!(s.tracked_seconds.load(Ordering::Relaxed), 180);
+    }
+
+    #[test]
+    fn ratchet_re_anchors_only_on_advance() {
+        let s = state(120);
+        let before = *s.started_at.lock().unwrap();
+
+        // A repeated reading must not restart the interpolation window, or
+        // the menu bar loses time the main window is still counting.
+        ratchet_tray_tracked_seconds(&s, 120);
+        assert_eq!(*s.started_at.lock().unwrap(), before);
+        ratchet_tray_tracked_seconds(&s, 60);
+        assert_eq!(*s.started_at.lock().unwrap(), before);
+
+        // A real advance re-anchors.
+        ratchet_tray_tracked_seconds(&s, 180);
+        assert!(*s.started_at.lock().unwrap() > before);
+    }
+}
 
 #[cfg(test)]
 mod compat_tests {
