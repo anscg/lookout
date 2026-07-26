@@ -49,6 +49,13 @@ export interface TimelapseEditorProps {
 }
 
 const STRIP_HEIGHT = 56;
+/** Diagonal hatch marking removed footage — the conventional "this is
+ *  excluded" texture, and a second channel beyond colour alone. */
+const hatch = (periodPx: number) =>
+  `repeating-linear-gradient(45deg, ${colors.editor.cutStripe} 0 ${
+    periodPx / 2
+  }px, transparent ${periodPx / 2}px ${periodPx}px)`;
+
 const RULER_HEIGHT = 22;
 /** Playhead cap: a slim pill, bottom-aligned to the ruler so it tucks
  *  under the labels instead of covering them. Small on purpose — it marks
@@ -831,8 +838,13 @@ export function TimelapseEditor({
               style={{
                 position: "absolute",
                 inset: 0,
+                // Matches the stage's radius: an inset ring on a square
+                // box inside a rounded, clipped parent gets sliced at the
+                // corners and reads as a rendering glitch.
+                borderRadius: 12,
                 boxShadow: `inset 0 0 0 3px ${colors.editor.cutBorder}`,
-                background: "rgba(220, 38, 38, 0.12)",
+                backgroundColor: "rgba(220, 38, 38, 0.10)",
+                backgroundImage: hatch(16),
                 pointerEvents: "none",
               }}
             >
@@ -1096,7 +1108,12 @@ export function TimelapseEditor({
                     width: pct(r.endUnit - r.startUnit),
                     top: 0,
                     bottom: 0,
-                    background: colors.editor.cutFill,
+                    borderRadius: radii.sm,
+                    // backgroundColor (not background) so the hover rule
+                    // in editorStyles can swap the tint without dropping
+                    // the hatch layered on top of it.
+                    backgroundColor: colors.editor.cutFill,
+                    backgroundImage: hatch(10),
                     boxShadow: isSelected
                       ? `inset 0 0 0 2px ${colors.editor.cutBorder}`
                       : `inset 0 0 0 1px ${colors.editor.cutBorder}`,
