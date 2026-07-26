@@ -139,15 +139,62 @@ function MainWindowApp() {
   const [editNonce, setEditNonce] = useState(0);
   const galleryRefreshRef = React.useRef(gallery.refresh);
   galleryRefreshRef.current = gallery.refresh;
+
+  // The redirect hook must fire exactly once per session, from whichever
+  // path observes the timelapse finish. Both paths funnel through here.
+  const redirectFiredRef = React.useRef<Set<string>>(new Set());
+  const fireRedirect = useCallback((token: string, url: string | null) => {
+    if (!url || redirectFiredRef.current.has(token)) return;
+    redirectFiredRef.current.add(token);
+    console.log("[app] firing redirect hook");
+    invoke("open_external_url", { url }).catch((e) =>
+      console.error("[app] redirect hook failed:", e),
+    );
+  }, []);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen(EDITED_EVENT, () => {
-      console.log("[app] editor window applied cuts — refreshing");
+    let cancelled = false;
+
+    listen<{ token: string }>(EDITED_EVENT, (event) => {
+      console.log("[app] editor window published — refreshing");
       setEditNonce((n) => n + 1);
       galleryRefreshRef.current();
+
+      // Publishing from the editor can land instantly (no cuts) or after a
+      // short cut-compile. Either way SessionDetail may mount on an
+      // already-complete session, and its onComplete deliberately doesn't
+      // fire for that — so the redirect hook would be silently skipped in
+      // the whole edit flow. Watch it to completion here instead.
+      const token = event.payload?.token;
+      if (!token) return;
+      const deadline = Date.now() + 3 * 60_000;
+      const poll = async () => {
+        if (cancelled || Date.now() > deadline) return;
+        try {
+          const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.status === "complete") {
+              galleryRefreshRef.current();
+              fireRedirect(token, data.redirectUrl ?? null);
+              return;
+            }
+            if (data.status === "failed") return;
+          }
+        } catch {
+          // Transient — the retry below covers it.
+        }
+        setTimeout(poll, 2500);
+      };
+      void poll();
     }).then((fn) => { unlisten = fn; });
-    return () => { if (unlisten) unlisten(); };
-  }, []);
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [fireRedirect]);
 
   // Initialize blacklisted apps sync from localStorage to Rust backend
   useBlacklistedApps();
@@ -566,10 +613,10 @@ function MainWindowApp() {
             onEdit={() => { void openEditorWindow(route.token); }}
             onComplete={({ redirectUrl }) => {
               // Redirect hook: the session's creator asked us to send the
-              // user somewhere once their timelapse is ready.
-              if (redirectUrl) {
-                invoke("open_external_url", { url: redirectUrl }).catch(() => {});
-              }
+              // user somewhere once their timelapse is ready. Shared
+              // de-dupe with the post-edit watcher above, so a session
+              // seen finishing by both paths only redirects once.
+              fireRedirect(route.token, redirectUrl);
             }}
             onBack={() => {
               gallery.refresh();

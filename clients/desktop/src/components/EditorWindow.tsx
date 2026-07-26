@@ -77,6 +77,36 @@ export async function openEditorWindow(token: string): Promise<void> {
 }
 
 /**
+ * Close this editor window and hand focus back to the app.
+ *
+ * Never swallow the failure: if the close is refused (a missing
+ * capability, say) a silent catch leaves the user staring at a window
+ * that says it saved and won't go away. Log it, then fall back to
+ * destroy(), which skips the close-requested round trip entirely.
+ */
+async function closeEditorWindow(): Promise<void> {
+  // Bring the main window forward first — closing the frontmost window
+  // otherwise drops the user behind whatever app is underneath.
+  try {
+    const main = await WebviewWindow.getByLabel("main");
+    await main?.setFocus();
+  } catch (e) {
+    console.warn("[editor] could not focus main window:", e);
+  }
+
+  try {
+    await getCurrentWindow().close();
+  } catch (e) {
+    console.error("[editor] close() failed, destroying instead:", e);
+    try {
+      await getCurrentWindow().destroy();
+    } catch (e2) {
+      console.error("[editor] destroy() failed too:", e2);
+    }
+  }
+}
+
+/**
  * What the main window shows while the editor window is up. The editing
  * happens over there, so anything rendered here would just be a second,
  * stale copy of the same session competing for attention.
@@ -269,13 +299,16 @@ export function EditorWindow({ token }: { token: string }) {
     try {
       await client.setCuts(cutsRef.current);
       await client.applyCuts();
-      await emit(EDITED_EVENT, { token });
     } catch (e) {
       console.error("[editor] publish on close failed:", e);
       // Don't trap the user in a window they asked to close: the hold
       // lapses on its own and publishes as recorded shortly after.
     }
-    await getCurrentWindow().close().catch(() => {});
+    // Fire-and-forget: the close must not wait on the notification.
+    emit(EDITED_EVENT, { token }).catch((e) =>
+      console.error("[editor] emit failed:", e),
+    );
+    await closeEditorWindow();
   }, [client, token]);
 
   useEffect(() => {
@@ -345,12 +378,13 @@ export function EditorWindow({ token }: { token: string }) {
             dirtyRef.current = dirty;
           }}
           onApplied={() => {
-            // Saved from inside the editor. Flag it so the close handler
-            // doesn't prompt to publish something already published.
+            // Saved from inside the editor. Flag it first so the close
+            // handler doesn't prompt to publish what's already published.
             finishedRef.current = true;
-            void emit(EDITED_EVENT, { token })
-              .catch((e) => console.error("[editor] emit failed:", e))
-              .finally(() => void getCurrentWindow().close().catch(() => {}));
+            emit(EDITED_EVENT, { token }).catch((e) =>
+              console.error("[editor] emit failed:", e),
+            );
+            void closeEditorWindow();
           }}
         />
       </div>
