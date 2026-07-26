@@ -17,6 +17,7 @@ import {
   STUCK_COMPILING_TIMEOUT_MINUTES,
   MAX_COMPILE_ATTEMPTS,
   SCREENSHOT_RETENTION_DAYS,
+  EDIT_WINDOW_DAYS,
 } from "@lookout/shared";
 
 /**
@@ -306,6 +307,59 @@ async function cleanupCompletedScreenshots() {
     await db
       .update(schema.sessions)
       .set({ screenshotsPurgedAt: new Date() })
+      .where(eq(schema.sessions.id, session.id));
+  }
+
+  await purgeEditedOriginals();
+}
+
+/**
+ * Privacy backstop for the edit feature: cut minutes vanish from the
+ * published video but survive inside the (token-gated) uncut original. Once
+ * an EDITED session's re-edit window closes, delete the original so the cut
+ * content is truly gone; nulling original_video_r2_key freezes further
+ * editing. Sessions whose published video IS the original (never edited, or
+ * edits cleared) keep their single video file forever, as always.
+ */
+async function purgeEditedOriginals() {
+  const threshold = new Date(
+    Date.now() - EDIT_WINDOW_DAYS * 24 * 60 * 60_000,
+  );
+
+  const editedSessions = await db
+    .select({
+      id: schema.sessions.id,
+      originalVideoR2Key: schema.sessions.originalVideoR2Key,
+    })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.status, "complete"),
+        isNotNull(schema.sessions.originalVideoR2Key),
+        isNotNull(schema.sessions.videoR2Key),
+        sql`${schema.sessions.videoR2Key} <> ${schema.sessions.originalVideoR2Key}`,
+        lt(schema.sessions.lastEditCompileAt, threshold),
+      ),
+    );
+
+  for (const session of editedSessions) {
+    try {
+      await r2Client.send(
+        new DeleteObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: session.originalVideoR2Key!,
+        }),
+      );
+    } catch {
+      console.warn(
+        `Failed to delete original video for session ${session.id}, will retry next run`,
+      );
+      continue;
+    }
+
+    await db
+      .update(schema.sessions)
+      .set({ originalVideoR2Key: null, updatedAt: new Date() })
       .where(eq(schema.sessions.id, session.id));
   }
 }

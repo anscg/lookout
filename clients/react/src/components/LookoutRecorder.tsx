@@ -1,6 +1,8 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useLookout } from "../hooks/useLookout.js";
+import { useLookoutContext } from "../LookoutProvider.js";
 import { StatusBar } from "./StatusBar.js";
+import { TimelapseEditor } from "./TimelapseEditor.js";
 import { ScreenPreview } from "./ScreenPreview.js";
 import { CameraPreview } from "./CameraPreview.js";
 import { CameraSelector } from "./CameraSelector.js";
@@ -22,8 +24,41 @@ import { colors, fontSize, fontWeight, spacing } from "../ui/theme.js";
  *
  * Must be used within a `<LookoutProvider>`.
  */
-export function LookoutRecorder() {
+export interface LookoutRecorderProps {
+  /** Offer the cut editor on completed timelapses (default true). Programs
+   *  embedding the recorder can pass false to hide the affordance. */
+  editing?: boolean;
+}
+
+export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
   const { state, actions } = useLookout();
+  const { client, config } = useLookoutContext();
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [resolvedToken, setResolvedToken] = useState<string | null>(null);
+  const [sessionEditable, setSessionEditable] = useState(false);
+
+  // The editor needs a concrete token string and the session's editability.
+  // Resolve them once the recording reaches "complete".
+  useEffect(() => {
+    if (state.status !== "complete" || !editing) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [token, status] = await Promise.all([
+          client.resolveToken(),
+          client.getStatus(),
+        ]);
+        if (cancelled) return;
+        setResolvedToken(token);
+        setSessionEditable(status.editable === true);
+      } catch {
+        // Editability probe is best-effort — the video still plays.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [state.status, editing, client]);
 
   if (state.status === "loading") {
     return (
@@ -62,12 +97,36 @@ export function LookoutRecorder() {
     state.status === "complete" ||
     state.status === "failed"
   ) {
+    if (editorOpen && resolvedToken) {
+      return (
+        <PageContainer style={{ padding: spacing.xxl }}>
+          <TimelapseEditor
+            token={resolvedToken}
+            apiBaseUrl={config.apiBaseUrl}
+            onCancel={() => setEditorOpen(false)}
+            onApplied={() => {
+              // The session flips complete → compiling → complete on the
+              // server; the ResultView refetches the video on next mount.
+              setEditorOpen(false);
+              setSessionEditable(false);
+            }}
+          />
+        </PageContainer>
+      );
+    }
     return (
       <PageContainer style={{ padding: spacing.xxl }}>
         <ProcessingState
           status={state.status}
           trackedSeconds={state.trackedSeconds}
         />
+        {state.status === "complete" && editing && sessionEditable && resolvedToken && (
+          <div style={{ display: "flex", justifyContent: "center", marginTop: spacing.lg }}>
+            <Button variant="secondary" size="sm" onClick={() => setEditorOpen(true)}>
+              Edit timelapse
+            </Button>
+          </div>
+        )}
       </PageContainer>
     );
   }

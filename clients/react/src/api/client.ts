@@ -10,6 +10,10 @@ import type {
   RenameSessionResponse,
   StatusResponse,
   VideoResponse,
+  UnitsResponse,
+  SetCutsResponse,
+  ApplyCutsResponse,
+  CutInterval,
 } from "@lookout/shared";
 import type { TokenProvider } from "../types.js";
 
@@ -34,6 +38,16 @@ export interface LookoutClient {
   rename(name: string): Promise<RenameSessionResponse>;
   getStatus(): Promise<StatusResponse>;
   getVideo(): Promise<VideoResponse>;
+  /** Editor metadata: the compiled original's unit map (video second i ↔
+   *  wall clock), current cut list, and a token-gated presigned URL for the
+   *  UNCUT original video. */
+  getUnits(): Promise<UnitsResponse>;
+  /** Replace the session's cut list (full replace; [] clears all edits).
+   *  Returns the normalized list plus a server-authoritative preview. */
+  setCuts(cuts: CutInterval[]): Promise<SetCutsResponse>;
+  /** Apply the current cut list to the published video (a cut-compile —
+   *  usually a lossless stream copy, seconds not minutes). */
+  applyCuts(): Promise<ApplyCutsResponse>;
 }
 
 export class HttpError extends Error {
@@ -183,6 +197,23 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
 
     async getVideo() {
       return fetchJson<VideoResponse>(await sessionUrl("/video"));
+    },
+
+    async getUnits() {
+      return fetchJson<UnitsResponse>(await sessionUrl("/units"));
+    },
+
+    async setCuts(cuts) {
+      return fetchJson<SetCutsResponse>(await sessionUrl("/cuts"), {
+        method: "PUT",
+        body: JSON.stringify({ cuts }),
+      });
+    },
+
+    async applyCuts() {
+      return fetchJson<ApplyCutsResponse>(await sessionUrl("/compile"), {
+        method: "POST",
+      });
     },
   };
 }

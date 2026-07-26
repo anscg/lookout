@@ -127,6 +127,13 @@
       "when": 1785059903186,
       "tag": "0017_program_icon_url",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1785077227872,
+      "tag": "0018_session_edits",
+      "breakpoints": true
     }
   ]
 }

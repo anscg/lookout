@@ -468,7 +468,13 @@ Drop-in recorder widget. Handles the full lifecycle: capture, upload, pause/resu
 <LookoutRecorder />
 ```
 
-No props — reads everything from context.
+**Props (`LookoutRecorderProps`):**
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `editing` | `boolean?` | Offer the cut editor on completed timelapses (default `true`). Pass `false` to hide the affordance. |
+
+Everything else is read from context.
 
 **Renders based on status:**
 - `loading` — spinner
@@ -700,6 +706,51 @@ Full session detail view with video player, stats, and compilation polling. Stan
 | `onBack` | `() => void?` | Back button handler |
 | `onArchive` | `() => void?` | Archive button handler |
 
+When the session is `complete` and still editable, the header shows an **Edit**
+button that swaps the view for a `<TimelapseEditor>`; applying edits returns to
+the detail view and polls the cut-compile back to `complete`.
+
+---
+
+### `<TimelapseEditor>`
+
+Post-compile cut editor. Previews the **uncut original** video (1 second of
+video = 1 capture unit = 1 real-world minute), lets the user drag out cut
+regions on a filmstrip timeline, and applies them via a fast server-side
+cut-compile (usually a lossless stream copy). Standalone (no provider needed).
+
+```tsx
+<TimelapseEditor
+  token="..."
+  apiBaseUrl="https://lookout.hackclub.com"
+  onApplied={() => refetchStatus()}
+  onCancel={() => setEditing(false)}
+/>
+```
+
+**Props (`TimelapseEditorProps`):**
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `token` | `string` | Session token |
+| `apiBaseUrl` | `string` | Server API base URL |
+| `onApplied` | `() => void?` | Cuts were saved and the cut-compile started — return to your detail view and poll `/status` |
+| `onCancel` | `() => void?` | User backed out without applying |
+
+**Interactions:**
+- **Drag on the filmstrip** creates a cut region in one gesture (edges snap to
+  whole minutes); **plain click seeks**; the **ruler lane scrubs**.
+- Regions are first-class objects: drag to move, edge handles to resize
+  (the preview follows the dragged edge, showing the boundary frame),
+  click to select, Delete/Backspace to remove.
+- **Space** plays/pauses. Playback **skips cut regions** (previewing the
+  published result); scrubbing passes through them with a "will be removed"
+  overlay so edges can be judged.
+- Footer shows server-authoritative "kept / removed" durations; recording
+  pauses appear as dashed gap markers on the strip.
+- Shows "n edits remaining" as the per-session recompile budget runs low,
+  and a not-editable state once the original video has been purged.
+
 ---
 
 ## Callbacks
@@ -781,6 +832,9 @@ const session = await client.getSession();
 | `rename` | `(name: string) => Promise<RenameSessionResponse>` | Rename the timelapse |
 | `getStatus` | `() => Promise<StatusResponse>` | Poll compilation status |
 | `getVideo` | `() => Promise<VideoResponse>` | Get video URL |
+| `getUnits` | `() => Promise<UnitsResponse>` | Editor metadata: unit map, cuts, presigned original-video URL |
+| `setCuts` | `(cuts: CutInterval[]) => Promise<SetCutsResponse>` | Replace the session's cut list (`[]` clears) |
+| `applyCuts` | `() => Promise<ApplyCutsResponse>` | Apply the cut list to the published video (cut-compile) |
 
 ---
 

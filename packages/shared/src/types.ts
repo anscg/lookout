@@ -1,4 +1,5 @@
 import type { CaptureFormat, SessionStatus } from "./constants.js";
+import type { CutInterval, VideoUnit } from "./cuts.js";
 
 export interface Session {
   id: string;
@@ -104,6 +105,15 @@ export interface SessionResponse {
   /** Redirect hook URL to open once the timelapse completes; `null`/absent
    *  when the session has none. */
   redirectUrl?: string | null;
+  /** The session's cut list; `[]` when never edited. Absent on pre-edits
+   *  servers. Note `trackedSeconds` already reflects these cuts. */
+  cuts?: CutInterval[];
+  /** Credited seconds removed by `cuts` (trackedSeconds = uncut − this). */
+  cutSeconds?: number;
+  /** Tracked seconds before subtracting cuts. */
+  uncutTrackedSeconds?: number;
+  /** Whether the compiled timelapse can (still) be edited. */
+  editable?: boolean;
   metadata: Record<string, unknown>;
 }
 
@@ -118,7 +128,66 @@ export interface TimingsResponse {
   clientInfo: ClientInfo | null;
   /** First recorded JA4 TLS fingerprint (edge-observed); `null` if none. */
   ja4: string | null;
+  /** Kept capture timestamps — captures inside a cut interval are EXCLUDED
+   *  so heartbeat forwarders respect edits with no code changes. */
   timestamps: string[];
+  /** The session's cut list; `[]` when never edited. Absent on pre-edits
+   *  servers. */
+  cuts?: CutInterval[];
+  /** Number of confirmed captures removed by `cuts`. */
+  cutCount?: number;
+  /** Capture timestamps removed by `cuts`. Only present when the request
+   *  passed `?includeCut=true`. */
+  cutTimestamps?: string[];
+}
+
+// -- Edits (cuts) --
+
+export interface UnitsResponse {
+  /** Units of the compiled ORIGINAL video, in output order: array index =
+   *  video second = real-world minute. Empty for sessions compiled before
+   *  edit support (not editable). */
+  units: VideoUnit[];
+  /** Current cut list ([] = no edits). */
+  cuts: CutInterval[];
+  /** Whether the session can (still) be edited: original video present,
+   *  recompile budget remaining. */
+  editable: boolean;
+  /** Why `editable` is false (for UX copy); absent when editable. */
+  editableReason?: "no_original" | "recompiles_exhausted" | "not_complete";
+  /** Presigned GET URL (~1h) of the UNCUT original video — the editor's
+   *  preview source. Token-gated by this endpoint; deliberately NOT the
+   *  public media URL, which after an edit serves the cut version only.
+   *  Null when not editable. */
+  originalVideoUrl: string | null;
+  /** Remaining user-initiated cut-compiles. */
+  recompilesRemaining: number;
+}
+
+export interface SetCutsRequest {
+  cuts: CutInterval[];
+}
+
+export interface SetCutsResponse {
+  /** Normalized (sorted, merged, clamped) cut list as persisted. */
+  cuts: CutInterval[];
+  /** Units in the original video. */
+  unitsTotal: number;
+  /** Units removed by the normalized list. */
+  unitsCut: number;
+  /** Post-cut tracked seconds (what GET /sessions/:token will report once
+   *  the cuts are applied). */
+  trackedSeconds: number;
+  /** Tracked seconds before subtracting cuts. */
+  uncutTrackedSeconds: number;
+}
+
+export interface ApplyCutsResponse {
+  status: SessionStatus;
+  /** True when the change was applied instantly without a compile job
+   *  (clearing all cuts just repoints the published video at the original). */
+  instant: boolean;
+  recompilesRemaining: number;
 }
 
 export interface UploadUrlResponse {
@@ -194,6 +263,8 @@ export interface StatusResponse {
   /** Redirect hook URL — clients watching the compile open this when the
    *  status flips to "complete". Absent when the session has none. */
   redirectUrl?: string;
+  /** Whether the compiled timelapse can (still) be edited. */
+  editable?: boolean;
 }
 
 export interface VideoResponse {

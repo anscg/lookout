@@ -12,11 +12,21 @@ import {
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq, and, sql } from "drizzle-orm";
+import {
+  computeKeptRanges,
+  computeCutSeconds,
+  type CaptureRowForCuts,
+  type CutInterval,
+  type KeptRange,
+  type VideoUnit,
+} from "@lookout/shared";
 import * as schema from "./schema.js";
 import {
   buildSegment,
+  cutVideoToKeptRanges,
   SEGMENT_CONCURRENCY,
   SEGMENT_FPS,
+  SEGMENT_GOP_ARGS,
   ASSEMBLE_TIMEOUT_MS,
 } from "./segments.js";
 
@@ -116,6 +126,80 @@ async function uploadAndVerify(
   }
 }
 
+/** Download an R2 object to a local file, with retries. */
+async function downloadObject(r2Key: string, destPath: string): Promise<void> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await r2Client.send(
+        new GetObjectCommand({ Bucket: R2_BUCKET, Key: r2Key }),
+      );
+      const body = await response.Body!.transformToByteArray();
+      await fs.writeFile(destPath, body);
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(`Failed to download ${r2Key} after 3 attempts`, {
+    cause: lastErr,
+  });
+}
+
+/** Extract the session thumbnail (first frame) from a compiled video. */
+async function extractThumbnail(
+  videoPath: string,
+  thumbnailPath: string,
+): Promise<void> {
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-i", videoPath,
+      "-vframes", "1",
+      "-vf", "scale=480:-1",
+      "-q:v", "5",
+      "-y",
+      thumbnailPath,
+    ],
+    { timeout: 30_000 },
+  );
+}
+
+/** Best-effort R2 delete (orphans are acceptable; jobs must not fail on it). */
+async function deleteObjectQuiet(r2Key: string): Promise<void> {
+  try {
+    await r2Client.send(
+      new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: r2Key }),
+    );
+  } catch {
+    // Non-fatal: orphaned R2 objects can be cleaned up later
+  }
+}
+
+/** Confirmed capture rows in the shape the shared cut/tracked-time math
+ *  expects. The coalesce mirrors the timings endpoint exactly. */
+async function getCaptureRowsForCuts(
+  sessionId: string,
+): Promise<CaptureRowForCuts[]> {
+  const rows = await db.execute<{
+    ts: Date | string;
+    credited_seconds: number | string | null;
+    minute_bucket: number | string;
+  }>(sql`
+    SELECT coalesce(captured_at, requested_at) AS ts,
+           credited_seconds,
+           minute_bucket
+    FROM screenshots
+    WHERE session_id = ${sessionId} AND confirmed = true
+  `);
+  return rows.rows.map((r) => ({
+    timeMs: (r.ts instanceof Date ? r.ts : new Date(r.ts)).getTime(),
+    creditedSeconds:
+      r.credited_seconds === null ? null : Number(r.credited_seconds),
+    minuteBucket: Number(r.minute_bucket),
+  }));
+}
+
 export async function compileTimelapse(sessionId: string): Promise<{
   videoUrl: string;
   videoR2Key: string;
@@ -156,16 +240,31 @@ export async function compileTimelapse(sessionId: string): Promise<{
   await fs.mkdir(tmpDir, { recursive: true });
 
   try {
+    const cuts: CutInterval[] = Array.isArray(session.cuts)
+      ? (session.cuts as CutInterval[])
+      : [];
+
+    // ── Half B: cut apply ─────────────────────────────────────
+    // The original video already exists with its unit map — this is a
+    // user-initiated edit (or an un-cut). Never touches capture units, so
+    // it works even after the screenshot retention purge.
+    if (session.originalVideoR2Key && (session.videoUnits?.length ?? 0) > 0) {
+      return await applyCutCompile(session, cuts, tmpDir);
+    }
+
+    // ── Half A: original build (the pre-existing pipeline) ───────
+
     // Step 1: Sample selection — pick best screenshot per minute bucket
     // Using raw SQL for DISTINCT ON which Drizzle doesn't support directly
     const sampledScreenshots = await db.execute<{
       id: string;
       r2_key: string;
       minute_bucket: number;
-      requested_at: Date;
+      requested_at: Date | string;
+      captured_at: Date | string | null;
       format: string;
     }>(sql`
-      SELECT DISTINCT ON (minute_bucket) id, r2_key, minute_bucket, requested_at, format
+      SELECT DISTINCT ON (minute_bucket) id, r2_key, minute_bucket, requested_at, captured_at, format
       FROM screenshots
       WHERE session_id = ${sessionId} AND confirmed = true
       ORDER BY minute_bucket,
@@ -281,6 +380,21 @@ export async function compileTimelapse(sessionId: string): Promise<{
       );
     }
 
+    // The units that actually made it in, in output order. Array index =
+    // video second = real-world minute — the exact video-time ↔ wall-clock
+    // map the edit feature scrubs and cuts against. Built from the segment
+    // list (not the sampled rows) so build-failure holes never desync it.
+    const videoUnits: VideoUnit[] = [];
+    for (let i = 0; i < total; i++) {
+      if (segmentPaths[i] === null) continue;
+      const ss = sampledScreenshots.rows[i];
+      const ts = ss.captured_at ?? ss.requested_at;
+      videoUnits.push({
+        capturedAt: (ts instanceof Date ? ts : new Date(ts)).toISOString(),
+        screenshotId: ss.id,
+      });
+    }
+
     // Step 4: Assemble — stream-copy concat of the segments, remuxed to MP4.
     // No re-encoding on the happy path: segments share pinned parameters and
     // each starts on an IDR frame, so this is I/O-bound (seconds, even for a
@@ -291,8 +405,8 @@ export async function compileTimelapse(sessionId: string): Promise<{
       segments.map((p) => `file '${p}'`).join("\n") + "\n",
     );
 
-    const mp4Path = path.join(tmpDir, "timelapse.mp4");
-    let mp4Size: number;
+    const originalPath = path.join(tmpDir, "original.mp4");
+    let originalSize: number;
     try {
       await execFileAsync(
         "ffmpeg",
@@ -303,16 +417,23 @@ export async function compileTimelapse(sessionId: string): Promise<{
           "-c", "copy",
           "-movflags", "+faststart",
           "-y",
-          mp4Path,
+          originalPath,
         ],
         { timeout: ASSEMBLE_TIMEOUT_MS },
       );
-      mp4Size = await verifyVideo(mp4Path, unitsIncluded, SEGMENT_FPS, "MP4");
+      originalSize = await verifyVideo(
+        originalPath,
+        unitsIncluded,
+        SEGMENT_FPS,
+        "MP4",
+      );
     } catch (err) {
       // Safety net: if the copied stream doesn't verify (e.g. an encoder
       // parameter drifted between segments), re-encode the already-built
       // segments into one uniform stream. One extra ffmpeg pass over 1s
-      // segments — not a second pipeline.
+      // segments — not a second pipeline. The GOP args keep the fallback
+      // output on the same 1s IDR grid as the copy path, so the video stays
+      // losslessly cuttable by the edit feature.
       console.warn("Stream-copy assembly failed, re-encoding segments:", err);
       await execFileAsync(
         "ffmpeg",
@@ -327,38 +448,51 @@ export async function compileTimelapse(sessionId: string): Promise<{
           "-crf", "18",
           "-pix_fmt", "yuv420p",
           "-r", String(SEGMENT_FPS),
+          ...SEGMENT_GOP_ARGS,
           "-movflags", "+faststart",
           "-y",
-          mp4Path,
+          originalPath,
         ],
         { timeout: ASSEMBLE_TIMEOUT_MS },
       );
-      mp4Size = await verifyVideo(
-        mp4Path,
+      originalSize = await verifyVideo(
+        originalPath,
         unitsIncluded,
         SEGMENT_FPS,
         "MP4 (re-encoded)",
       );
     }
+    // Both assembly paths land on the pinned 1s closed-GOP grid.
+    const videoCopyAligned = true;
 
-    // Step 4.5: Extract thumbnail from first frame
+    // Step 4.25: apply cuts, if any. First compiles never have cuts (they're
+    // only settable on complete sessions) — this branch covers recompiles of
+    // sessions that lost their original (e.g. internal recompile of a failed
+    // edited compile).
+    const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
+    const keptRanges = computeKeptRanges(unitTimesMs, cuts);
+    const hasEffectiveCuts =
+      cuts.length > 0 &&
+      keptRanges.reduce((n, r) => n + (r.end - r.start), 0) < videoUnits.length;
+    if (cuts.length > 0 && keptRanges.length === 0) {
+      throw new Error("Cut list removes every capture unit — refusing to compile an empty video");
+    }
+
+    let publishPath = originalPath;
+    let publishSize = originalSize;
+    let publishR2Key = `timelapses/${sessionId}/original.mp4`;
+    const originalR2Key = `timelapses/${sessionId}/original.mp4`;
+
+    if (hasEffectiveCuts) {
+      publishPath = await cutVideoToKeptRanges(tmpDir, originalPath, keptRanges, videoCopyAligned);
+      publishSize = (await fs.stat(publishPath)).size;
+      publishR2Key = `timelapses/${sessionId}/edited.mp4`;
+    }
+
+    // Step 4.5: Extract thumbnail from the PUBLISHED video's first frame
+    // (post-cut when edited, so a cut first minute never leaks a stale frame).
     const thumbnailPath = path.join(tmpDir, "thumbnail.jpg");
-    await execFileAsync(
-      "ffmpeg",
-      [
-        "-i",
-        mp4Path,
-        "-vframes",
-        "1",
-        "-vf",
-        "scale=480:-1",
-        "-q:v",
-        "5",
-        "-y",
-        thumbnailPath,
-      ],
-      { timeout: 30_000 },
-    );
+    await extractThumbnail(publishPath, thumbnailPath);
 
     // Step 5: Upload all artifacts to R2 and verify
     const thumbnailR2Key = `timelapses/${sessionId}/thumbnail.jpg`;
@@ -373,8 +507,32 @@ export async function compileTimelapse(sessionId: string): Promise<{
       }),
     );
 
-    const videoR2Key = `timelapses/${sessionId}/timelapse.mp4`;
-    await uploadAndVerify(mp4Path, videoR2Key, "video/mp4", mp4Size, "MP4");
+    await uploadAndVerify(
+      originalPath,
+      originalR2Key,
+      "video/mp4",
+      originalSize,
+      "MP4 (original)",
+    );
+    if (hasEffectiveCuts) {
+      await uploadAndVerify(
+        publishPath,
+        publishR2Key,
+        "video/mp4",
+        publishSize,
+        "MP4 (edited)",
+      );
+    }
+
+    // Authoritative cut-seconds for the tracked-time subtraction.
+    const cutSeconds = hasEffectiveCuts
+      ? computeCutSeconds(
+          await getCaptureRowsForCuts(sessionId),
+          session.trackingMode === "credit" ? "credit" : "bucket",
+          session.trackedSeconds ?? 0,
+          cuts,
+        )
+      : 0;
 
     // Step 6: Mark complete
     const thumbnailUrl = R2_PUBLIC_DOMAIN
@@ -382,15 +540,20 @@ export async function compileTimelapse(sessionId: string): Promise<{
       : thumbnailR2Key;
 
     const videoUrl = R2_PUBLIC_DOMAIN
-      ? `https://${R2_PUBLIC_DOMAIN}/${videoR2Key}`
-      : videoR2Key;
+      ? `https://${R2_PUBLIC_DOMAIN}/${publishR2Key}`
+      : publishR2Key;
 
     await db
       .update(schema.sessions)
       .set({
         status: "complete",
         videoUrl,
-        videoR2Key,
+        videoR2Key: publishR2Key,
+        originalVideoR2Key: originalR2Key,
+        videoUnits,
+        videoCopyAligned,
+        cutSeconds,
+        ...(hasEffectiveCuts ? { lastEditCompileAt: new Date() } : {}),
         thumbnailUrl,
         thumbnailR2Key,
         updatedAt: new Date(),
@@ -410,13 +573,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
       );
 
     for (const ss of unsampled) {
-      try {
-        await r2Client.send(
-          new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: ss.r2Key }),
-        );
-      } catch {
-        // Non-fatal: orphaned R2 objects can be cleaned up later
-      }
+      await deleteObjectQuiet(ss.r2Key);
     }
 
     // Delete unconfirmed screenshot records
@@ -431,7 +588,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
 
     return {
       videoUrl,
-      videoR2Key,
+      videoR2Key: publishR2Key,
       thumbnailUrl,
       thumbnailR2Key,
     };
@@ -439,4 +596,120 @@ export async function compileTimelapse(sessionId: string): Promise<{
     // Always clean up temp directory
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Half B of the compile job: the original video and its unit map already
+ * exist, so apply (or clear) the session's cut list against it. Downloads a
+ * single MP4, cuts it (usually a lossless stream copy), regenerates the
+ * thumbnail, and republishes — no capture units involved.
+ */
+async function applyCutCompile(
+  session: typeof schema.sessions.$inferSelect,
+  cuts: CutInterval[],
+  tmpDir: string,
+): Promise<{
+  videoUrl: string;
+  videoR2Key: string;
+  thumbnailUrl: string;
+  thumbnailR2Key: string;
+}> {
+  const sessionId = session.id;
+  const originalR2Key = session.originalVideoR2Key!;
+  const editedR2Key = `timelapses/${sessionId}/edited.mp4`;
+  const videoUnits = session.videoUnits as VideoUnit[];
+
+  const originalPath = path.join(tmpDir, "original.mp4");
+  await downloadObject(originalR2Key, originalPath);
+
+  const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
+  const keptRanges = computeKeptRanges(unitTimesMs, cuts);
+  const keptUnits = keptRanges.reduce((n, r) => n + (r.end - r.start), 0);
+  const hasEffectiveCuts = cuts.length > 0 && keptUnits < videoUnits.length;
+
+  if (cuts.length > 0 && keptRanges.length === 0) {
+    throw new Error(
+      "Cut list removes every capture unit — refusing to compile an empty video",
+    );
+  }
+
+  let publishPath = originalPath;
+  let publishR2Key = originalR2Key;
+
+  if (hasEffectiveCuts) {
+    publishPath = await cutVideoToKeptRanges(
+      tmpDir,
+      originalPath,
+      keptRanges,
+      session.videoCopyAligned === true,
+    );
+    publishR2Key = editedR2Key;
+  }
+
+  // Thumbnail follows the published video: a cut first minute must not leak
+  // a stale first frame, and un-cutting must restore the original's.
+  const thumbnailPath = path.join(tmpDir, "thumbnail.jpg");
+  await extractThumbnail(publishPath, thumbnailPath);
+
+  const thumbnailR2Key = `timelapses/${sessionId}/thumbnail.jpg`;
+  const thumbnailBytes = await fs.readFile(thumbnailPath);
+  await r2Client.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: thumbnailR2Key,
+      Body: thumbnailBytes,
+      ContentType: "image/jpeg",
+      CacheControl: "public, max-age=86400",
+    }),
+  );
+
+  if (hasEffectiveCuts) {
+    const publishSize = (await fs.stat(publishPath)).size;
+    await uploadAndVerify(
+      publishPath,
+      publishR2Key,
+      "video/mp4",
+      publishSize,
+      "MP4 (edited)",
+    );
+  } else if (session.videoR2Key && session.videoR2Key !== originalR2Key) {
+    // Un-cut: the original becomes the published video again; drop the now
+    // stale edited artifact.
+    await deleteObjectQuiet(session.videoR2Key);
+  }
+
+  const cutSeconds = hasEffectiveCuts
+    ? computeCutSeconds(
+        await getCaptureRowsForCuts(sessionId),
+        session.trackingMode === "credit" ? "credit" : "bucket",
+        session.trackedSeconds ?? 0,
+        cuts,
+      )
+    : 0;
+
+  const thumbnailUrl = R2_PUBLIC_DOMAIN
+    ? `https://${R2_PUBLIC_DOMAIN}/${thumbnailR2Key}`
+    : thumbnailR2Key;
+  const videoUrl = R2_PUBLIC_DOMAIN
+    ? `https://${R2_PUBLIC_DOMAIN}/${publishR2Key}`
+    : publishR2Key;
+
+  await db
+    .update(schema.sessions)
+    .set({
+      status: "complete",
+      videoUrl,
+      videoR2Key: publishR2Key,
+      cutSeconds,
+      // Cleared cuts stay [] (the user's choice); the window anchor still
+      // advances so the retention job eventually reclaims the original of a
+      // session that was ever edited.
+      lastEditCompileAt: new Date(),
+      thumbnailUrl,
+      thumbnailR2Key,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.sessions.id, sessionId));
+
+  return { videoUrl, videoR2Key: publishR2Key, thumbnailUrl, thumbnailR2Key };
 }

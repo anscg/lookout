@@ -1,11 +1,14 @@
 // Segment building: normalizing capture units (legacy JPEGs and per-minute
 // clips) into uniform 1-second video segments that the compiler can
-// stream-copy concatenate into the final timelapse. Kept free of DB/R2
-// imports so the ffmpeg contract is testable in isolation.
+// stream-copy concatenate into the final timelapse. Also the cut step of
+// the edit feature, which exploits the same pinned grid. Kept free of DB/R2
+// imports so the ffmpeg contracts are testable in isolation.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { KeptRange } from "@lookout/shared";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,10 +33,22 @@ export const SEGMENT_TIMEOUT_MS = 120_000;
  *  fallback too. */
 export const ASSEMBLE_TIMEOUT_MS = 1_800_000;
 
+/** GOP pinning shared by every encode that produces (part of) a compiled
+ *  timelapse: a closed GOP of exactly one segment (1 second) starting on an
+ *  IDR frame, scene-cut keyframes disabled. This grid is ALSO what makes
+ *  compiled videos losslessly cuttable at second boundaries by the edit
+ *  feature's stream-copy cut — every encode path (segments, assembly
+ *  fallback, edited-video re-encode fallback) must keep it. */
+export const SEGMENT_GOP_ARGS = [
+  "-g", String(SEGMENT_FPS),
+  "-keyint_min", String(SEGMENT_FPS),
+  "-sc_threshold", "0",
+  "-x264-params", "open-gop=0",
+];
+
 /** Pinned x264 parameters shared by EVERY segment encode. Segments must
  *  be bit-compatible so final assembly can stream-copy concatenate them:
- *  fixed profile/level, a closed GOP of exactly one segment starting on
- *  an IDR frame, scene-cut keyframes disabled, single-threaded (the
+ *  fixed profile/level, the pinned GOP grid above, single-threaded (the
  *  parallelism is at the segment level). Changing any of these breaks
  *  copy-concat — keep in lockstep with the assembly fallback and the
  *  mixed-session compile test. */
@@ -50,10 +65,7 @@ export const SEGMENT_ENCODE_ARGS = [
   // modest.
   "-crf", "18",
   "-pix_fmt", "yuv420p",
-  "-g", String(SEGMENT_FPS),
-  "-keyint_min", String(SEGMENT_FPS),
-  "-sc_threshold", "0",
-  "-x264-params", "open-gop=0",
+  ...SEGMENT_GOP_ARGS,
   "-threads", "1",
 ];
 
@@ -153,4 +165,128 @@ export async function buildSegment(
 
   await verifySegmentFrameCount(segmentPath);
   return segmentPath;
+}
+
+/**
+ * The edit feature's cut step: produce a video containing only the kept
+ * ranges of a compiled original.
+ *
+ * Fast path (`aligned`): every second of the original starts on an IDR
+ * frame in a closed GOP (the pinned grid above), and one second = one
+ * capture unit. Each kept range is extracted losslessly with an input seek
+ * to its IDR (`-ss` lands exactly on the second boundary) plus an exact
+ * packet count (`-frames:v` applies to copied packets), into an MPEG-TS
+ * intermediate; the intermediates stream-copy concat into the edited MP4.
+ * NOT the concat demuxer's inpoint/outpoint — outpoint is dts-based, and
+ * B-frame dts offsets leak ~2 frames of the CUT region past each boundary.
+ * This path is I/O-bound (seconds even for a 12-hour session) and adds
+ * zero generation loss.
+ *
+ * Fallback (originals that predate GOP pinning, or a failed copy): one
+ * frame-exact re-encode of the whole original through a `select` filter
+ * keeping pts ∈ [start, end) per range, with the pinned parameters — so
+ * the output is itself aligned for future edits.
+ */
+export async function cutVideoToKeptRanges(
+  tmpDir: string,
+  originalPath: string,
+  keptRanges: KeptRange[],
+  aligned: boolean,
+): Promise<string> {
+  if (keptRanges.length === 0) {
+    throw new Error("cutVideoToKeptRanges: no kept ranges");
+  }
+
+  const editedPath = path.join(tmpDir, "edited.mp4");
+  const keptUnits = keptRanges.reduce((n, r) => n + (r.end - r.start), 0);
+  const expectedFrames = keptUnits * SEGMENT_FPS;
+
+  const verify = async (label: string, toleranceFrames: number) => {
+    const stat = await fs.stat(editedPath);
+    if (stat.size === 0) throw new Error(`${label}: ffmpeg produced empty output`);
+    const frames = await probeFrameCount(editedPath);
+    if (
+      !Number.isFinite(frames) ||
+      Math.abs(frames - expectedFrames) > toleranceFrames
+    ) {
+      throw new Error(
+        `${label}: frame count mismatch: expected ${expectedFrames} (±${toleranceFrames}), got ${frames}`,
+      );
+    }
+  };
+
+  if (aligned) {
+    try {
+      // 1. Extract each kept range losslessly into a TS intermediate.
+      const rangePaths: string[] = [];
+      for (const [i, r] of keptRanges.entries()) {
+        const rangePath = path.join(tmpDir, `kept_${i}.ts`);
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-ss", String(r.start),
+            "-i", originalPath,
+            "-c", "copy",
+            "-frames:v", String((r.end - r.start) * SEGMENT_FPS),
+            "-avoid_negative_ts", "make_zero",
+            "-f", "mpegts",
+            "-y",
+            rangePath,
+          ],
+          { timeout: ASSEMBLE_TIMEOUT_MS },
+        );
+        rangePaths.push(rangePath);
+      }
+
+      // 2. Stream-copy concat the ranges (same mechanism as assembly).
+      const listPath = path.join(tmpDir, "kept_ranges.txt");
+      await fs.writeFile(
+        listPath,
+        rangePaths.map((p) => `file '${p}'`).join("\n") + "\n",
+      );
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-f", "concat",
+          "-safe", "0",
+          "-i", listPath,
+          "-c", "copy",
+          "-movflags", "+faststart",
+          "-y",
+          editedPath,
+        ],
+        { timeout: ASSEMBLE_TIMEOUT_MS },
+      );
+      // The copy path must be frame-EXACT — that's the whole point.
+      await verify("Edited MP4 (copy)", 0);
+      return editedPath;
+    } catch (err) {
+      console.warn("Stream-copy cut failed, re-encoding kept ranges:", err);
+    }
+  }
+
+  // Frame-exact single-pass re-encode: keep frames whose pts falls in any
+  // kept [start, end) range, then retime onto a contiguous 30fps grid.
+  const keepExpr = keptRanges
+    .map((r) => `(gte(t\\,${r.start})*lt(t\\,${r.end}))`)
+    .join("+");
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-i", originalPath,
+      "-vf", `select='${keepExpr}',setpts=N/(${SEGMENT_FPS}*TB)`,
+      "-r", String(SEGMENT_FPS),
+      "-c:v", "libx264",
+      "-preset", "fast",
+      "-crf", "18",
+      "-pix_fmt", "yuv420p",
+      ...SEGMENT_GOP_ARGS,
+      "-movflags", "+faststart",
+      "-y",
+      editedPath,
+    ],
+    { timeout: ASSEMBLE_TIMEOUT_MS },
+  );
+  await verify("Edited MP4 (re-encoded)", 1);
+  return editedPath;
 }

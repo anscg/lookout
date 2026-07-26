@@ -445,6 +445,37 @@ Notes:
 
 > **Note:** The original screenshot images are only retained for 7 days after a session stops, after which the JPEGs are deleted from storage. The capture timestamps (and the compiled video and thumbnail) are kept.
 
+## Edits and cuts
+
+Users can **edit** a completed timelapse in the official clients: they select
+wall-clock stretches of the recording to remove ("cuts"), and Lookout removes
+those minutes from the published video, the `/timings` heartbeats, and
+`trackedSeconds` — consistently, from one stored cut list of
+`{start, end}` intervals.
+
+What this means for your program:
+
+- **Nothing in your integration changes.** `trackedSeconds` and `/timings`
+  already reflect the user's edits. If you forward `/timings` to Hackatime as
+  described above, cut minutes are simply absent from the heartbeat array.
+- **Cuts only ever shrink the numbers.** A user cannot gain time by editing —
+  removing footage removes its credit. The pre-edit value is available as
+  `uncutTrackedSeconds`, and the intervals themselves as `cuts`, on
+  `GET /api/sessions/:token` (and `?includeCut=true` on `/timings` returns
+  the removed timestamps) if you want to audit or display them.
+- **Re-editing is time-boxed.** Users can revise or clear their cuts for up
+  to 7 days after their last edit; then the uncut original video is deleted
+  (the cut content is meant to be gone — think "I accidentally recorded my
+  bank tab") and the edit becomes final.
+- **Opting out of the UI:** the hosted web recorder hides the edit button
+  when the session URL carries `?edit=false`; `<LookoutRecorder editing={false}>`
+  does the same in the React SDK. The API itself stays available to the
+  token holder either way.
+- Forward heartbeats **after** the user is done editing when possible (e.g.
+  when you accept a submission) — if you forwarded earlier and the user then
+  cuts, re-fetch `/timings` and reconcile, since Hackatime won't know about
+  the removal.
+
 ## Client telemetry
 
 Every recording client reports a free-form **client info** string on each `upload-url` request (query param `clientInfo`). It's like an HTTP User-Agent but with Lookout-specific info — for telemetry and debugging. The server stores it opaquely (never parses it) and surfaces the session's first recorded value as `clientInfo` on `GET /api/sessions/:token`, the timings endpoint, and the internal admin endpoint.

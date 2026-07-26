@@ -481,10 +481,17 @@ GET /api/sessions/:token/timings
 
 Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the session, oldest first. Token-gated public endpoint. Uses each screenshot's `capturedAt` (client-attested capture moment); rows predating the `captured_at` column fall back to `requestedAt` so the array is never sparse.
 
+**Cuts are respected by default.** Captures whose timestamp falls inside the session's [cut list](#edits-cuts) are excluded from `timestamps` (so heartbeat forwarders honor user edits with no code changes) and surfaced separately: `cuts` carries the intervals, `cutCount` the number of removed captures, and `?includeCut=true` adds a `cutTimestamps` array.
+
 **Path Parameters:**
 | Name | Type | Description |
 |------|------|-------------|
 | `token` | string | 64-char hex session token |
+
+**Query Parameters:**
+| Name | Type | Description |
+|------|------|-------------|
+| `includeCut` | boolean | Optional. When `true`, adds `cutTimestamps` (the removed captures) to the response |
 
 **Response `200 OK`:**
 ```json
@@ -509,7 +516,10 @@ Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the
 | `first` | string \| null | Earliest timestamp (= `timestamps[0]`); `null` if no screenshots |
 | `last` | string \| null | Latest timestamp (= last element); `null` if no screenshots |
 | `clientInfo` | string \| null | [Client telemetry string](#client-info) from the session's first screenshot upload; `null` if none recorded |
-| `timestamps` | string[] | ISO-8601 timestamps, ascending |
+| `timestamps` | string[] | ISO-8601 timestamps of KEPT captures, ascending |
+| `cuts` | array | The session's cut list (`[{start, end}]`); `[]` when never edited |
+| `cutCount` | integer | Confirmed captures removed by the cut list |
+| `cutTimestamps` | string[] | Only with `?includeCut=true`: the removed timestamps, ascending |
 
 > **ℹ️ `count` is the number of screenshots, not minutes.** More than one capture can fall within the same minute (retries, resume, clock jitter), so `count` can exceed the number of distinct minutes — it is **not** a count of tracked minutes. For tracked time use `trackedSeconds`.
 
@@ -524,6 +534,89 @@ Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the
 - `429` — Rate limit exceeded
 
 > **Note:** The original screenshot images are only retained for 7 days after a session stops, after which the JPEGs are deleted from storage. The capture timestamps returned by this endpoint — along with the compiled video and thumbnail — are kept.
+
+---
+
+### Edits (Cuts)
+
+A completed timelapse can be **edited** by its owner: an edit is a **cut list** of absolute wall-clock intervals of the session that are removed from every output —
+
+```json
+[
+  { "start": "2026-07-26T14:03:00.000Z", "end": "2026-07-26T14:11:00.000Z" },
+  { "start": "2026-07-26T15:40:00.000Z", "end": "2026-07-26T15:44:00.000Z" }
+]
+```
+
+Cuts are intervals (not video offsets) because Lookout is heartbeat-based — the same list drives all three derived views consistently:
+
+| Consumer | Effect |
+|----------|--------|
+| Published video | Capture units inside a cut are removed (the video gets 1 second shorter per cut minute) |
+| [`GET /timings`](#get-capture-timings) | Removed captures are excluded from `timestamps` by default |
+| `trackedSeconds` | Reported as raw − `cutSeconds` on every endpoint (raw stays available as `uncutTrackedSeconds`) |
+
+**Membership rule:** a capture is cut iff its timestamp ∈ `[start, end)` of any interval. Granularity is effectively whole minutes (one capture unit ≈ one minute ≈ one second of video).
+
+**Mechanics:** the first compile always produces the **uncut original** video and records its unit map. Applying cuts is a *cut-compile*: a lossless stream-copy of the kept ranges of the original (seconds, even for 12-hour sessions; no quality loss; works after the 7-day screenshot purge). The original stays reachable only through the session token; **7 days after the last cut-compile** the retention job deletes the original of edited sessions, so the cut content is truly gone and editing freezes. Cutting can only *reduce* tracked time — there is no fraud surface.
+
+Session responses (`GET /:token`, `/status`, internal) carry `cuts`, `cutSeconds`, `uncutTrackedSeconds`, and `editable`.
+
+#### Get Editor Units
+
+```
+GET /api/sessions/:token/units
+```
+
+Editor metadata. Rate limit: 10 req/min per token.
+
+**Response `200 OK`:**
+```json
+{
+  "units": [ { "capturedAt": "2026-07-26T14:00:12.000Z", "screenshotId": "…" } ],
+  "cuts": [],
+  "editable": true,
+  "originalVideoUrl": "https://…presigned, ~1h…",
+  "recompilesRemaining": 5
+}
+```
+
+- `units` — the capture units of the compiled **original** video, in output order. Array index = video second = real-world minute: the exact video-time ↔ wall-clock map.
+- `originalVideoUrl` — presigned GET for the UNCUT original (the editor's preview source). Deliberately not the public media URL: after an edit, cut content exists only here, gated by the secret token. `null` when not editable.
+- `editable` / `editableReason` — `false` with `"not_complete"`, `"no_original"` (compiled before edit support, or original purged), or `"recompiles_exhausted"`.
+
+#### Set Cut List
+
+```
+PUT /api/sessions/:token/cuts
+Body: { "cuts": [{ "start": ISO-8601, "end": ISO-8601 }, …] }
+```
+
+Replaces the whole cut list (idempotent; `[]` clears all edits). Only valid while `complete` and editable. The server normalizes (sorts, merges overlaps, clamps to the session envelope, caps at 120 intervals) and rejects a list that would remove **every** unit. Takes effect in `/timings` and `trackedSeconds` immediately; the published video updates on the next compile call. Rate limit: 20 req/min per token.
+
+**Response `200 OK`:**
+```json
+{
+  "cuts": [ { "start": "…", "end": "…" } ],
+  "unitsTotal": 47,
+  "unitsCut": 8,
+  "trackedSeconds": 2340,
+  "uncutTrackedSeconds": 2820
+}
+```
+
+**Errors:** `400` invalid/entire-timelapse cut list · `409` compiling or not editable · `429` rate limit.
+
+#### Apply Cuts (Cut-Compile)
+
+```
+POST /api/sessions/:token/compile
+```
+
+Applies the current cut list to the published video. Flips the session `complete → compiling → complete` (poll [`/status`](#poll-compilation-status)); usually completes in seconds. Clearing all cuts when the original is already published returns `{ "instant": true }` with no compile. Each non-instant call burns one of **5** recompiles per session. Rate limit: 5 req/min per token.
+
+**Response `200 OK`:** `{ "status": "compiling" | "complete", "instant": boolean, "recompilesRemaining": number }`
+**Errors:** `202` already compiling (safe to retry/poll) · `409` not editable or budget exhausted · `429` rate limit.
 
 ---
 

@@ -5,6 +5,7 @@ import { formatTrackedTime } from "../hooks/useSessionTimer.js";
 import { Button } from "../ui/Button.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
 import { ProcessingState } from "./ProcessingState.js";
+import { TimelapseEditor } from "./TimelapseEditor.js";
 import { SessionDetailSkeleton } from "../ui/Skeleton.js";
 import { Card } from "../ui/Card.js";
 import { Badge } from "../ui/Badge.js";
@@ -20,6 +21,10 @@ export interface SessionDetailProps {
    *  NOT fired when opening a session that is already complete. Carries the
    *  session's redirect-hook URL, if one was set at creation. */
   onComplete?: (info: { redirectUrl: string | null }) => void;
+  /** Override for the Edit button. When provided, clicking Edit calls this
+   *  instead of opening the inline editor — e.g. the desktop app opens a
+   *  dedicated resizable editor window (the main window is a fixed 480px). */
+  onEdit?: () => void;
 }
 
 export function SessionDetail({
@@ -28,6 +33,7 @@ export function SessionDetail({
   onBack,
   onArchive,
   onComplete,
+  onEdit,
 }: SessionDetailProps) {
   const [sessionInfo, setSessionInfo] = useState<{ name: string; createdAt: string } | null>(null);
   const [isRenaming, setIsRenaming] = useState(false);
@@ -63,6 +69,7 @@ export function SessionDetail({
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
 
   // Completion detection for the redirect hook: only a live transition from
   // an in-flight state counts — a session opened when already "complete"
@@ -152,6 +159,16 @@ export function SessionDetail({
           </Button>
         )}
         <div style={{ display: "flex", gap: spacing.sm }}>
+          {status?.status === "complete" && status.editable && !editing && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => (onEdit ? onEdit() : setEditing(true))}
+              style={cardButtonStyle}
+            >
+              Edit
+            </Button>
+          )}
           {onArchive && (
             <Button variant="secondary" size="sm" onClick={onArchive} style={cardButtonStyle}>
               Archive
@@ -166,7 +183,28 @@ export function SessionDetail({
 
       {!status && !error && <SessionDetailSkeleton />}
 
-      {status && (
+      {status && editing && (
+        <div style={{ marginBottom: spacing.lg }}>
+          <TimelapseEditor
+            token={token}
+            apiBaseUrl={apiBaseUrl}
+            onCancel={() => setEditing(false)}
+            onApplied={() => {
+              // Back to the detail view; the status poll below picks up
+              // "compiling" and flips to the re-published video. Reset the
+              // cached video URL so the edited MP4 is re-fetched.
+              setEditing(false);
+              setVideoUrl(null);
+              setStatus((prev) =>
+                prev ? { ...prev, status: "compiling" } : prev,
+              );
+              fetchStatus();
+            }}
+          />
+        </div>
+      )}
+
+      {status && !editing && (
         <>
           {/* Video area */}
           <div style={{ marginBottom: spacing.lg, borderRadius: radii.lg, overflow: "hidden" }}>

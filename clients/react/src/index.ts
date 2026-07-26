@@ -4,6 +4,18 @@ export type { LookoutProviderProps } from "./LookoutProvider.js";
 
 // Drop-in widget
 export { LookoutRecorder } from "./components/LookoutRecorder.js";
+export type { LookoutRecorderProps } from "./components/LookoutRecorder.js";
+
+// Cut editor
+export { TimelapseEditor } from "./components/TimelapseEditor.js";
+export type { TimelapseEditorProps } from "./components/TimelapseEditor.js";
+export {
+  regionsToCuts,
+  cutsToRegions,
+  normalizeRegions,
+  gapIndices,
+} from "./hooks/editorMath.js";
+export type { UnitRegion } from "./hooks/editorMath.js";
 
 // Sub-components
 export { StatusBar } from "./components/StatusBar.js";
