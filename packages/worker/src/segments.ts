@@ -12,6 +12,38 @@ import type { KeptRange } from "@lookout/shared";
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Drop the session's seed capture from the units that become video.
+ * `rows` must be ordered by minute bucket ascending (the `DISTINCT ON`
+ * contract in the compiler), so the seed is simply the first entry.
+ *
+ * The seed is the capture that STARTS the recording rather than closing a
+ * recorded minute, and it is special in two measurable ways:
+ *
+ *  - It credits 0 tracked seconds. Both tracking modes agree: bucket mode
+ *    reports `(distinct buckets - 1) * 60`, and in credit mode the seed
+ *    capture is explicitly worth 0. Every other unit is worth 60s. Giving
+ *    the seed a video second is therefore the exact reason a session
+ *    reported N seconds of video against N-1 minutes of tracked time.
+ *  - In clips mode it covers a fraction of a minute. The recorder cuts the
+ *    opening clip after 2 frame intervals (~8s) so the session activates
+ *    quickly, so that clip holds ~8s of wall clock where every later clip
+ *    holds 60s. Rendered as an equal one-second segment it plays at ~8x
+ *    while the rest of the timelapse plays at 60x — a visible slow-motion
+ *    lurch at the head of every video.
+ *
+ * Excluding it makes the rule uniform: a capture earns video time exactly
+ * when it earns tracked time. The timelapse still opens on motion (the
+ * first shown unit is a full ~15-frame clip), which is what the dense
+ * opening cadence was originally for.
+ *
+ * A single-unit session keeps its one unit — a zero-length video is worse
+ * than an imprecise one.
+ */
+export function dropSeedUnit<T>(rows: T[]): T[] {
+  return rows.length > 1 ? rows.slice(1) : rows;
+}
+
 /** Shared video filter: scale to 1920x1080 with pillarboxing. */
 export const SCALE_FILTER =
   "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2";

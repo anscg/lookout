@@ -24,6 +24,7 @@ import * as schema from "./schema.js";
 import {
   buildSegment,
   cutVideoToKeptRanges,
+  dropSeedUnit,
   SEGMENT_CONCURRENCY,
   SEGMENT_FPS,
   SEGMENT_GOP_ARGS,
@@ -289,8 +290,18 @@ export async function compileTimelapse(sessionId: string): Promise<{
       };
     }
 
-    // Mark sampled screenshots
-    const sampledIds = sampledScreenshots.rows.map((s) => s.id);
+    // The seed capture opens the recording instead of closing a minute: it
+    // credits 0 tracked seconds, and in clips mode its clip spans only the
+    // ~8s before the first cut. Including it made the video one second
+    // longer than the tracked minute count and put a slow-motion second at
+    // the head of every timelapse. See dropSeedUnit.
+    const unitRows = dropSeedUnit(sampledScreenshots.rows);
+
+    // Mark sampled screenshots. The seed is deliberately NOT marked: it is
+    // not in the video, so its R2 object is cleaned up with the other
+    // unsampled captures (the row itself stays, so /timings and the credit
+    // history are untouched).
+    const sampledIds = unitRows.map((s) => s.id);
     for (const id of sampledIds) {
       await db
         .update(schema.screenshots)
@@ -307,7 +318,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     // instead of one giant whole-session encode. Wall clock scales with
     // units/SEGMENT_CONCURRENCY, and a corrupt unit is caught and skipped
     // per-minute rather than poisoning the full encode.
-    const total = sampledScreenshots.rows.length;
+    const total = unitRows.length;
     const unitExt = (format: string) => (format === "jpeg" ? "jpg" : format);
     const segmentPaths: (string | null)[] = new Array(total).fill(null);
     let downloadFailures = 0;
@@ -317,7 +328,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
       const worker = async () => {
         while (next < total) {
           const i = next++;
-          const ss = sampledScreenshots.rows[i];
+          const ss = unitRows[i];
           const unitPath = path.join(tmpDir, `dl_${i}.${unitExt(ss.format)}`);
 
           let downloadedUnit = false;
@@ -387,7 +398,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     const videoUnits: VideoUnit[] = [];
     for (let i = 0; i < total; i++) {
       if (segmentPaths[i] === null) continue;
-      const ss = sampledScreenshots.rows[i];
+      const ss = unitRows[i];
       const ts = ss.captured_at ?? ss.requested_at;
       videoUnits.push({
         capturedAt: (ts instanceof Date ? ts : new Date(ts)).toISOString(),
