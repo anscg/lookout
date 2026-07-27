@@ -117,7 +117,10 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
     // hold publishes on its own if they abandon the tab).
     if (editorOpen && resolvedToken && state.status !== "failed") {
       return (
-        <PageContainer style={{ padding: spacing.xxl }}>
+        // Wider than the recorder's own 800: the timeline is a precision
+        // surface, and every 100px is another whole filmstrip frame. The
+        // default 640 left it narrower than the screen it replaced.
+        <PageContainer maxWidth={960} style={{ padding: spacing.xxl }}>
           <TimelapseEditor
             token={resolvedToken}
             apiBaseUrl={config.apiBaseUrl}
