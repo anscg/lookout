@@ -454,6 +454,17 @@ choose to edit, they mark wall-clock stretches to remove and Lookout drops
 those minutes from the video, the `/timings` heartbeats, and
 `trackedSeconds` — all from one stored list of `{start, end}` intervals.
 
+**You get this for free.** It ships inside the recorder, so any program
+that redirects users to the hosted recorder, or embeds
+`<LookoutRecorder>`, already has it: the stop button opens the choice
+dialog, and picking "Edit & save" swaps in the editor until the user
+saves. No code change, no new version to adopt, nothing to call.
+
+The exception is a program driving the headless `useLookout()` hook with
+its own recording UI. That UI owns its own stop button, so it opts in by
+passing `actions.stop({ edit: true })` and rendering `<TimelapseEditor>`
+(see the [SDK reference](../clients/react/API.md)).
+
 What this means for your program:
 
 - **Nothing in your integration changes, and nothing you read ever changes
