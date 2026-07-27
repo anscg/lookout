@@ -38,6 +38,23 @@ async function hasFfmpeg(): Promise<boolean> {
 
 const ffmpegAvailable = await hasFfmpeg();
 
+/** Per-frame checksums of the DECODED video, ignoring container timing.
+ *  Identical sequences mean identical pixels, frame for frame. */
+async function frameHashes(filePath: string): Promise<string[]> {
+  const { stdout } = await execFileAsync(
+    "ffmpeg",
+    ["-v", "error", "-i", filePath, "-an", "-f", "framemd5", "-"],
+    { timeout: 180_000, maxBuffer: 64 * 1024 * 1024 },
+  );
+  return stdout
+    .split("\n")
+    .filter((l) => l && !l.startsWith("#"))
+    // Columns: stream, dts, pts, duration, size, hash. Only the hash is
+    // comparable — a cut restarts timestamps at zero by design.
+    .map((l) => l.trim().split(/[,\s]+/).pop() as string)
+    .filter(Boolean);
+}
+
 const UNITS = 6;
 
 describe.skipIf(!ffmpegAvailable)("cutVideoToKeptRanges", () => {
@@ -148,6 +165,46 @@ describe.skipIf(!ffmpegAvailable)("cutVideoToKeptRanges", () => {
     const edited = await cutVideoToKeptRanges(dir, originalPath, kept, true);
     expect(await probeFrameCount(edited)).toBe(4 * SEGMENT_FPS);
   }, 120_000);
+
+  /**
+   * The quality guarantee, proven rather than asserted.
+   *
+   * `-f framemd5` hashes every DECODED frame, so if the cut is a true
+   * stream copy the kept frames decode to byte-identical pixels. Any
+   * re-encode — even a visually lossless one — changes them.
+   */
+  it("is bit-exact: kept frames decode identically to the original", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-cut-lossless-"));
+    const kept = [
+      { start: 0, end: 2 },
+      { start: 4, end: 6 },
+    ];
+    const edited = await cutVideoToKeptRanges(dir, originalPath, kept, true);
+
+    const originalHashes = await frameHashes(originalPath);
+    const editedHashes = await frameHashes(edited);
+
+    // The frames those ranges cover, taken straight from the source.
+    const expected = kept.flatMap((r) =>
+      originalHashes.slice(r.start * SEGMENT_FPS, r.end * SEGMENT_FPS),
+    );
+
+    expect(editedHashes).toHaveLength(expected.length);
+    expect(editedHashes).toEqual(expected);
+  }, 180_000);
+
+  it("shows the fallback re-encode is NOT bit-exact, so the copy path matters", async () => {
+    // Guards the claim above from rotting: if someone makes the copy path
+    // silently re-encode, the test above would still pass against a
+    // similarly re-encoded expectation unless we know the two differ.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-cut-lossy-"));
+    const kept = [{ start: 0, end: 2 }];
+    const reencoded = await cutVideoToKeptRanges(dir, originalPath, kept, false);
+
+    const originalHashes = await frameHashes(originalPath);
+    const lossyHashes = await frameHashes(reencoded);
+    expect(lossyHashes).not.toEqual(originalHashes.slice(0, 2 * SEGMENT_FPS));
+  }, 180_000);
 
   it("refuses an empty kept list", async () => {
     await expect(
