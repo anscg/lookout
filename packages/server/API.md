@@ -335,7 +335,7 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 `trackedSeconds` here is the **server's authoritative count after this capture has been credited (or not)**. Use this value to drive your timer display — see the [Tracking Modes](#tracking-modes) section for client display guidance. `nextExpectedAt` is the target for the next capture's `capturedAt`.
 
 **Errors:**
-- `400` — Content type doesn't match the granted format (`image/jpeg` / `video/webm` / `video/mp4`), file too large (2 MB for JPEG, 4 MB for clips), or object not found in R2
+- `400` — Content type doesn't match the granted format (`image/jpeg` / `video/webm` / `video/mp4`), file too large (2 MB for JPEG, 8 MB for clips), or object not found in R2
 - `404` — Session or screenshot not found
 - `409` — Session not in `pending` or `active` state
 - `429` — Rate limit exceeded, or max confirmed screenshots reached (720)
