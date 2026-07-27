@@ -1358,8 +1358,11 @@ export async function sessionRoutes(app: FastifyInstance) {
           : null,
         // Roughly how many units the finished video will hold. Lets a
         // client waiting on the build size its progress estimate — compile
-        // time scales with unit count.
-        expectedUnits: await getScreenshotCount(session.id),
+        // time scales with unit count. Minus the seed capture, which the
+        // compiler excludes from the video (see dropSeedUnit): counting it
+        // would make the waiting-room copy promise one minute more than
+        // the finished timelapse holds.
+        expectedUnits: Math.max(0, (await getScreenshotCount(session.id)) - 1),
         originalVideoUrl,
         recompilesRemaining: Math.max(
           0,

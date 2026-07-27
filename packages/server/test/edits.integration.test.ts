@@ -252,8 +252,11 @@ describe("GET /units", () => {
     expect(body.editable).toBe(false);
     expect(body.editableReason).toBe("preparing");
     expect(body.editHoldUntil).toBeTruthy();
-    // The client needs this to size its progress estimate.
-    expect(body.expectedUnits).toBe(UNITS);
+    // The client needs this to size its progress estimate. One less than
+    // the capture count: the compiler excludes the seed capture from the
+    // video (see dropSeedUnit), so promising UNITS would overstate the
+    // finished timelapse by a minute.
+    expect(body.expectedUnits).toBe(UNITS - 1);
   });
 
   it("reports a failed compile as failed, not as something to wait for", async () => {
