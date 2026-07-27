@@ -101,3 +101,4 @@ export { SESSION_STATUSES } from "@lookout/shared";
 
 // UI primitives
 export * from "./ui/index.js";
+export { setAccentColor } from "./ui/theme.js";

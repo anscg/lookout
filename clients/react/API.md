@@ -97,6 +97,8 @@ Context provider that configures the API client and settings for all child hooks
 | `statusPollIntervalMs` | `number` | `3000` | Compilation status poll interval (ms) |
 | `autoStart` | `boolean` | `false` | Auto-start screen sharing on mount |
 | `appName` | `string` | — | Host program embedding Lookout (e.g. `"Fallout"`). Reported in client telemetry as `Lookout Sdk (Fallout)/<version> (…)` and surfaced server-side as the session's `clientInfo`. |
+| `accentColor` | `string` | `#3b82f6` | Replace Lookout's blue with your brand colour — primary buttons, focus rings, progress. Any CSS colour. |
+| `accentTextColor` | `string` | `#fff` | Colour drawn *on* the accent. Set it if your accent is light enough that white labels would be unreadable. |
 | `children` | `ReactNode` | *required* | Child components |
 
 #### `TokenProvider`
@@ -944,6 +946,32 @@ The SDK exports styled UI primitives used by its components. All use inline styl
 | `Overlay` | Modal panel portalled to `document.body` (immune to transformed ancestors), with backdrop, scroll lock, and optional dismiss |
 | `Skeleton` / `GallerySkeleton` / `SessionDetailSkeleton` / `RecordPageSkeleton` | Loading skeletons |
 | `colors` / `spacing` / `radii` / `fontSize` / `fontWeight` / `statusConfig` | Theme tokens |
+| `setAccentColor(accent, on?)` | Imperative accent override, for surfaces used without `<LookoutProvider>` (`<SessionDetail>`, `<TimelapseEditor>`). Pass `null` to restore the default. |
+
+### Theming the accent
+
+```tsx
+<LookoutProvider token="…" apiBaseUrl="…" accentColor="#16a34a">
+  <LookoutRecorder />
+</LookoutProvider>
+```
+
+That recolours the primary buttons ("Edit & save", "Save"), keyboard focus
+rings, and the compile progress ring — everywhere the UI says *this is the
+main action*. The hover shade is derived from your colour with
+`color-mix`, so you don't supply a second one.
+
+Two deliberate limits:
+
+- **Semantic colours don't change.** Success green, warning amber, and the
+  red that marks removed footage carry meaning rather than brand, and a
+  green "this will be deleted" would be worse than an off-brand one.
+- **It's set on the document root, not a wrapper.** The stop dialog and the
+  editor portal to `document.body`, so a scoped subtree wouldn't reach
+  them. The provider restores the previous value on unmount.
+
+For surfaces rendered outside a provider, call `setAccentColor("#16a34a")`
+once at startup instead.
 
 ---
 

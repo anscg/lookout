@@ -46,6 +46,14 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       --color-cut-border: #f87171;
       --color-cut-stripe: rgba(248, 113, 113, 0.13);
       --color-track: rgba(255, 255, 255, 0.06);
+      /* Accent: the one colour an embedding program can replace. Drives
+         primary buttons, focus rings, and progress. Semantic status
+         colours (success/warning/danger) stay put — those carry meaning,
+         not brand. */
+      --color-accent: #3b82f6;
+      --color-accent-hover: #2f6fd0;
+      --color-accent-hover: color-mix(in oklab, var(--color-accent) 88%, black);
+      --color-on-accent: #ffffff;
     }
     @media (prefers-color-scheme: light) {
       :root:not([data-theme="dark"]) {
@@ -86,6 +94,10 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
         --color-cut-border: #dc2626;
         --color-cut-stripe: rgba(220, 38, 38, 0.12);
         --color-track: rgba(0, 0, 0, 0.06);
+        --color-accent: #3b82f6;
+        --color-accent-hover: #2f6fd0;
+      --color-accent-hover: color-mix(in oklab, var(--color-accent) 88%, black);
+        --color-on-accent: #ffffff;
       }
     }
     :root[data-theme="light"] {
@@ -126,6 +138,10 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       --color-cut-border: #dc2626;
       --color-cut-stripe: rgba(220, 38, 38, 0.12);
       --color-track: rgba(0, 0, 0, 0.06);
+      --color-accent: #3b82f6;
+      --color-accent-hover: #2f6fd0;
+      --color-accent-hover: color-mix(in oklab, var(--color-accent) 88%, black);
+      --color-on-accent: #ffffff;
     }`;
   document.head.appendChild(style);
 }
@@ -136,6 +152,14 @@ export const colors = {
   border: { default: "var(--color-border-default)", hover: "var(--color-border-hover)", selected: "var(--color-border-selected)" },
   icon: { selected: "var(--color-icon-selected)" },
   spinner: { base: "var(--color-spinner-base)", track: "var(--color-spinner-track)" },
+  /** The brand accent. Replaceable per-app via `<LookoutProvider
+   *  accentColor>` or {@link setAccentColor}. */
+  accent: {
+    base: "var(--color-accent)",
+    hover: "var(--color-accent-hover)",
+    /** Text/icon colour that sits ON the accent. */
+    on: "var(--color-on-accent)",
+  },
   /** Editor surfaces: the recessed well footage sits in, the timeline
    *  track, and the removed-region vocabulary. */
   editor: {
@@ -178,3 +202,26 @@ export const statusConfig: Record<string, { label: string; color: string }> = {
   complete: { label: "Complete", color: colors.status.success },
   failed: { label: "Failed", color: colors.status.danger },
 };
+
+/**
+ * Replace the accent colour for every Lookout surface on the page.
+ *
+ * Set on the document root rather than a wrapper, because the overlays
+ * portal to `document.body` and would otherwise fall outside a scoped
+ * subtree. `null` restores the default.
+ *
+ * `on` is the colour drawn on top of the accent (button labels). It can't
+ * be derived reliably in CSS, so pass it when the brand colour is light
+ * enough that white text would be unreadable.
+ */
+export function setAccentColor(
+  accent: string | null,
+  on?: string | null,
+): void {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  if (accent) root.style.setProperty("--color-accent", accent);
+  else root.style.removeProperty("--color-accent");
+  if (on) root.style.setProperty("--color-on-accent", on);
+  else root.style.removeProperty("--color-on-accent");
+}

@@ -496,6 +496,10 @@ What this means for your program:
 - **Opting out of the review step:** add `?edit=false` to the hosted
   recorder URL, or pass `<LookoutRecorder editing={false} />` in the React
   SDK. Stopping is then a single click, as before.
+- **Matching your brand:** SDK embedders can pass
+  `<LookoutProvider accentColor="#16a34a">` to replace Lookout's blue on
+  primary buttons, focus rings, and progress. See the
+  [SDK reference](../clients/react/API.md).
 
 ## Client telemetry
 

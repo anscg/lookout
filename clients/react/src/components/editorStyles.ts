@@ -19,7 +19,7 @@ export function injectEditorStyles(): void {
     .lk-ed-strip { transition: box-shadow 180ms ${EASE_OUT_QUART}; }
     .lk-ed-strip:focus-visible {
       outline: none;
-      box-shadow: 0 0 0 2px var(--color-bg-body), 0 0 0 4px #3b82f6;
+      box-shadow: 0 0 0 2px var(--color-bg-body), 0 0 0 4px var(--color-accent);
     }
 
     .lk-ed-region {
@@ -56,7 +56,7 @@ export function injectEditorStyles(): void {
     .lk-ed-iconbtn:active { transform: scale(0.94); }
     .lk-ed-iconbtn:focus-visible {
       outline: none;
-      box-shadow: 0 0 0 2px var(--color-bg-body), 0 0 0 4px #3b82f6;
+      box-shadow: 0 0 0 2px var(--color-bg-body), 0 0 0 4px var(--color-accent);
     }
 
     .lk-ed-fade-in { animation: lk-ed-fade 160ms ${EASE_OUT_QUART} both; }
