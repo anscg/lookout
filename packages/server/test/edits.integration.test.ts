@@ -149,6 +149,19 @@ describe("POST /stop with { edit }", () => {
     expect((await load(s.id))!.editHoldUntil).toBeNull();
   });
 
+  it("ignores an unrecognised body instead of rejecting it", async () => {
+    // /stop accepted and ignored any body before `edit` existed. A custom
+    // client sending its own field must not start getting 400s.
+    const s = await seedActiveSession();
+    const r = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${s.token}/stop`,
+      payload: { reason: "user pressed stop", edit: false },
+    });
+    expect(r.statusCode).toBe(200);
+    expect((await load(s.id))!.editHoldUntil).toBeNull();
+  });
+
   it("does not hold a session with nothing recorded", async () => {
     const [s] = await db
       .insert(schema.sessions)

@@ -1069,7 +1069,10 @@ export async function sessionRoutes(app: FastifyInstance) {
           properties: {
             edit: { type: "boolean" as const },
           },
-          additionalProperties: false,
+          // Deliberately permissive. This route accepted (and ignored) any
+          // body before `edit` existed, so rejecting unknown fields would
+          // turn a working custom client into a 400 for no benefit.
+          additionalProperties: true,
         },
       },
     },
