@@ -457,8 +457,10 @@ those minutes from the video, the `/timings` heartbeats, and
 **You get this for free.** It ships inside the recorder, so any program
 that redirects users to the hosted recorder, or embeds
 `<LookoutRecorder>`, already has it: the stop button opens the choice
-dialog, and picking "Edit & save" swaps in the editor until the user
-saves. No code change, no new version to adopt, nothing to call.
+dialog, and picking "Edit & save" opens the editor as a modal over your
+page. No code change, no new version to adopt, nothing to call. Both
+dialogs render into `document.body`, so they aren't constrained by the
+width of the container you put the recorder in.
 
 The exception is a program driving the headless `useLookout()` hook with
 its own recording UI. That UI owns its own stop button, so it opts in by

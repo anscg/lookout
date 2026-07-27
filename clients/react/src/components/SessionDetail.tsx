@@ -4,6 +4,7 @@ import type { StatusResponse, VideoResponse, SessionResponse } from "@lookout/sh
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
 import { Button } from "../ui/Button.js";
 import { ProgressRing } from "../ui/ProgressRing.js";
+import { Overlay } from "../ui/Overlay.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
 import { ProcessingState } from "./ProcessingState.js";
 import { TimelapseEditor } from "./TimelapseEditor.js";
@@ -268,7 +269,10 @@ export function SessionDetail({
       {!status && !error && <SessionDetailSkeleton />}
 
       {status && editing && (
-        <div style={{ marginBottom: spacing.lg }}>
+        // Same overlay the recorder uses, so editing looks and behaves
+        // identically wherever it's entered from.
+        <Overlay label="Review your timelapse" height="min(820px, 92vh)">
+          <div style={{ flex: "1 1 auto", minHeight: 0, padding: spacing.xl }}>
           <TimelapseEditor
             token={token}
             apiBaseUrl={apiBaseUrl}
@@ -283,7 +287,8 @@ export function SessionDetail({
               fetchStatus();
             }}
           />
-        </div>
+          </div>
+        </Overlay>
       )}
 
       {/* Edit hold: the recording is compiled but deliberately not
@@ -306,7 +311,7 @@ export function SessionDetail({
         />
       )}
 
-      {status && !editing && (
+      {status && (
         <>
           {/* Video area. Suppressed during an edit hold: the session reads
               as "stopped", but showing a compile spinner under a panel that

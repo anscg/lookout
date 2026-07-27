@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { motion } from "motion/react";
 import { Button } from "../ui/Button.js";
 import { Card } from "../ui/Card.js";
+import { Overlay } from "../ui/Overlay.js";
 import { colors, fontSize, fontWeight, radii, spacing } from "../ui/theme.js";
 
 export interface StopChoiceModalProps {
@@ -42,34 +42,15 @@ export function StopChoiceModal({
   const value = () => name.trim() || null;
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: colors.bg.backdrop,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 9999,
-        padding: spacing.xl,
-      }}
-    >
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{
-          y: { type: "spring", stiffness: 420, damping: 34, mass: 0.7 },
-          opacity: { duration: 0.16, ease: "easeOut" },
-        }}
-        style={{ width: "100%", maxWidth: 420 }}
-      >
+    <Overlay label="Finish this timelapse?" width={420}>
+      <div style={{ overflow: "auto" }}>
         <Card
           padding={spacing.xxl}
           style={{
             width: "100%",
             height: "auto",
-            background: colors.bg.panel,
-            boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
+            background: "transparent",
+            border: "none",
           }}
         >
           <h3
@@ -168,7 +149,7 @@ export function StopChoiceModal({
             </Button>
           </div>
         </Card>
-      </motion.div>
-    </div>
+      </div>
+    </Overlay>
   );
 }
