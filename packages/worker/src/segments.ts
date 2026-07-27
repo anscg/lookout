@@ -293,7 +293,16 @@ export async function cutVideoToKeptRanges(
       await verify("Edited MP4 (copy)", 0);
       return editedPath;
     } catch (err) {
-      console.warn("Stream-copy cut failed, re-encoding kept ranges:", err);
+      // The only way a cut costs quality. The copy path is bit-exact
+      // (proven in cutVideo.test.ts by comparing decoded frame hashes),
+      // so falling through here means the user's timelapse takes a
+      // generation of loss it shouldn't have. Loud, not a debug aside.
+      console.error(
+        "Stream-copy cut FAILED — falling back to a re-encode, so this " +
+          "timelapse loses a generation of quality. Investigate: the " +
+          "original was expected to be on the pinned 1s IDR grid.",
+        err,
+      );
     }
   }
 
