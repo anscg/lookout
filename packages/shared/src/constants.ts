@@ -98,15 +98,65 @@ export const CLIP_FRAME_INTERVAL_MS = 4_000;
  *  Default: 15 */
 export const FRAMES_PER_CLIP = 15;
 
-/** Client-side encoder bitrate cap for clips (bits/second).
+/** Encoder bitrate cap for clips recorded by a NATIVE encoder (the desktop
+ *  app's VideoToolbox / Media Foundation / GStreamer paths).
+ *
  *  Sized for TEXT LEGIBILITY: at 15 frames/min, 800 kbps allows ~400 KB
  *  per 4s frame — JPEG-q85-class keyframes at 1080p, the bar the legacy
  *  single-screenshot pipeline set. This is a VBR ceiling, not a floor:
  *  static screen content undershoots it heavily (measured 133 kbps-era
  *  clips landed at ~400 KB/min total). 133k and 400k were tried first
  *  and produced visibly soft H.264.
+ *
+ *  This "budget spread over the clip's 60s" reading only holds for
+ *  encoders we hand real presentation timestamps to. Browsers do NOT
+ *  work that way — see CLIP_WEB_VIDEO_BITS_PER_SECOND.
  *  Default: 800000 */
 export const CLIP_VIDEO_BITS_PER_SECOND = 800_000;
+
+/** Encoder bitrate cap for clips recorded by a BROWSER (MediaRecorder's
+ *  `videoBitsPerSecond`). Deliberately ~50x the native constant, because
+ *  the two numbers are denominated in different things.
+ *
+ *  A native encoder gets each frame's true presentation time (4s apart)
+ *  plus an explicit ~1fps rate-control hint, so 800 kbps really does
+ *  buy ~400 KB per frame. MediaRecorder's rate control ignores wall-clock
+ *  frame spacing entirely — measured on Chromium 148 at 1080p, recording
+ *  the same frames 4000ms apart and 125ms apart produces BYTE-IDENTICAL
+ *  output. There is no "× 60 seconds" budget to spend; the encoder just
+ *  allocates a per-frame quantizer from a nominal cadence.
+ *
+ *  At 800 kbps the browser encoder is therefore pinned at its maximum
+ *  quantizer — as coarse as it is allowed to be — and still overshoots
+ *  the request. The whole 0.8–2 Mbps range is byte-identical, which is
+ *  why raising the shared constant 400k → 800k sharpened the desktop and
+ *  did nothing whatsoever for the web.
+ *
+ *  Measured sweep (1080p, worst-case dense-text content, PSNR vs source):
+ *
+ *      bitrate   KB/frame   PSNR
+ *        0.8M       53.7    25.8 dB   <- previous setting
+ *          5M      114.6    30.9 dB
+ *         20M      192.0    34.3 dB
+ *         40M      335.4    38.6 dB   <- knee; ~parity with native
+ *         80M      582.3    43.7 dB   worst case exceeds MAX_CLIP_BYTES
+ *
+ *  40 Mbps lands at ~335 KB/frame — the same order as the native
+ *  encoder's ~400 KB budget. Measured over a full 15-frame clip, against
+ *  the 8 MB MAX_CLIP_BYTES cap:
+ *
+ *                      before (vp9 @ 800k)   after (h264 @ 40M)
+ *      busy screen        0.89 MB  23.8 dB     3.24 MB  43.3 dB
+ *      typical screen     0.37 MB  23.8 dB     2.46 MB  43.3 dB
+ *
+ *  so even incompressible content sits at 40% of the cap. (0.37 MB
+ *  matches the ~400 KB/min these clips were measured at in the field,
+ *  which is what makes the rest of the table trustworthy.)
+ *  ClipRecorder additionally backs the rate off if a clip ever does
+ *  exceed the cap, so a browser with different rate-control semantics
+ *  self-corrects instead of failing every upload.
+ *  Default: 40000000 */
+export const CLIP_WEB_VIDEO_BITS_PER_SECOND = 40_000_000;
 
 /** Max clip file size in bytes, validated server-side via HeadObject
  *  after upload. Sized above the bitrate budget (800 kbps × 60s ≈ 6 MB)

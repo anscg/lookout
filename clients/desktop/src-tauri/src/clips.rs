@@ -19,8 +19,12 @@ use image::DynamicImage;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Encoder bitrate cap (bits/second). Matches the web client's
-/// CLIP_VIDEO_BITS_PER_SECOND. Sized for text legibility: ~300 KB per 3s
+/// Encoder bitrate cap (bits/second). Matches the shared
+/// CLIP_VIDEO_BITS_PER_SECOND, which is the NATIVE-encoder rate: we hand
+/// these encoders real presentation timestamps, so the number really does
+/// buy a per-frame budget. Browsers need a much larger figure for the same
+/// output quality (see CLIP_WEB_VIDEO_BITS_PER_SECOND) — the two are not
+/// comparable. Sized for text legibility: ~300 KB per 3s
 /// frame allows JPEG-q85-class keyframes at 1080p. VBR ceiling, not a
 /// floor — static screens undershoot heavily. The server rejects clips
 /// over 8 MB. 133k/400k were tried first and produced soft H.264.

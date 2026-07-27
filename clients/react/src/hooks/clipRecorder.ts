@@ -2,7 +2,9 @@ import {
   MAX_WIDTH,
   MAX_HEIGHT,
   JPEG_QUALITY,
+  CLIP_WEB_VIDEO_BITS_PER_SECOND,
   CLIP_VIDEO_BITS_PER_SECOND,
+  MAX_CLIP_BYTES,
   type CaptureFormat,
 } from "@lookout/shared";
 
@@ -27,13 +29,35 @@ interface MimeCandidate {
   format: Exclude<CaptureFormat, "jpeg">;
 }
 
-/** Preference order: VP9 (best compression) → VP8 → generic WebM →
- *  MP4/H.264 (Safari — its MediaRecorder does not do WebM). */
+/** Preference order: H.264/MP4 first, WebM only as a fallback for engines
+ *  that cannot record MP4 (Firefox).
+ *
+ *  This is the opposite of what raw compression efficiency suggests, and
+ *  it is deliberate. Our content is sparse 1080p screen frames, which is
+ *  exactly where the browsers' realtime libvpx configuration falls apart.
+ *  Measured at matched output size (Chromium 148, 1080p, PSNR vs source):
+ *
+ *      ~115 KB/frame    H.264 30.9 dB    VP9 22.3 dB
+ *      ~190 KB/frame    H.264 34.3 dB    VP9 24.7 dB
+ *      ~335 KB/frame    H.264 38.6 dB    VP9 28.6 dB
+ *
+ *  H.264 is 8-10 dB better for the same bytes, and its quality is even
+ *  across the clip, where VP9 spends nearly everything on the keyframe
+ *  and leaves the other 14 frames soft. (VP8 is worse still: its rate
+ *  control is inert below ~10 Mbps — identical bytes at 0.8M, 2M and 5M.)
+ *  This mirrors the desktop app's own benchmarks, which rejected libvpx
+ *  for the same workload.
+ *
+ *  The profile-specific strings come first so we get High profile where
+ *  it is offered; bare "video/mp4" is the Safari path. */
 const MIME_CANDIDATES: MimeCandidate[] = [
+  { mime: "video/mp4;codecs=avc1.640028", format: "mp4" }, // H.264 High 4.0
+  { mime: "video/mp4;codecs=avc1.4d0028", format: "mp4" }, // H.264 Main 4.0
+  { mime: "video/mp4;codecs=avc1.42e01e", format: "mp4" }, // H.264 Baseline 3.0
+  { mime: "video/mp4", format: "mp4" },
   { mime: "video/webm;codecs=vp9", format: "webm" },
   { mime: "video/webm;codecs=vp8", format: "webm" },
   { mime: "video/webm", format: "webm" },
-  { mime: "video/mp4", format: "mp4" },
 ];
 
 function pickMimeCandidate(): MimeCandidate | null {
@@ -88,6 +112,11 @@ export class ClipRecorder {
   private frameCount = 0;
   private frameTimer: ReturnType<typeof setInterval> | null = null;
   private mime: MimeCandidate;
+  /** Live encoder bitrate. Starts at the measured-optimal web rate and
+   *  halves whenever a finished clip overruns MAX_CLIP_BYTES — see
+   *  `cut()`. Browsers whose rate control does honour real frame spacing
+   *  would otherwise blow the cap on every single clip. */
+  private bitrate = CLIP_WEB_VIDEO_BITS_PER_SECOND;
   // Opening cadence lives in its own field (cleared after the first cut),
   // so it's excluded from the always-resolved options.
   private opts: Required<Omit<ClipRecorderOptions, "openingFrameIntervalMs">>;
@@ -157,7 +186,7 @@ export class ClipRecorder {
     this.frameCount = 0;
     const recorder = new MediaRecorder(stream, {
       mimeType: this.mime.mime,
-      videoBitsPerSecond: CLIP_VIDEO_BITS_PER_SECOND,
+      videoBitsPerSecond: this.bitrate,
     });
     recorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) this.parts.push(e.data);
@@ -187,6 +216,10 @@ export class ClipRecorder {
       return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // Only matters when the source is larger than the clip canvas, but a
+    // bilinear-ish downscale of 1080p+ UI text aliases badly. The desktop
+    // client area-averages for the same reason.
+    ctx.imageSmoothingQuality = "high";
     ctx.drawImage(this.video, 0, 0, canvas.width, canvas.height);
     const track = this.stream?.getVideoTracks()[0] as
       | (MediaStreamTrack & { requestFrame?: () => void })
@@ -244,8 +277,38 @@ export class ClipRecorder {
       setTimeout(() => resolve(null), 5_000);
     });
 
-    // Tear down and restart for the next minute. The opening cadence only
-    // ever applies to the first clip — every later interval is full-length.
+    const blob =
+      parts.length > 0 && frameCount > 0
+        ? new Blob(parts, { type: this.mime.mime.split(";")[0] })
+        : null;
+
+    // Oversize clips are rejected server-side (HeadObject vs
+    // MAX_CLIP_BYTES), which would cost the whole minute. We tune the
+    // bitrate for the rate-control behaviour browsers actually have, so
+    // this should never fire — but an engine that instead budgets over
+    // the clip's real 60s wall clock would overshoot every time. Halve
+    // and carry on rather than upload a clip we know will be refused;
+    // the floor is the conservative native rate.
+    let oversize = false;
+    if (blob && blob.size > MAX_CLIP_BYTES) {
+      oversize = true;
+      const reduced = Math.max(
+        CLIP_VIDEO_BITS_PER_SECOND,
+        Math.round(this.bitrate / 2),
+      );
+      if (reduced !== this.bitrate) {
+        console.warn(
+          `[lookout] clip was ${blob.size} bytes (cap ${MAX_CLIP_BYTES}) — ` +
+            `dropping encoder bitrate ${this.bitrate} -> ${reduced}`,
+        );
+        this.bitrate = reduced;
+      }
+    }
+
+    // Tear down and restart for the next minute — after the size check, so
+    // any backoff above applies to the clip we're about to start. The
+    // opening cadence only ever applies to the first clip; every later
+    // interval is full-length.
     this.openingFrameIntervalMs = null;
     this.teardown();
     try {
@@ -255,9 +318,9 @@ export class ClipRecorder {
       // back to JPEG and recording resumes when start() next succeeds.
     }
 
-    if (parts.length === 0 || frameCount === 0) return null;
-    const blob = new Blob(parts, { type: this.mime.mime.split(";")[0] });
-    if (blob.size === 0) return null;
+    // A null/empty/oversize clip falls back to a single JPEG for this
+    // tick, so the capture cadence and credit streak never skip.
+    if (!blob || blob.size === 0 || oversize) return null;
 
     return {
       blob,
