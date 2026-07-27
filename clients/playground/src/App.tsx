@@ -5,6 +5,7 @@ import {
   SessionDetail,
   TimelapseEditor,
   createLookoutClient,
+  setAccentColor,
   colors,
   fontSize,
   fontWeight,
@@ -29,6 +30,8 @@ const LS_KEY = "lookout-playground";
 interface Settings {
   apiBaseUrl: string;
   token: string;
+  /** Brand accent an embedding program would pass to LookoutProvider. */
+  accent: string;
 }
 
 function loadSettings(): Settings {
@@ -38,7 +41,11 @@ function loadSettings(): Settings {
   } catch {
     // Fall through to defaults.
   }
-  return { apiBaseUrl: "https://lookout-stage.dino.icu", token: "" };
+  return {
+    apiBaseUrl: "https://lookout-stage.dino.icu",
+    token: "",
+    accent: "#3b82f6",
+  };
 }
 
 export function App() {
@@ -49,6 +56,13 @@ export function App() {
   });
   const [tab, setTab] = useState<Tab>("editor");
   const [cuts, setCuts] = useState<CutInterval[]>([]);
+
+  // Mirrors what <LookoutProvider accentColor> does, so the editor and
+  // both dialogs can be checked against a brand colour without wiring a
+  // provider around every tab.
+  useEffect(() => {
+    setAccentColor(applied?.accent ?? null);
+  }, [applied?.accent]);
 
   const apply = () => {
     localStorage.setItem(LS_KEY, JSON.stringify(settings));
@@ -153,6 +167,32 @@ function Header({
           if (e.key === "Enter") onApply();
         }}
       />
+      <label
+        title="Accent colour an embedder would pass to LookoutProvider"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: fontSize.sm,
+          color: colors.text.secondary,
+        }}
+      >
+        Accent
+        <input
+          type="color"
+          value={settings.accent}
+          onChange={(e) => onChange({ ...settings, accent: e.target.value })}
+          style={{
+            width: 32,
+            height: 28,
+            padding: 0,
+            border: `1px solid ${colors.border.default}`,
+            borderRadius: radii.md,
+            background: "transparent",
+            cursor: "pointer",
+          }}
+        />
+      </label>
       <button onClick={onApply} style={{ ...input, cursor: "pointer", fontWeight: fontWeight.semibold }}>
         Load
       </button>
