@@ -810,6 +810,14 @@ starts at stop and takes tens of seconds — so it polls through that state
 and shows a `<ProgressRing>` sized from the session's capture count, then
 swaps to the timeline when the video lands.
 
+`<LookoutRecorder>` and `<SessionDetail>` both present this in an
+**`<Overlay>`** — a modal panel portalled to `document.body`, so it gets
+the viewport rather than whatever width the host gave the recorder, and so
+a transformed ancestor in the host page can't trap it. It is deliberately
+not dismissible: closing without deciding would leave the session
+unpublished, so Save is the way out (and if the tab goes away, the edit
+lease lapses and it publishes as recorded).
+
 The timeline ruler labels at a step chosen from the track width
 (`rulerStep`), with a grabbable playhead tag above it. While mounted the
 editor holds the session's **edit lease** (see `useEditLease`),
@@ -933,6 +941,7 @@ The SDK exports styled UI primitives used by its components. All use inline styl
 | `Card` | Styled card container |
 | `ErrorDisplay` | Error message display with variants: `inline`, `banner`, `page` |
 | `PageContainer` | Page layout wrapper |
+| `Overlay` | Modal panel portalled to `document.body` (immune to transformed ancestors), with backdrop, scroll lock, and optional dismiss |
 | `Skeleton` / `GallerySkeleton` / `SessionDetailSkeleton` / `RecordPageSkeleton` | Loading skeletons |
 | `colors` / `spacing` / `radii` / `fontSize` / `fontWeight` / `statusConfig` | Theme tokens |
 

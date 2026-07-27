@@ -13,6 +13,8 @@ export type { ErrorDisplayProps } from "./ErrorDisplay.js";
 export { Card } from "./Card.js";
 export type { CardProps } from "./Card.js";
 export { PageContainer } from "./PageContainer.js";
+export { Overlay } from "./Overlay.js";
+export type { OverlayProps } from "./Overlay.js";
 export type { PageContainerProps } from "./PageContainer.js";
 export { Skeleton, GallerySkeleton, SessionDetailSkeleton, RecordPageSkeleton } from "./Skeleton.js";
 export type { SkeletonProps } from "./Skeleton.js";

@@ -13,6 +13,7 @@ import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
 import { PageContainer } from "../ui/PageContainer.js";
+import { Overlay } from "../ui/Overlay.js";
 import { colors, fontSize, fontWeight, spacing } from "../ui/theme.js";
 
 /**
@@ -112,30 +113,71 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
     state.status === "complete" ||
     state.status === "failed"
   ) {
-    // "Edit & save": the session is held unpublished while the user cuts
-    // it. No cancel affordance here — publishing is the way out (and the
-    // hold publishes on its own if they abandon the tab).
-    if (editorOpen && resolvedToken && state.status !== "failed") {
-      return (
-        // Wider than the recorder's own 800: the timeline is a precision
-        // surface, and every 100px is another whole filmstrip frame. The
-        // default 640 left it narrower than the screen it replaced.
-        <PageContainer maxWidth={960} style={{ padding: spacing.xxl }}>
-          <TimelapseEditor
-            token={resolvedToken}
-            apiBaseUrl={config.apiBaseUrl}
-            onApplied={() => setEditorOpen(false)}
+    return (
+      <>
+        <PageContainer style={{ padding: spacing.xxl }}>
+          <ProcessingState
+            status={state.status}
+            trackedSeconds={state.trackedSeconds}
           />
         </PageContainer>
-      );
-    }
-    return (
-      <PageContainer style={{ padding: spacing.xxl }}>
-        <ProcessingState
-          status={state.status}
-          trackedSeconds={state.trackedSeconds}
-        />
-      </PageContainer>
+
+        {/* "Edit & save" opens over the host page rather than inside the
+            recorder's own box. Embedders place the recorder in columns and
+            cards of any width, and a timeline squeezed into one is a
+            precision tool you can't be precise with; the overlay gets the
+            viewport regardless.
+
+            Deliberately not dismissible: there is no "leave without
+            deciding" exit, because the session is unpublished until
+            someone decides. Save is the way out — and if the tab goes
+            away entirely, the edit lease lapses and it publishes as
+            recorded. */}
+        {editorOpen && resolvedToken && state.status !== "failed" && (
+          <Overlay label="Review your timelapse" height="min(820px, 92vh)">
+            <div
+              style={{
+                flex: "0 0 auto",
+                padding: `${spacing.lg}px ${spacing.xl}px 0`,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: fontSize.xxl,
+                  fontWeight: fontWeight.bold,
+                  color: colors.text.primary,
+                  letterSpacing: "-0.01em",
+                }}
+              >
+                Review your timelapse
+              </div>
+              <div
+                style={{
+                  fontSize: fontSize.md,
+                  color: colors.text.secondary,
+                  marginTop: 2,
+                }}
+              >
+                Cut anything you'd rather not share. Nothing is published
+                until you save.
+              </div>
+            </div>
+            <div
+              style={{
+                flex: "1 1 auto",
+                minHeight: 0,
+                padding: `${spacing.md}px ${spacing.xl}px ${spacing.xl}px`,
+              }}
+            >
+              <TimelapseEditor
+                token={resolvedToken}
+                apiBaseUrl={config.apiBaseUrl}
+                onApplied={() => setEditorOpen(false)}
+              />
+            </div>
+          </Overlay>
+        )}
+      </>
     );
   }
 
