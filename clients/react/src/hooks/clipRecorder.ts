@@ -3,8 +3,10 @@ import {
   MAX_HEIGHT,
   JPEG_QUALITY,
   CLIP_WEB_VIDEO_BITS_PER_SECOND,
-  CLIP_VIDEO_BITS_PER_SECOND,
+  CLIP_WEB_MIN_BITS_PER_SECOND,
+  MAX_CLIP_FRAME_OVERRUN,
   MAX_CLIP_BYTES,
+  SCREENSHOT_INTERVAL_MS,
   type CaptureFormat,
 } from "@lookout/shared";
 
@@ -17,6 +19,10 @@ export interface ClipCaptureResult {
   /** Frames drawn into the clip. Informational — the server/worker derive
    *  the real count by demuxing. */
   frameCount: number;
+  /** True when the clip hit its frame cap, i.e. the window it covers ran
+   *  long because the previous upload was still draining. The clip is
+   *  still perfectly usable; the caller may want to log the stall. */
+  truncated: boolean;
   /** Client-clock ms timestamp stamped at cut time — the clip's capture
    *  moment for credit-mode purposes (one clip = one capture unit). */
   capturedAtMs: number;
@@ -79,11 +85,13 @@ export interface ClipRecorderOptions {
   maxWidth?: number;
   maxHeight?: number;
   jpegQuality?: number;
-  /** Faster cadence for the FIRST clip only. The opening clip is cut
-   *  after ~2 frame intervals (fast session activation), so at the normal
-   *  cadence it would hold just 2 frames — one near-still second at the
-   *  head of every timelapse. A denser opening cadence fixes that; after
-   *  the first cut the recorder reverts to `frameIntervalMs`. */
+  /** Faster cadence for the FIRST clip only. The opening clip is cut after
+   *  CLIP_FIRST_CUT_DELAY_MS (fast session activation), which is shorter
+   *  than one frame interval — so at the normal cadence it would hold a
+   *  single frame. The compiler drops the seed unit from the video anyway,
+   *  so this is about the recorder having something to show and something
+   *  to upload, not about output quality. After the first cut the recorder
+   *  reverts to `frameIntervalMs`. */
   openingFrameIntervalMs?: number;
 }
 
@@ -117,6 +125,10 @@ export class ClipRecorder {
    *  `cut()`. Browsers whose rate control does honour real frame spacing
    *  would otherwise blow the cap on every single clip. */
   private bitrate = CLIP_WEB_VIDEO_BITS_PER_SECOND;
+  /** Hard frame cap for one clip — see MAX_CLIP_FRAME_OVERRUN. Derived from
+   *  the SERVER's cadence, not the default constant, so a server that
+   *  dictates a different frameIntervalMs still gets a correct cap. */
+  private maxFrames: number;
   // Opening cadence lives in its own field (cleared after the first cut),
   // so it's excluded from the always-resolved options.
   private opts: Required<Omit<ClipRecorderOptions, "openingFrameIntervalMs">>;
@@ -139,6 +151,9 @@ export class ClipRecorder {
     this.video = video;
     this.frameIntervalMs = frameIntervalMs;
     this.openingFrameIntervalMs = opts?.openingFrameIntervalMs ?? null;
+    this.maxFrames =
+      Math.ceil(SCREENSHOT_INTERVAL_MS / Math.max(1, frameIntervalMs)) *
+      MAX_CLIP_FRAME_OVERRUN;
     this.mime = mime;
     this.opts = {
       maxWidth: opts?.maxWidth ?? MAX_WIDTH,
@@ -214,6 +229,19 @@ export class ClipRecorder {
     const canvas = this.canvas;
     if (!canvas || this.video.videoWidth === 0 || this.video.videoHeight === 0)
       return;
+    // Frame cap. A clip is cut by its upload tick, so a slow uplink stretches
+    // the window this clip covers — and every extra frame is more bytes
+    // against MAX_CLIP_BYTES, for a clip that renders as one second either
+    // way. Past the cap, stop feeding the encoder and stop the timer: the
+    // clip stays uploadable, and we stop burning CPU compositing frames
+    // nothing will ever see.
+    if (this.frameCount >= this.maxFrames) {
+      if (this.frameTimer) {
+        clearInterval(this.frameTimer);
+        this.frameTimer = null;
+      }
+      return;
+    }
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     // Only matters when the source is larger than the clip canvas, but a
@@ -249,6 +277,7 @@ export class ClipRecorder {
     this.drawFrame();
     const capturedAtMs = Date.now();
     const frameCount = this.frameCount;
+    const truncated = frameCount >= this.maxFrames;
     if (this.frameTimer) {
       clearInterval(this.frameTimer);
       this.frameTimer = null;
@@ -288,20 +317,31 @@ export class ClipRecorder {
     // this should never fire — but an engine that instead budgets over
     // the clip's real 60s wall clock would overshoot every time. Halve
     // and carry on rather than upload a clip we know will be refused;
-    // the floor is the conservative native rate.
+    // the floor is the coarsest setting worth uploading.
     let oversize = false;
     if (blob && blob.size > MAX_CLIP_BYTES) {
       oversize = true;
-      const reduced = Math.max(
-        CLIP_VIDEO_BITS_PER_SECOND,
-        Math.round(this.bitrate / 2),
-      );
+      // ...but only when the clip was a NORMAL one. A truncated clip is
+      // oversize because the network stalled and it covers several minutes,
+      // not because the encoder is mis-tuned. The backoff is permanent
+      // (bitrate never ratchets back up), so blaming the encoder for a
+      // network event would leave the rest of the session soft — the exact
+      // failure mode where a user on bad wifi ends up with a worse
+      // timelapse than one on no wifi at all.
+      const reduced = truncated
+        ? this.bitrate
+        : Math.max(CLIP_WEB_MIN_BITS_PER_SECOND, Math.round(this.bitrate / 2));
       if (reduced !== this.bitrate) {
         console.warn(
           `[lookout] clip was ${blob.size} bytes (cap ${MAX_CLIP_BYTES}) — ` +
             `dropping encoder bitrate ${this.bitrate} -> ${reduced}`,
         );
         this.bitrate = reduced;
+      } else if (truncated) {
+        console.warn(
+          `[lookout] clip was ${blob.size} bytes (cap ${MAX_CLIP_BYTES}) after ` +
+            `running long on a slow upload — keeping bitrate at ${this.bitrate}`,
+        );
       }
     }
 
@@ -328,6 +368,7 @@ export class ClipRecorder {
       width,
       height,
       frameCount,
+      truncated,
       capturedAtMs,
       previewBlob,
     };
