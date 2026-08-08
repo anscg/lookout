@@ -1,6 +1,6 @@
 # @lookout/react — React SDK Documentation
 
-**Package:** `@lookout/react` v0.1.0
+**Package:** `@lookout/react` v0.3.7
 **Peer Dependencies:** React 18+ or 19+
 **Exports:** ESM + CJS with TypeScript declarations
 
