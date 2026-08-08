@@ -3,7 +3,7 @@
 //! with clips enabled.
 //!
 //! One `ClipRecorder` lives per upload interval: the capture loop pushes a
-//! frame every `frameIntervalMs` (server-authoritative, 4s = 15/min), and
+//! frame every `frameIntervalMs` (server-authoritative, 10s = 6/min), and
 //! at the upload tick `finish()` produces the MP4 bytes. Encoding is done
 //! by the OS hardware encoder on every platform — no bundled codecs:
 //!
@@ -19,16 +19,31 @@ use image::DynamicImage;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Encoder bitrate cap (bits/second). Matches the shared
-/// CLIP_VIDEO_BITS_PER_SECOND, which is the NATIVE-encoder rate: we hand
-/// these encoders real presentation timestamps, so the number really does
-/// buy a per-frame budget. Browsers need a much larger figure for the same
-/// output quality (see CLIP_WEB_VIDEO_BITS_PER_SECOND) — the two are not
-/// comparable. Sized for text legibility: ~300 KB per 3s
-/// frame allows JPEG-q85-class keyframes at 1080p. VBR ceiling, not a
-/// floor — static screens undershoot heavily. The server rejects clips
-/// over 8 MB. 133k/400k were tried first and produced soft H.264.
-pub const CLIP_BITS_PER_SECOND: u32 = 800_000;
+/// Per-frame byte budget — the quality dial. Mirrors the shared
+/// CLIP_FRAME_BYTE_BUDGET; keep the two in step.
+///
+/// ~400 KB buys a JPEG-q85-class keyframe at 1080p, the bar the legacy
+/// single-screenshot pipeline set. 133k/400k-per-second equivalents were
+/// tried first and produced visibly soft H.264.
+pub const CLIP_FRAME_BYTE_BUDGET: u64 = 400_000;
+
+/// Bitrate (bits/second of MEDIA time) that lands CLIP_FRAME_BYTE_BUDGET per
+/// frame at the given cadence. Mirrors `nativeClipBitsPerSecond` in
+/// @lookout/shared.
+///
+/// This must scale with the cadence. These encoders get each frame's real
+/// presentation timestamp, so their bitrate is denominated per second of
+/// media time — the same number buys 2.5x the bytes per frame when frames
+/// sit 10s apart instead of 4s. Left fixed, a slower cadence would silently
+/// inflate every clip toward the server's 8 MB limit while a faster one
+/// would starve it. (Browsers work differently and need a much larger
+/// figure for the same quality — see CLIP_WEB_VIDEO_BITS_PER_SECOND. The
+/// two are not comparable.) VBR ceiling, not a floor: static screens
+/// undershoot heavily.
+pub fn clip_bits_per_second(frame_interval_ms: u64) -> u32 {
+    let interval_ms = frame_interval_ms.max(1);
+    ((CLIP_FRAME_BYTE_BUDGET * 8 * 1000) / interval_ms).min(u32::MAX as u64) as u32
+}
 
 /// A finished clip ready for upload.
 pub struct FinishedClip {
@@ -67,7 +82,13 @@ impl ClipRecorder {
         let width = (width & !1).max(2);
         let height = (height & !1).max(2);
         let path = clip_temp_path();
-        let encoder = platform::Encoder::new(&path, width, height, CLIP_BITS_PER_SECOND)?;
+        let encoder = platform::Encoder::new(
+            &path,
+            width,
+            height,
+            clip_bits_per_second(frame_interval_ms),
+            frame_interval_ms,
+        )?;
         Ok(Self {
             encoder,
             path,
@@ -250,6 +271,34 @@ mod tests {
         }
     }
 
+    /// The bitrate must buy the same bytes per FRAME at any cadence — that
+    /// invariant is the whole reason it's derived instead of hardcoded.
+    #[test]
+    fn bitrate_holds_per_frame_quality_across_cadences() {
+        for interval_ms in [2_000u64, 4_000, 12_000, 30_000] {
+            let bytes_per_frame =
+                (clip_bits_per_second(interval_ms) as u64 * interval_ms) / (8 * 1000);
+            let drift = bytes_per_frame.abs_diff(CLIP_FRAME_BYTE_BUDGET);
+            assert!(
+                drift <= CLIP_FRAME_BYTE_BUDGET / 100,
+                "at {interval_ms}ms a frame gets {bytes_per_frame}B, want ~{CLIP_FRAME_BYTE_BUDGET}B"
+            );
+        }
+
+        // The 4s cadence is the one that was measured and tuned by hand at
+        // 800 kbps. Reproducing it exactly is what makes the formula
+        // trustworthy at every other cadence.
+        assert_eq!(clip_bits_per_second(4_000), 800_000);
+
+        // And a whole clip has to stay clear of the server's 8 MB limit at
+        // the cadence actually shipping.
+        let frames_per_clip = 60_000 / 10_000;
+        assert!(
+            frames_per_clip * CLIP_FRAME_BYTE_BUDGET < 8 * 1024 * 1024,
+            "nominal clip exceeds MAX_CLIP_BYTES"
+        );
+    }
+
     /// A recorder with zero frames must fail, not produce an empty clip.
     #[test]
     fn empty_clip_errors() {
@@ -317,7 +366,13 @@ mod platform {
     unsafe impl Send for Encoder {}
 
     impl Encoder {
-        pub fn new(path: &Path, width: u32, height: u32, bitrate: u32) -> Result<Self, String> {
+        pub fn new(
+            path: &Path,
+            width: u32,
+            height: u32,
+            bitrate: u32,
+            frame_interval_ms: u64,
+        ) -> Result<Self, String> {
             unsafe {
                 let url = NSURL::fileURLWithPath(&NSString::from_str(
                     path.to_str().ok_or("non-utf8 temp path")?,
@@ -369,8 +424,14 @@ mod platform {
                 );
                 // Rate-control hint: the source is ~1 frame/interval, not
                 // 30fps — lets the encoder budget bits per frame correctly.
+                // The key is integer fps, so any interval at or above one
+                // second floors to 1; that's the honest answer and matches
+                // the measured behaviour (VideoToolbox budgets against the
+                // real presentation timestamps we hand it, which is why
+                // `bitrate` is derived from the cadence rather than fixed).
+                let expected_fps = (1000 / frame_interval_ms.max(1)).max(1) as u32;
                 compression.setObject_forKey(
-                    NSNumber::new_u32(1).as_ref(),
+                    NSNumber::new_u32(expected_fps).as_ref(),
                     ProtocolObject::from_ref(key_expected_fps),
                 );
 
@@ -557,23 +618,97 @@ mod platform {
         ((hi as u64) << 32) | lo as u64
     }
 
+    /// Balances one `MFStartup` on drop.
+    ///
+    /// MFStartup/MFShutdown are refcounted, and encoder construction has a
+    /// dozen fallible steps after the startup call. Every one of those early
+    /// returns used to leak a refcount — invisible on a healthy machine
+    /// (init succeeds, finish() balances it), unbounded on one whose encoder
+    /// always fails, because the capture loop retries init on every frame
+    /// for the length of the session. `std::mem::forget` on the success path
+    /// hands the refcount to the encoder instead.
+    struct MfStartupGuard;
+
+    impl Drop for MfStartupGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = MFShutdown();
+            }
+        }
+    }
+
     pub struct Encoder {
         writer: IMFSinkWriter,
         stream_index: u32,
         width: u32,
         height: u32,
+        frame_interval_ms: u64,
     }
 
     // Single-threaded use from the capture loop.
     unsafe impl Send for Encoder {}
 
     impl Encoder {
-        pub fn new(path: &Path, width: u32, height: u32, bitrate: u32) -> Result<Self, String> {
+        /// Two attempts, in order of correctness:
+        ///
+        ///  1. Declare the REAL sub-1fps cadence as a ratio (1000 :
+        ///     interval_ms) and hand over the per-media-second bitrate. Both
+        ///     readings of `MF_MT_AVG_BITRATE` — bits per second of media
+        ///     time, or bits per declared frame — then agree on the same
+        ///     ~CLIP_FRAME_BYTE_BUDGET per frame.
+        ///  2. If the MFT refuses that media type (some hardware encoders
+        ///     reject fractional frame rates outright), fall back to the
+        ///     1 fps hint this code shipped with, and scale the bitrate to
+        ///     match so the per-frame budget is preserved rather than
+        ///     silently divided by the interval.
+        ///
+        /// Only if BOTH fail does the caller fall back to a JPEG for the
+        /// interval. Windows per-frame output has not been measured on real
+        /// hardware the way the macOS path has; if clips come back soft or
+        /// oversize, this pair of attempts is where to look first.
+        pub fn new(
+            path: &Path,
+            width: u32,
+            height: u32,
+            bitrate: u32,
+            frame_interval_ms: u64,
+        ) -> Result<Self, String> {
+            let interval_ms = frame_interval_ms.max(1);
+            match Self::try_new(path, width, height, bitrate, interval_ms, 1000, interval_ms as u32)
+            {
+                Ok(enc) => Ok(enc),
+                Err(real_cadence_err) => {
+                    let per_frame_bitrate = ((bitrate as u64 * interval_ms) / 1000)
+                        .min(u32::MAX as u64) as u32;
+                    eprintln!(
+                        "[clips] Media Foundation rejected the {interval_ms}ms cadence \
+                         ({real_cadence_err}) — retrying at a 1fps hint"
+                    );
+                    Self::try_new(path, width, height, per_frame_bitrate, interval_ms, 1, 1)
+                }
+            }
+        }
+
+        fn try_new(
+            path: &Path,
+            width: u32,
+            height: u32,
+            bitrate: u32,
+            frame_interval_ms: u64,
+            frame_rate_num: u32,
+            frame_rate_den: u32,
+        ) -> Result<Self, String> {
             ensure_com();
             unsafe {
                 // Idempotent per-process init (returns S_OK on repeat calls).
                 MFStartup(MF_VERSION, MFSTARTUP_FULL)
                     .map_err(|e| format!("MFStartup failed: {e}"))?;
+
+                // From here on every early return must balance that startup.
+                // Without this the refcount leaked once per failed init —
+                // and a machine whose encoder always fails attempts one per
+                // frame, for the length of the session.
+                let guard = MfStartupGuard;
 
                 let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(
                     &HSTRING::from(path.to_string_lossy().as_ref()),
@@ -582,9 +717,10 @@ mod platform {
                 )
                 .map_err(|e| format!("MFCreateSinkWriterFromURL failed: {e}"))?;
 
-                // Output: H.264 at the clip bitrate. ~1 fps nominal rate —
-                // frame timing is carried per-sample, the rate attribute
-                // only seeds the encoder's rate control.
+                // Output: H.264 at the clip bitrate. Frame timing is also
+                // carried per-sample; the rate attribute seeds the encoder's
+                // rate control, so it and `bitrate` have to agree about what
+                // a "second" means (see `new`).
                 let out_type: IMFMediaType =
                     MFCreateMediaType().map_err(|e| format!("MFCreateMediaType: {e}"))?;
                 out_type
@@ -603,7 +739,10 @@ mod platform {
                     .SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(width, height))
                     .map_err(|e| e.to_string())?;
                 out_type
-                    .SetUINT64(&MF_MT_FRAME_RATE, pack_u64(1, 1))
+                    .SetUINT64(
+                        &MF_MT_FRAME_RATE,
+                        pack_u64(frame_rate_num, frame_rate_den),
+                    )
                     .map_err(|e| e.to_string())?;
                 // One IDR per clip (see the macOS encoder for rationale).
                 out_type
@@ -630,7 +769,10 @@ mod platform {
                     .SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(width, height))
                     .map_err(|e| e.to_string())?;
                 in_type
-                    .SetUINT64(&MF_MT_FRAME_RATE, pack_u64(1, 1))
+                    .SetUINT64(
+                        &MF_MT_FRAME_RATE,
+                        pack_u64(frame_rate_num, frame_rate_den),
+                    )
                     .map_err(|e| e.to_string())?;
                 writer
                     .SetInputMediaType(stream_index, &in_type, None)
@@ -640,11 +782,15 @@ mod platform {
                     .BeginWriting()
                     .map_err(|e| format!("BeginWriting failed: {e}"))?;
 
+                // Success: ownership of the MFStartup refcount passes to the
+                // encoder, which balances it in finish().
+                std::mem::forget(guard);
                 Ok(Self {
                     writer,
                     stream_index,
                     width,
                     height,
+                    frame_interval_ms,
                 })
             }
         }
@@ -687,8 +833,12 @@ mod platform {
                 sample
                     .SetSampleTime((pts_ms * 10_000) as i64)
                     .map_err(|e| e.to_string())?;
+                // Duration must be the REAL frame interval. This was pinned
+                // at 3000ms — correct only for a cadence the app no longer
+                // uses — which left every sample claiming a span that
+                // disagreed with its own presentation timestamps.
                 sample
-                    .SetSampleDuration(3_000i64 * 10_000)
+                    .SetSampleDuration((self.frame_interval_ms * 10_000) as i64)
                     .map_err(|e| e.to_string())?;
 
                 self.writer
@@ -738,7 +888,16 @@ mod platform {
     unsafe impl Send for Encoder {}
 
     impl Encoder {
-        pub fn new(path: &Path, width: u32, height: u32, bitrate: u32) -> Result<Self, String> {
+        /// `frame_interval_ms` is unused here: the pipeline declares
+        /// `framerate=0/1` (variable) and carries timing per-buffer, and the
+        /// bitrate the caller passes is already scaled for the cadence.
+        pub fn new(
+            path: &Path,
+            width: u32,
+            height: u32,
+            bitrate: u32,
+            _frame_interval_ms: u64,
+        ) -> Result<Self, String> {
             gst::init().map_err(|e| format!("gst init failed: {e}"))?;
 
             let encoder_name = ENCODER_CANDIDATES

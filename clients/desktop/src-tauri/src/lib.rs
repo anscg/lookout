@@ -2088,12 +2088,36 @@ const CAPTURE_INTERVAL_SECS: u64 = 60;
 /// probably slept (or the WebView was throttled hard).
 const SLEEP_THRESHOLD_SECS: u64 = CAPTURE_INTERVAL_SECS * 2 + 30; // 150s
 /// Fallback frame cadence when the server doesn't advertise one (pre-clips
-/// servers): every 4s = 15 frames/min. When the server sends
-/// `frameIntervalMs` on the session GET, that value wins — the cadence is
-/// server-authoritative. Frames go through the identical redaction-aware
-/// capture path as uploads; in clips mode they're recorded into the clip,
-/// and the JPEG preview side is only produced while the window is focused.
-const DEFAULT_FRAME_INTERVAL_MS: u64 = 4_000;
+/// servers): every 10s = 6 frames/min. Mirrors CLIP_FRAME_INTERVAL_MS in
+/// @lookout/shared. When the server sends `frameIntervalMs` on the session
+/// GET, that value wins — the cadence is server-authoritative. Frames go
+/// through the identical redaction-aware capture path as uploads; in clips
+/// mode they're recorded into the clip, and the JPEG preview side is only
+/// produced while the window is focused.
+const DEFAULT_FRAME_INTERVAL_MS: u64 = 10_000;
+
+/// Delay from capture start to the FIRST upload tick. Mirrors
+/// CLIP_FIRST_CUT_DELAY_MS in @lookout/shared.
+///
+/// Deliberately not a multiple of the frame cadence: the opening clip is the
+/// session's seed capture, which credits 0 seconds and which the compiler
+/// drops from the video outright, so its frame density doesn't matter. What
+/// this delay does control is how long the user stares at an unstarted
+/// session — and tying it to the cadence turned every slower cadence into a
+/// 20-second-plus wait.
+const CLIP_FIRST_CUT_DELAY_MS: u64 = 8_000;
+
+/// Consecutive clip-encoder failures tolerated before this capture run gives
+/// up on clips and records plain JPEGs for the rest of the session.
+///
+/// A broken encoder is already survivable one interval at a time (each
+/// failure falls back to a JPEG), but "survivable" was not the same as
+/// "quiet": on a machine where the encoder can never initialize, the loop
+/// retried it on every single frame — for hours — each attempt paying the
+/// full cost of constructing and tearing down an OS encoder, and writing a
+/// line to stderr. Latching off after a few consecutive failures keeps the
+/// recording intact and stops the thrash.
+const MAX_CLIP_ENCODER_FAILURES: u32 = 3;
 
 /// Max seconds the menu-bar time may run ahead of the last server-credited
 /// `tracked_seconds`. Must equal `MAX_INTERPOLATION_S` in
@@ -2114,16 +2138,17 @@ fn tray_display_seconds(base_seconds: i64, elapsed_secs: i64, running: bool) -> 
     base_seconds + elapsed_secs.clamp(0, MAX_TRAY_INTERPOLATION_SECS)
 }
 
-/// Format seconds into the same tray title format as the JS side:
-/// >0h: "{h}h {m}m", else: "{m}m"
+/// Format seconds into a clock-style tray title:
+/// >0h: "{h}:{mm:02}:{ss:02}", else: "{mm:02}:{ss:02}"
 fn format_tray_time(total_seconds: i64) -> String {
     let total = total_seconds.max(0) as u64;
     let h = total / 3600;
     let m = (total % 3600) / 60;
+    let s = total % 60;
     if h > 0 {
-        format!("{h}h {m}m")
+        format!("{h}:{m:02}:{s:02}")
     } else {
-        format!("{m}m")
+        format!("{m:02}:{s:02}")
     }
 }
 
@@ -2469,6 +2494,26 @@ async fn grab_frame(
     .and_then(|r| r)
 }
 
+/// Record one clip-encoder failure, and latch clips off for the rest of the
+/// run once they stop looking transient.
+///
+/// The recording itself is never at risk either way — every clip failure
+/// already falls back to a JPEG for that interval. This is about not
+/// re-attempting a hopeless encoder several times a minute for hours. Any
+/// clip that finalizes successfully resets the counter, so a one-off
+/// hiccup (a display mode change, a busy GPU) never disables clips.
+fn note_clip_failure(failures: &mut u32, clips_mode: &mut bool) {
+    *failures += 1;
+    if *failures >= MAX_CLIP_ENCODER_FAILURES && *clips_mode {
+        *clips_mode = false;
+        eprintln!(
+            "[capture-loop] {} consecutive clip-encoder failures — disabling clips \
+             for this session, continuing with one JPEG per minute",
+            *failures
+        );
+    }
+}
+
 /// Clip capability the server advertises for a session (on the session
 /// GET). Fetched once at capture-loop start; any failure means clips off,
 /// i.e. legacy one-JPEG-per-minute behavior.
@@ -2642,7 +2687,11 @@ async fn capture_loop_task(
         Some(c) => fetch_clip_capabilities(c).await,
         None => SessionClipCapabilities::default(),
     };
-    let clips_mode = caps.clips_enabled;
+    // Mutable: latches off after MAX_CLIP_ENCODER_FAILURES consecutive
+    // encoder failures, so a machine with a broken encoder settles into
+    // plain JPEG mode instead of retrying forever.
+    let mut clips_mode = caps.clips_enabled;
+    let mut clip_encoder_failures: u32 = 0;
     // Server-authoritative cadence, clamped defensively against a
     // misbehaving server so the loop can't spin or stall.
     let frame_interval_ms = caps
@@ -2655,22 +2704,22 @@ async fn capture_loop_task(
         eprintln!("[capture-loop] clips enabled (frame every {frame_interval_ms}ms)");
     }
 
-    // Clips: delay the first upload by two frame intervals so the opening
-    // clip carries motion instead of a single still. JPEG mode keeps the
-    // legacy immediate first tick.
+    // Clips: hold the first upload back so the opening clip has a few frames
+    // and the session activates promptly. Fixed delay, NOT a multiple of the
+    // cadence — see CLIP_FIRST_CUT_DELAY_MS. JPEG mode keeps the legacy
+    // immediate first tick.
     next_fire = TokioInstant::now()
         + if clips_mode {
-            2 * frame_dur
+            Duration::from_millis(CLIP_FIRST_CUT_DELAY_MS)
         } else {
             Duration::ZERO
         };
 
-    // The opening window is only ~2 frame intervals long, so at the normal
-    // cadence the first clip would hold just 2 frames — rendered as one
-    // near-still second at the head of every timelapse. Capture the opening
-    // window ~3x faster so the first clip is as visually dense as the rest;
-    // after the first upload the cadence returns to the server's value.
-    let opening_frame_dur = Duration::from_millis((frame_interval_ms / 3).max(500));
+    // The opening window is shorter than one frame interval, so at the normal
+    // cadence the first clip would hold a single frame. Capture it densely
+    // enough to carry a handful; after the first upload the cadence returns
+    // to the server's value.
+    let opening_frame_dur = Duration::from_millis((CLIP_FIRST_CUT_DELAY_MS / 4).max(500));
     let mut first_upload_done = false;
 
     // The in-flight upload, if any. Uploads run CONCURRENTLY with frame
@@ -2685,7 +2734,7 @@ async fn capture_loop_task(
 
     'outer: loop {
         // ── Wait until next_fire, collecting frames along the way ──
-        // Frames run at the clip cadence (server-set, 15/min) through the
+        // Frames run at the clip cadence (server-set, 6/min) through the
         // SAME redaction-aware capture path as uploads. In clips mode every
         // frame is recorded into the current clip; the JPEG preview side
         // is focus-gated either way (nobody can see it unfocused).
@@ -2763,9 +2812,15 @@ async fn capture_loop_task(
                                 frame_interval_ms,
                             ) {
                                 Ok(r) => recorder = Some(r),
-                                Err(e) => eprintln!(
-                                    "[capture-loop] clip encoder init failed: {e} — JPEG fallback this interval"
-                                ),
+                                Err(e) => {
+                                    eprintln!(
+                                        "[capture-loop] clip encoder init failed: {e} — JPEG fallback this interval"
+                                    );
+                                    note_clip_failure(
+                                        &mut clip_encoder_failures,
+                                        &mut clips_mode,
+                                    );
+                                }
                             }
                         }
                         if let Some(r) = recorder.as_mut() {
@@ -2776,6 +2831,7 @@ async fn capture_loop_task(
                                 if let Some(r) = recorder.take() {
                                     r.discard();
                                 }
+                                note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
                             }
                         }
                     }
@@ -2889,7 +2945,8 @@ async fn capture_loop_task(
                             frame_interval_ms,
                         )
                         .map_err(|e| {
-                            eprintln!("[capture-loop] clip encoder init failed: {e}")
+                            eprintln!("[capture-loop] clip encoder init failed: {e}");
+                            note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
                         })
                         .ok();
                     }
@@ -2899,14 +2956,21 @@ async fn capture_loop_task(
                             if let Some(r) = recorder.take() {
                                 r.discard();
                             }
+                            note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
                         }
                     }
                     match recorder.take().map(|r| r.finish()) {
-                        Some(Ok(c)) => Some(c),
+                        Some(Ok(c)) => {
+                            // A clip made it out whole — the encoder works,
+                            // so earlier failures were transient.
+                            clip_encoder_failures = 0;
+                            Some(c)
+                        }
                         Some(Err(e)) => {
                             eprintln!(
                                 "[capture-loop] clip finalize failed: {e} — uploading JPEG instead"
                             );
+                            note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
                             None
                         }
                         None => None,
@@ -3676,7 +3740,12 @@ mod tray_timer_tests {
         // interpolated value here left the menu bar up to a minute ahead for
         // the whole pause.
         assert_eq!(tray_display_seconds(120, 45, false), 120);
-        assert_eq!(format_tray_time(tray_display_seconds(299, 59, false)), "4m");
+        // Clock-style title: the paused value is the base, formatted exactly —
+        // 299s is 04:59, not the 4m the minute-granularity title used to show.
+        assert_eq!(
+            format_tray_time(tray_display_seconds(299, 59, false)),
+            "04:59"
+        );
     }
 
     #[test]
