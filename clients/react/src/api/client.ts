@@ -1,3 +1,4 @@
+import { UPLOAD_STEP_TIMEOUT_MS } from "@lookout/shared";
 import type {
   CaptureFormat,
   SessionResponse,
@@ -83,6 +84,27 @@ async function resolveTokenValue(provider: TokenProvider): Promise<string> {
   return result instanceof Promise ? result : result;
 }
 
+/**
+ * An AbortSignal that fires after UPLOAD_STEP_TIMEOUT_MS.
+ *
+ * `fetch` never times out on its own, so one half-open socket would
+ * otherwise park a request forever — and the capture loop has nothing to
+ * retry until it settles. Returns undefined on engines without
+ * `AbortSignal.timeout` (pre-2022 Safari/Firefox) rather than shimming it:
+ * those users get exactly today's behaviour, nobody gets a hard failure.
+ */
+function stepDeadline(): AbortSignal | undefined {
+  return typeof AbortSignal !== "undefined" &&
+    typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(UPLOAD_STEP_TIMEOUT_MS)
+    : undefined;
+}
+
+/** True for the AbortError a stepDeadline fires. */
+function isTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {};
   if (init?.body) {
@@ -90,8 +112,17 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   }
   let res: Response;
   try {
-    res = await fetch(url, { ...init, headers: { ...headers, ...(init?.headers as Record<string, string>) } });
+    res = await fetch(url, {
+      signal: stepDeadline(),
+      ...init,
+      headers: { ...headers, ...(init?.headers as Record<string, string>) },
+    });
   } catch (err) {
+    if (isTimeout(err)) {
+      throw new Error(
+        `Timed out after ${UPLOAD_STEP_TIMEOUT_MS / 1000}s fetching ${url}`,
+      );
+    }
     // Network-level failure (DNS, connection refused, CORS, SSL)
     // WebKit just says "Load failed" — add the URL for context
     const msg = err instanceof Error ? err.message : String(err);
@@ -159,8 +190,18 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
           body: blob,
           // Must match the content type the presigned URL was signed with.
           headers: { "Content-Type": contentType },
+          // The step most exposed to a weak uplink: this is the multi-MB
+          // payload, and a stalled PUT used to hang the capture loop with
+          // no error for it to fall back on.
+          signal: stepDeadline(),
         });
       } catch (err) {
+        if (isTimeout(err)) {
+          throw new Error(
+            `R2 upload timed out after ${UPLOAD_STEP_TIMEOUT_MS / 1000}s ` +
+              `(${blob.size} bytes) — the connection stalled mid-transfer.`,
+          );
+        }
         if (err instanceof TypeError) {
           throw new Error(
             "Upload failed: network error or CORS misconfiguration on R2 bucket.",

@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CLIP_FRAME_INTERVAL_MS } from "@lookout/shared";
+import {
+  CLIP_FRAME_INTERVAL_MS,
+  CLIP_FIRST_CUT_DELAY_MS,
+  MAX_CLIP_UPLOAD_FAILURES,
+} from "@lookout/shared";
 import { useLookoutContext } from "../LookoutProvider.js";
 import { useScreenCapture } from "./useScreenCapture.js";
 import { useCameraCapture } from "./useCameraCapture.js";
-import { useUploader, type UploadPayload } from "./useUploader.js";
+import {
+  useUploader,
+  ClipFormatRejectedError,
+  type UploadPayload,
+  type UploadConfirmResult,
+} from "./useUploader.js";
 import { useSession } from "./useSession.js";
 import { useSessionTimer } from "./useSessionTimer.js";
 import { useSilentAudioKeepAlive } from "./useSilentAudioKeepAlive.js";
@@ -132,10 +141,13 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
             maxWidth: config.capture.maxWidth,
             maxHeight: config.capture.maxHeight,
             jpegQuality: config.capture.jpegQuality,
-            // Denser cadence for the short opening clip (cut at
-            // 2×frameIntervalMs) so the timelapse's first second is as
-            // smooth as the rest.
-            openingFrameIntervalMs: Math.max(500, Math.round(frameIntervalMs / 3)),
+            // Denser cadence for the short opening clip, which is cut after
+            // CLIP_FIRST_CUT_DELAY_MS — well under one frame interval — so
+            // that first upload carries a few frames rather than one.
+            openingFrameIntervalMs: Math.max(
+              500,
+              Math.round(CLIP_FIRST_CUT_DELAY_MS / 4),
+            ),
           });
           clipRecorder.start();
         } catch (err) {
@@ -149,42 +161,105 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     }
     clipRecorderRef.current = clipRecorder;
 
-    // Serial capture-upload chain — matches the desktop Rust loop in
-    // `clients/desktop/src-tauri/src/lib.rs::capture_loop_task`. Each
-    // tick produces one capture unit (a clip cut, or a JPEG screenshot),
-    // awaits the full upload+confirm round trip, and reads the FRESH
-    // `nextExpectedAt` from THIS capture's own confirm response. No
-    // shared ref, no race.
+    // Capture-upload chain — mirrors the desktop Rust loop in
+    // `clients/desktop/src-tauri/src/lib.rs::capture_loop_task`, including
+    // its concurrency shape.
     //
-    // As long as the round trip stays under config.capture.intervalMs,
-    // captures land exactly on the server's authoritative schedule. If
-    // it exceeds the interval, delay clamps to 0 (one catch-up fire)
-    // and the next cycle is back on schedule.
-    const tick = async () => {
-      if (cancelled) return;
-      let nextExpectedAt: string | null = null;
-      try {
-        // cut() finalizes the last interval's clip and immediately starts
-        // recording the next one. A null cut (empty clip, encoder hiccup)
-        // falls back to a single JPEG so the tick — and the session's
-        // credit streak — never skips a beat.
-        let payload: UploadPayload | null =
-          (await clipRecorderRef.current?.cut()) ?? null;
-        if (!payload) {
-          payload = await takeScreenshotRef.current();
-        }
-        if (payload) {
-          callbacksRef.current.onCapture?.(payload);
-          const result = await captureUploadConfirmRef.current(payload);
-          nextExpectedAt = result.nextExpectedAt;
-        }
-      } catch (err) {
-        // Pipeline failure (network / server / 409). Schedule next tick
-        // on the local fallback so the chain stays alive.
-        console.warn("[lookout] capture cycle failed:", err);
-      }
-      if (cancelled) return;
+    // The upload runs CONCURRENTLY with recording rather than blocking it.
+    // The previous version awaited the full round trip before scheduling the
+    // next tick, which made every second of upload latency a second the
+    // recorder wasn't cutting on schedule. On a slow uplink that compounds:
+    // clips stretch to cover minutes each (a clip renders as ONE second of
+    // video however long it took to record, so that footage is genuinely
+    // lost), capturedAt drifts past the server's ±30s streak window so the
+    // minute credits nothing, and the oversized clip is refused on arrival.
+    // Uploading off the critical path keeps the cut cadence tied to the
+    // clock instead of to the network.
+    //
+    // Strictly ONE upload in flight, exactly as desktop does it: the next
+    // tick settles the previous upload before cutting. That preserves
+    // capturedAt monotonicity and the per-session rate-limit assumptions,
+    // and it is what stops a bad connection from fanning out into parallel
+    // uploads that make the congestion worse.
+    let inFlight: Promise<UploadConfirmResult> | null = null;
 
+    // Clip-failure accounting, mirroring the desktop loop's latch. Clips are
+    // an enhancement; a JPEG a minute is the contract. Anything that makes
+    // clips unworkable must degrade to that instead of costing the user
+    // minutes, however many devices and browsers this runs on.
+    let clipFailures = 0;
+    const disableClips = (why: string) => {
+      if (!clipRecorderRef.current) return;
+      console.warn(
+        `[lookout] ${why} — recording one JPEG per minute for the rest of ` +
+          `this session.`,
+      );
+      clipRecorderRef.current.stop();
+      clipRecorderRef.current = null;
+    };
+
+    /**
+     * Upload a capture, and if a CLIP upload fails, retry the same tick as a
+     * single JPEG.
+     *
+     * The retry reuses the clip's own cut-time JPEG snapshot and — critically
+     * — its `capturedAtMs`, so the capture still lands inside the server's
+     * ±30s streak window and the minute credits. Without this a failed clip
+     * upload cost the whole minute: the desktop client had the fallback, the
+     * web client didn't.
+     */
+    const uploadWithFallback = async (
+      payload: UploadPayload,
+    ): Promise<UploadConfirmResult> => {
+      const isClip = payload.format != null && payload.format !== "jpeg";
+      try {
+        const result = await captureUploadConfirmRef.current(payload);
+        if (isClip) clipFailures = 0; // a clip landed: earlier trouble was transient
+        return result;
+      } catch (err) {
+        if (!isClip) throw err;
+
+        // The session no longer accepts clips. Retrying is pointless.
+        if (err instanceof ClipFormatRejectedError) {
+          disableClips("the server no longer accepts clips for this session");
+        } else if (++clipFailures >= MAX_CLIP_UPLOAD_FAILURES) {
+          disableClips(
+            `${clipFailures} consecutive clip uploads failed`,
+          );
+        }
+
+        if (!payload.previewBlob) throw err;
+        console.warn("[lookout] clip upload failed — retrying as a JPEG:", err);
+        return await captureUploadConfirmRef.current({
+          blob: payload.previewBlob,
+          width: payload.width,
+          height: payload.height,
+          capturedAtMs: payload.capturedAtMs,
+        });
+      }
+    };
+
+    /** Await the in-flight upload, if any, and fold its result into the
+     *  schedule. Returns the server's fresh nextExpectedAt, or null. */
+    const settleInFlight = async (): Promise<string | null> => {
+      if (!inFlight) return null;
+      const pending = inFlight;
+      try {
+        return (await pending).nextExpectedAt;
+      } catch (err) {
+        // Pipeline failure (network / server / 409). The chain stays alive
+        // on the local fallback cadence; useUploader has already surfaced
+        // the error and any 409 conflict.
+        console.warn("[lookout] capture upload failed:", err);
+        return null;
+      } finally {
+        // Only clear if nothing newer replaced it.
+        if (inFlight === pending) inFlight = null;
+      }
+    };
+
+    const scheduleNext = (nextExpectedAt: string | null) => {
+      if (cancelled) return;
       const target = nextExpectedAt
         ? Date.parse(nextExpectedAt)
         : Date.now() + config.capture.intervalMs;
@@ -195,13 +270,72 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
         config.capture.intervalMs * 2,
         Math.max(0, target - Date.now()),
       );
+      if (intervalRef.current !== null) clearTimeout(intervalRef.current);
       intervalRef.current = setTimeout(tick, delay);
     };
 
+    const tick = async () => {
+      if (cancelled) return;
+
+      // Settle the previous upload BEFORE cutting, so uploads stay ordered.
+      // Every step of it is deadline-bounded (UPLOAD_STEP_TIMEOUT_MS), so a
+      // dead socket can't park the loop here indefinitely.
+      let nextExpectedAt = await settleInFlight();
+      if (cancelled) return;
+
+      try {
+        // cut() finalizes the last interval's clip and immediately starts
+        // recording the next one. A null cut (empty clip, encoder hiccup)
+        // falls back to a single JPEG so the tick — and the session's
+        // credit streak — never skips a beat.
+        let payload: UploadPayload | null =
+          (await clipRecorderRef.current?.cut()) ?? null;
+        if (payload?.truncated) {
+          console.warn(
+            "[lookout] clip hit its frame cap — uploads are running behind " +
+              "the capture cadence, so this clip covers a longer window.",
+          );
+        }
+        if (!payload) {
+          payload = await takeScreenshotRef.current();
+        }
+        if (payload) {
+          callbacksRef.current.onCapture?.(payload);
+          // Fire and hold, don't await: recording of the next clip is
+          // already underway and must not wait on this.
+          inFlight = uploadWithFallback(payload);
+          // Refine the schedule the moment the confirm lands, if that
+          // happens before the next tick — the same role desktop's third
+          // select arm plays. Rejections are handled by settleInFlight;
+          // swallow here so this never becomes an unhandled rejection.
+          const pending = inFlight;
+          pending
+            .then((result) => {
+              if (cancelled || inFlight !== pending) return;
+              inFlight = null;
+              scheduleNext(result.nextExpectedAt);
+            })
+            .catch(() => {});
+        }
+      } catch (err) {
+        // Capture-side failure (canvas, encoder, no video). The upload
+        // path has its own handling.
+        console.warn("[lookout] capture cycle failed:", err);
+      }
+      if (cancelled) return;
+
+      // Provisional: one interval out, refined above when the confirm
+      // lands. When the upload outlives the interval the next tick settles
+      // it first, which is what keeps uploads serialized.
+      scheduleNext(nextExpectedAt);
+    };
+
     if (clipRecorder) {
-      // Give the opening clip a couple of frames before the first cut so
-      // the timelapse's first second shows motion, not a single still.
-      intervalRef.current = setTimeout(tick, frameIntervalMs * 2);
+      // Give the opening clip a few frames before the first cut. Fixed, not
+      // a multiple of the frame interval: this delay is how long the user
+      // waits for the session to activate, and the seed clip is dropped
+      // from the compiled video regardless.
+      intervalRef.current = setTimeout(tick, CLIP_FIRST_CUT_DELAY_MS);
     } else {
       tick();
     }
