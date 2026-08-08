@@ -17,10 +17,23 @@ import { db, schema } from "../src/db/index.js";
 
 let app: FastifyInstance;
 
-const T0 = new Date("2026-07-01T10:00:00.000Z");
+const UNITS = 10;
+
+/**
+ * Fixture clock, anchored so the seeded session stopped one minute ago.
+ *
+ * Deliberately RELATIVE. The edit hold has an absolute ceiling measured from
+ * `stoppedAt` (EDIT_HOLD_MAX_MINUTES after the stop), so a session whose stop
+ * is further in the past than that can never renew its lease. This was pinned
+ * to a hardcoded "2026-07-01" — a future date when it was written, which
+ * passed CI happily until the calendar caught up and then failed every lease
+ * test with `held: false` for reasons that had nothing to do with leases.
+ * Anchoring to now keeps the fixture describing a just-stopped session, which
+ * is the state these tests are actually about.
+ */
+const T0 = new Date(Date.now() - (UNITS + 1) * 60_000);
 const minute = (i: number) => new Date(T0.getTime() + i * 60_000);
 const iso = (i: number) => minute(i).toISOString();
-const UNITS = 10;
 
 beforeEach(async () => {
   await db.execute(sql`TRUNCATE screenshots, sessions RESTART IDENTITY CASCADE`);
@@ -407,6 +420,42 @@ describe("POST /compile (publish)", () => {
     expect(row!.editHoldUntil).toBeNull();
     // No worker round-trip, so no recompile is consumed.
     expect(row!.recompileCount).toBe(0);
+  });
+
+  it("echoes the session's redirectUrl on both publish paths", async () => {
+    // The recording client fires the redirect hook straight off this
+    // response the instant publish lands, so it must carry the URL —
+    // whether the publish is instant (no cuts) or a worker hand-off.
+    const instant = await seedHeldSession({ redirectUrl: "https://example.com/done" });
+    const r1 = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${instant.token}/compile`,
+    });
+    expect(r1.json()).toMatchObject({
+      status: "complete",
+      instant: true,
+      redirectUrl: "https://example.com/done",
+    });
+
+    const withCuts = await seedHeldSession({ redirectUrl: "https://example.com/done" });
+    await putCuts(withCuts.token, [{ start: iso(3), end: iso(5) }]);
+    const r2 = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${withCuts.token}/compile`,
+    });
+    expect(r2.json()).toMatchObject({
+      status: "compiling",
+      instant: false,
+      redirectUrl: "https://example.com/done",
+    });
+
+    // No redirect configured → null, not undefined or omitted.
+    const none = await seedHeldSession();
+    const r3 = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${none.token}/compile`,
+    });
+    expect(r3.json().redirectUrl).toBeNull();
   });
 
   it("hands off to the worker when cuts must be baked in", async () => {
