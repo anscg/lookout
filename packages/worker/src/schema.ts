@@ -9,6 +9,7 @@ import {
   text,
   timestamp,
   integer,
+  real,
   boolean,
   jsonb,
   index,
@@ -47,6 +48,9 @@ export const sessions = pgTable(
     thumbnailUrl: text("thumbnail_url"),
     thumbnailR2Key: text("thumbnail_r2_key"),
     compileAttempts: integer("compile_attempts").notNull().default(0),
+    // Real per-unit compile progress (0..~0.95). See the server schema for
+    // full docs; the worker's compile loop writes it, /status reports it.
+    compileProgress: real("compile_progress"),
     // ── Edits (cuts) — see the server schema for full docs ──
     cuts: jsonb("cuts").$type<{ start: string; end: string }[]>(),
     cutSeconds: integer("cut_seconds"),
@@ -55,6 +59,11 @@ export const sessions = pgTable(
     >(),
     originalVideoR2Key: text("original_video_r2_key"),
     videoCopyAligned: boolean("video_copy_aligned"),
+    // True when original_video_r2_key is a throwaway PREVIEW build (reduced
+    // resolution, cheap encoder settings) made only so the editor opens
+    // promptly. Such a file must never be published — publishing re-encodes
+    // from the capture units instead. Mirrors the server schema.
+    originalIsPreview: boolean("original_is_preview").notNull().default(false),
     recompileCount: integer("recompile_count").notNull().default(0),
     lastEditCompileAt: timestamp("last_edit_compile_at", {
       withTimezone: true,
