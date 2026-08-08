@@ -5,6 +5,7 @@ import {
   text,
   timestamp,
   integer,
+  real,
   boolean,
   jsonb,
   index,
@@ -115,12 +116,18 @@ export const sessions = pgTable(
     trackingMode: text("tracking_mode").notNull().default("bucket"),
     streakAnchorAt: timestamp("streak_anchor_at", { withTimezone: true }),
     streakCreditedCount: integer("streak_credited_count").notNull().default(0),
-    // Whether this session accepts per-minute video clip uploads (~20
-    // frames/min) instead of single JPEGs. Set at creation by the program's
-    // backend (internal API `clips: true`), enforced on every upload-url
-    // (disallowed formats are downgraded to jpeg), and immutable thereafter —
+    // Whether this session accepts per-minute video clip uploads (~6
+    // frames/min) instead of single JPEGs. Enforced on every upload-url
+    // (disallowed formats are downgraded to jpeg) and immutable thereafter —
     // a session's capture character never changes mid-recording.
-    clipsEnabled: boolean("clips_enabled").notNull().default(false),
+    //
+    // Defaults TRUE: clips are the normal capture mode, and a program opts
+    // OUT with `clips: false` on the internal create endpoint. Existing rows
+    // were deliberately NOT backfilled when the default flipped — a session's
+    // mode is immutable, so in-flight sessions keep the mode they started
+    // with. Clients that can't record clips are unaffected either way: they
+    // keep uploading JPEGs to the same session, which stays fully valid.
+    clipsEnabled: boolean("clips_enabled").notNull().default(true),
     // Redirect hook: http(s) URL the recording client sends the user to once
     // the timelapse finishes compiling. Set at creation by the program's
     // backend (internal API `redirectUrl`), immutable thereafter. NULL = no
@@ -138,6 +145,14 @@ export const sessions = pgTable(
     thumbnailUrl: text("thumbnail_url"),
     thumbnailR2Key: text("thumbnail_r2_key"),
     compileAttempts: integer("compile_attempts").notNull().default(0),
+    // Real compile progress (0..~0.95), written by the worker's per-unit
+    // download+encode loop so /status can report ground truth instead of the
+    // client's time estimate. NULL when not compiling, when the worker
+    // predates this column, or for cut-apply compiles (no per-unit stage to
+    // meter) — the client falls back to the time estimate in every such case.
+    // Capped below 1: assembly/thumbnail/upload still run after the last
+    // unit, so the ring must never reach 100% while the user is still waiting.
+    compileProgress: real("compile_progress"),
     // ── Edits (cuts) ──
     // Normalized cut list: [{start, end}] ISO wall-clock intervals removed
     // from every output (video, /timings, trackedSeconds). NULL/[] = no
@@ -165,6 +180,17 @@ export const sessions = pgTable(
     // 1s closed-GOP grid that makes lossless second-boundary cutting
     // possible. False → the cut-compile re-encodes instead.
     videoCopyAligned: boolean("video_copy_aligned"),
+    // True when original_video_r2_key holds a PREVIEW-grade build: reduced
+    // resolution, cheap encoder settings, made only so the editor can open
+    // promptly on a long session. Such a file must never be published — the
+    // publish step re-encodes from the capture units at full quality instead
+    // of stream-copying it.
+    //
+    // NULL/false means the original is publish-grade, which is both the
+    // legacy shape (every session compiled before the two-tier split) and
+    // what a session that never entered the edit flow still builds. That
+    // makes the flag safe to read as "false unless proven otherwise".
+    originalIsPreview: boolean("original_is_preview").notNull().default(false),
     // User-initiated cut-compiles, capped at MAX_USER_RECOMPILES.
     recompileCount: integer("recompile_count").notNull().default(0),
     // When the last cut-compile finished; anchors the EDIT_WINDOW_DAYS
@@ -210,7 +236,7 @@ export const screenshots = pgTable(
     fileSizeBytes: integer("file_size_bytes"),
     sampled: boolean("sampled").notNull().default(false),
     // Payload format of this capture unit: 'jpeg' (legacy single frame) or
-    // 'webm'/'mp4' (per-minute clip of ~20 frames). Decided per upload by the
+    // 'webm'/'mp4' (per-minute clip of ~6 frames). Decided per upload by the
     // client's `format` query param, gated by sessions.clips_enabled —
     // sessions may mix formats (e.g. a clip client falling back to jpeg
     // mid-session); the compiler handles both per row.

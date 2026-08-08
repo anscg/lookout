@@ -34,9 +34,10 @@ export async function internalRoutes(app: FastifyInstance) {
           properties: {
             name: { type: "string" as const, minLength: 1, maxLength: 255 },
             metadata: { type: "object" as const, maxProperties: 50 },
-            // Opt this session into clip uploads (per-minute videos of ~20
-            // frames). Default false = legacy 1 JPEG/min. Immutable after
-            // creation — a session's capture character never changes.
+            // Opt OUT of clip uploads (per-minute videos of ~6 frames).
+            // Defaults TRUE; pass false to pin this session to the legacy
+            // 1 JPEG/min payload. Immutable after creation — a session's
+            // capture character never changes.
             clips: { type: "boolean" as const },
             // Redirect hook: once the timelapse finishes compiling, the
             // recording client sends the user here (desktop opens it in the
@@ -59,7 +60,9 @@ export async function internalRoutes(app: FastifyInstance) {
         .values({
           ...(name ? { name } : {}),
           metadata: metadata ?? {},
-          clipsEnabled: clips ?? false,
+          // Opt-OUT: clips are the default capture mode. `clips: false`
+          // pins a session to the legacy one-JPEG-per-minute payload.
+          clipsEnabled: clips ?? true,
           redirectUrl: redirectUrl ?? null,
           // Attribution: tag with the creating program (null for global key).
           // `program` (name) is dual-written for backward compatibility;

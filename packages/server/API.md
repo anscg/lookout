@@ -124,16 +124,16 @@ Pre-0.2.1 the bucket count caused timer jump-back when two captures arrived in t
 
 ## Clips
 
-By default, each capture unit is one JPEG per minute. Sessions created with `"clips": true` on the [internal create endpoint](#create-session) instead accept **clips**: per-minute video files (~15 frames captured 4s apart, WebM from Chromium/Firefox MediaRecorder, MP4 from Safari and desktop) that compile into a 15×-smoother timelapse.
+Each capture unit is a **clip** by default: a per-minute video file (~6 frames captured 10s apart, WebM from Chromium/Firefox MediaRecorder, MP4 from Safari and desktop) that compiles into a 6×-smoother timelapse. Pass `"clips": false` on the [internal create endpoint](#create-session) to opt a session out and pin it to the legacy one-JPEG-per-minute payload.
 
 A clip is still **one capture unit** — one `upload-url` request, one R2 PUT, one confirm per minute. Nothing about rate limits, session caps, credit/bucket tracking math, `trackedSeconds`, `screenshotCount`, or the `/timings` endpoint changes with clips: one confirmed unit per minute, one timestamp per minute.
 
 **Contract:**
 
-- **Session-level, immutable opt-in.** `clips_enabled` is set at creation and enforced server-side on every `upload-url`. It cannot be changed later — a session's capture character never changes mid-recording.
+- **Session-level, immutable opt-out.** `clips_enabled` defaults to true, is set at creation, and is enforced server-side on every `upload-url`. It cannot be changed later — a session's capture character never changes mid-recording.
 - **Capability discovery before the first upload.** `GET /api/sessions/:token` returns `clipsEnabled` and `frameIntervalMs`. A clip-capable client checks these on its session-recovery fetch and, when enabled, records clips from the very first upload — timelapses start with motion, not a still frame.
 - **Granted format is law.** The client requests a format with `?format=webm|mp4`; the response's `format` is what the server *granted* (clip requests on non-clips sessions silently downgrade to `jpeg`). The presigned URL is signed with the granted format's content type, so uploading anything else fails the signature. Confirm re-validates the stored object's content type against the granted format.
-- **Server-authoritative cadence.** `frameIntervalMs` (default 4000 = 15 frames/min) is dictated by the server; clients capture at exactly that rate and expose no override. Clips are VFR — a static screen legitimately produces fewer encoded frames, and the compiler derives real counts by demuxing (the confirm body's `frameCount` is telemetry only).
+- **Server-authoritative cadence.** `frameIntervalMs` (default 10000 = 6 frames/min) is dictated by the server; clients capture at exactly that rate and expose no override. Clips are VFR — a static screen legitimately produces fewer encoded frames, and the compiler derives real counts by demuxing (the confirm body's `frameCount` is telemetry only).
 - **Size cap:** clips are validated at ≤ 4 MB via HeadObject (clients cap their encoder at ~400 kbps ≈ 3 MB/min worst case; static screen content lands far below since VBR undershoots easy content).
 - **Mixed sessions are legal.** A clip client that hits an encoder hiccup falls back to a JPEG for that minute; the compiler handles formats per capture unit.
 
@@ -822,8 +822,7 @@ Creates a new session in `pending` state.
 **Request Body:**
 ```json
 {
-  "metadata": {},
-  "clips": false
+  "metadata": {}
 }
 ```
 
@@ -831,7 +830,7 @@ Creates a new session in `pending` state.
 |-------|------|----------|-------------|
 | `name` | string | no | Session name (1-255 chars) |
 | `metadata` | object | no | Arbitrary JSON metadata to attach to the session (max 50 properties) |
-| `clips` | boolean | no | Allow [clip uploads](#clips) (~15 frames/min video) for this session. Default `false` = legacy 1 JPEG/min. **Immutable after creation.** |
+| `clips` | boolean | no | Whether this session accepts [clip uploads](#clips) (~6 frames/min video). Default **`true`**; pass `false` to opt out and get the legacy 1 JPEG/min payload. **Immutable after creation.** |
 | `redirectUrl` | string | no | Redirect hook: http(s) URL (max 2048 chars) the recording client opens in the user's browser once the timelapse finishes compiling. Fires at most once, only for a live completion (not on re-opening a finished session). **Immutable after creation.** |
 
 **Response `201 Created`:**
