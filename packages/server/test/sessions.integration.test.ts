@@ -9,7 +9,7 @@
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { sql } from "drizzle-orm";
+import { sql, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { db, schema } from "../src/db/index.js";
 import { setClock, resetClock } from "../src/lib/clock.js";
@@ -227,22 +227,73 @@ describe("credit mode envelope", () => {
     return sess;
   }
 
-  it("rejects capturedAt > serverNow + 5min as captured_at_future", async () => {
+  // A skewed system clock is the user's misfortune, not their fault, and it
+  // must not cost them the recording. Rejecting here failed the upload-url
+  // request, so no presigned URL was issued and NOTHING uploaded for the whole
+  // session. The server adopts its own clock for these captures instead.
+  it("adopts server time for a clock skewed into the future", async () => {
     const { token } = await seedCreditSession();
     advanceVirtualMs(60_000);
     const cap = new Date(virtualNow + 6 * 60_000).toISOString();
     const up = await postUpload(token, cap);
-    expect(up.status).toBe(400);
-    expect(up.body.error).toBe("captured_at_future");
+    expect(up.status).toBe(200);
+    expect(up.body.capturedAtAdopted).toBe(true);
+
+    // Stamped with server time, not the client's claim.
+    const row = await db.query.screenshots.findFirst({
+      where: eq(schema.screenshots.id, up.body.screenshotId),
+    });
+    expect(row?.capturedAt?.getTime()).toBe(virtualNow);
+
+    // And the response still carries what the client needs to correct itself.
+    expect(Date.parse(up.body.serverTime)).toBe(virtualNow);
   });
 
-  it("rejects capturedAt < serverNow - 5min as captured_at_too_old", async () => {
+  it("adopts server time for a clock skewed into the past", async () => {
     const { token } = await seedCreditSession();
     advanceVirtualMs(60_000);
     const cap = new Date(virtualNow - 6 * 60_000).toISOString();
     const up = await postUpload(token, cap);
-    expect(up.status).toBe(400);
-    expect(up.body.error).toBe("captured_at_too_old");
+    expect(up.status).toBe(200);
+    expect(up.body.capturedAtAdopted).toBe(true);
+    const row = await db.query.screenshots.findFirst({
+      where: eq(schema.screenshots.id, up.body.screenshotId),
+    });
+    expect(row?.capturedAt?.getTime()).toBe(virtualNow);
+  });
+
+  it("keeps crediting a badly-skewed client minute after minute", async () => {
+    // The outcome that matters: a device an hour fast records normally.
+    const { token } = await seedCreditSession();
+    let credited = 0;
+    for (let i = 0; i < 3; i++) {
+      advanceVirtualMs(60_000);
+      const skewed = new Date(virtualNow + 60 * 60_000).toISOString();
+      const up = await postUpload(token, skewed);
+      expect(up.status).toBe(200);
+      const c = await confirmUpload(token, up.body.screenshotId);
+      credited = c.body.trackedSeconds;
+    }
+    // The seed capture credits 0 (it opens the streak); the three adopted
+    // captures each land on their expected mark and credit a full minute.
+    expect(credited).toBe(3 * 60);
+  });
+
+  it("does NOT let adoption bypass replay protection", async () => {
+    // Adoption is for clocks, not for requests. A duplicate/non-monotonic
+    // claim must still be refused — server time can't rescue it, so the
+    // envelope's anti-tamper role survives the change.
+    const { token } = await seedCreditSession();
+    advanceVirtualMs(60_000);
+    const ahead = await postUpload(token, new Date(virtualNow).toISOString());
+    expect(ahead.status).toBe(200);
+    await confirmUpload(token, ahead.body.screenshotId);
+
+    // Now claim a moment already used, well inside the envelope so adoption
+    // is not triggered.
+    const replay = await postUpload(token, new Date(virtualNow - 1_000).toISOString());
+    expect(replay.status).toBe(400);
+    expect(replay.body.error).toBe("captured_at_not_monotonic");
   });
 
   it("rejects non-monotonic capturedAt", async () => {

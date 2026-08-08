@@ -16,7 +16,7 @@ import {
   checkRateLimit,
   checkGenericRateLimit,
   creditCapture,
-  validateCapturedAt,
+  adoptedCapturedAt,
 } from "../lib/timing.js";
 import { now } from "../lib/clock.js";
 import { extractJa4 } from "../lib/ja4.js";
@@ -441,7 +441,9 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const serverNow = now();
       const clientCapturedAtRaw = request.query.capturedAt;
-      const clientCapturedAt = clientCapturedAtRaw
+      // `let`: an out-of-envelope value is replaced with server time below
+      // rather than rejected, so a wrong client clock can't cost a recording.
+      let clientCapturedAt = clientCapturedAtRaw
         ? new Date(clientCapturedAtRaw)
         : null;
       if (clientCapturedAt && Number.isNaN(clientCapturedAt.getTime())) {
@@ -544,11 +546,10 @@ export async function sessionRoutes(app: FastifyInstance) {
         startedAt = session.startedAt!;
       }
 
-      // Resolve the row's `captured_at` value — populated in both modes for
-      // debugging. In bucket mode it's never read for math.
-      const rowCapturedAt = clientCapturedAt ?? serverNow;
-
       // Credit-mode: capturedAt is required and must pass the envelope.
+      // Set when the client's clock was too far off to trust and server time
+      // was substituted — reported back so the client can correct itself.
+      let capturedAtAdopted = false;
       let nextExpectedAt: Date;
       if (trackingMode === "credit") {
         if (!clientCapturedAt) {
@@ -565,15 +566,31 @@ export async function sessionRoutes(app: FastifyInstance) {
           .orderBy(sql`${schema.screenshots.capturedAt} DESC NULLS LAST`)
           .limit(1);
 
-        const validation = validateCapturedAt(
+        // A wrong system clock must not cost the user their recording. An
+        // out-of-envelope timestamp is adopted as server time rather than
+        // 400'd; anything else (non-monotonic, pre-session) is still refused.
+        const resolved = adoptedCapturedAt(
           clientCapturedAt,
           serverNow,
           startedAt,
           latest?.capturedAt ?? null,
         );
-        if (!validation.ok) {
-          return reply.code(400).send({ error: validation.code });
+        if (!resolved.ok) {
+          return reply.code(400).send({ error: resolved.code });
         }
+        if (resolved.adopted) {
+          capturedAtAdopted = true;
+          request.log.warn(
+            {
+              sessionId: session.id,
+              clientCapturedAt: clientCapturedAt.toISOString(),
+              serverNow: serverNow.toISOString(),
+              skewMs: clientCapturedAt.getTime() - serverNow.getTime(),
+            },
+            "client clock outside the trust envelope — stamping capture with server time",
+          );
+        }
+        clientCapturedAt = resolved.capturedAt;
 
         // Predict nextExpectedAt assuming this capture will credit. The
         // confirm response returns the authoritative post-credit value.
@@ -625,6 +642,11 @@ export async function sessionRoutes(app: FastifyInstance) {
       // app layer. NULL when the edge didn't set it (local dev, etc).
       const ja4 = extractJa4(request);
 
+      // Resolve the row's `captured_at` value — populated in both modes for
+      // debugging. In bucket mode it's never read for math. Read AFTER the
+      // credit block so it picks up an adopted server timestamp.
+      const rowCapturedAt = clientCapturedAt ?? serverNow;
+
       // Create screenshot record (unconfirmed)
       await db.insert(schema.screenshots).values({
         id: screenshotId,
@@ -660,6 +682,11 @@ export async function sessionRoutes(app: FastifyInstance) {
         minuteBucket,
         nextExpectedAt: nextExpectedAt.toISOString(),
         serverTime: serverNow.toISOString(),
+        // True when this capture's timestamp was replaced with server time
+        // because the client's clock was outside the trust envelope. The
+        // upload still succeeded; a client seeing this should re-derive its
+        // offset from `serverTime` so later captures are stamped accurately.
+        ...(capturedAtAdopted ? { capturedAtAdopted: true } : {}),
         trackingMode,
         format,
         clipsEnabled: session.clipsEnabled,
@@ -1197,6 +1224,10 @@ export async function sessionRoutes(app: FastifyInstance) {
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
       return {
         status: session.status,
+        // Real compile progress (0..~0.95) when the worker is metering an
+        // original build; absent for cut-apply compiles and pre-column
+        // workers, where the client falls back to its time estimate.
+        progress: session.compileProgress ?? undefined,
         videoUrl: session.videoR2Key
           ? `${baseUrl}/api/media/${session.id}/video.mp4`
           : undefined,
@@ -1599,11 +1630,26 @@ export async function sessionRoutes(app: FastifyInstance) {
         MAX_USER_RECOMPILES - session.recompileCount,
       );
 
-      if (session.status === "compiling") {
-        // Already publishing — treat as success so client retries are safe.
+      // Already publishing — treat as success so client retries are safe.
+      //
+      // "compiling" covers two different runs, and only one of them is a
+      // publish. With an original already built, the in-flight job is the
+      // cut-compile that publishes, so a repeat request is a duplicate: 202.
+      // With no original yet, the in-flight job is the PREVIEW build, and
+      // this request means "don't bother, publish as recorded" — which the
+      // hold-drop branch below handles. Without the originalVideoR2Key
+      // guard this shadowed that branch, so a user who declined editing
+      // mid-preview got a cheerful 202 while their session stayed held, then
+      // waited for the very preview they had just declined.
+      if (session.status === "compiling" && session.originalVideoR2Key) {
         return reply
           .code(202)
-          .send({ status: "compiling" as const, instant: false, recompilesRemaining });
+          .send({
+            status: "compiling" as const,
+            instant: false,
+            recompilesRemaining,
+            redirectUrl: session.redirectUrl,
+          });
       }
       if (session.status === "complete") {
         // Someone (usually the hold-expiry job) published first. Idempotent
@@ -1612,6 +1658,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           status: "complete" as const,
           instant: true,
           recompilesRemaining,
+          redirectUrl: session.redirectUrl,
         };
       }
 
@@ -1630,6 +1677,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           status: session.status as "stopped" | "compiling",
           instant: false,
           recompilesRemaining,
+          redirectUrl: session.redirectUrl,
         };
       }
 
@@ -1654,6 +1702,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           status: "complete" as const,
           instant: true,
           recompilesRemaining,
+          redirectUrl: session.redirectUrl,
         };
       }
 
@@ -1691,6 +1740,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           0,
           MAX_USER_RECOMPILES - (session.recompileCount + 1),
         ),
+        redirectUrl: session.redirectUrl,
       };
     },
   );

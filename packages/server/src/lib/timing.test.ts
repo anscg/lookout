@@ -5,7 +5,12 @@ import {
   CAPTURED_AT_FUTURE_TOLERANCE_MS,
   SCREENSHOT_INTERVAL_MS,
 } from "@lookout/shared";
-import { creditCapture, validateCapturedAt } from "./timing.js";
+import {
+  creditCapture,
+  validateCapturedAt,
+  adoptedCapturedAt,
+  isClockSkewError,
+} from "./timing.js";
 
 const T0 = new Date("2025-01-01T00:00:00.000Z");
 const ms = (d: Date, deltaMs: number) => new Date(d.getTime() + deltaMs);
@@ -323,5 +328,88 @@ describe("browser-throttle simulation (validates ~50% halving report)", () => {
       nextExpected = d.nextExpectedAt;
     }
     expect(totalCredit).toBe(19 * 60);
+  });
+});
+
+/**
+ * A wrong system clock is common, invisible to the user, and none of their
+ * doing. It used to cost them the whole recording: every upload-url request
+ * 400'd on the envelope check, so no presigned URL was ever issued and
+ * nothing uploaded at all. These tests pin the "adopt, don't break" rule.
+ */
+describe("adoptedCapturedAt (client clock skew)", () => {
+  const serverNow = new Date("2025-01-01T12:00:00.000Z");
+  const startedAt = ms(serverNow, -120_000);
+
+  it("passes a healthy clock through untouched", () => {
+    const cap = ms(serverNow, -500);
+    const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
+    expect(r).toEqual({ ok: true, capturedAt: cap, adopted: false });
+  });
+
+  it("adopts server time for a clock hours FAST instead of rejecting", () => {
+    const cap = ms(serverNow, 3 * 60 * 60_000);
+    const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
+    expect(r).toEqual({ ok: true, capturedAt: serverNow, adopted: true });
+  });
+
+  it("adopts server time for a clock hours SLOW instead of rejecting", () => {
+    const cap = ms(serverNow, -3 * 60 * 60_000);
+    const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
+    expect(r).toEqual({ ok: true, capturedAt: serverNow, adopted: true });
+  });
+
+  it("adopts even for an absurd timestamp — nothing is gained by lying", () => {
+    // Server time is unforgeable, so substituting it removes the incentive to
+    // send a wild value rather than creating one. The capture is simply
+    // stamped when the server saw it.
+    for (const cap of [new Date(0), new Date("2099-01-01T00:00:00.000Z")]) {
+      const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
+      expect(r).toEqual({ ok: true, capturedAt: serverNow, adopted: true });
+    }
+  });
+
+  it("still refuses a non-monotonic timestamp — that is not a clock problem", () => {
+    // Adoption must not become a way to bypass replay protection: a later
+    // capture claiming an earlier moment is a request-level fault, and
+    // server time cannot rescue it either.
+    const latest = ms(serverNow, 30_000);
+    const r = adoptedCapturedAt(ms(serverNow, 10_000), serverNow, startedAt, latest);
+    expect(r).toEqual({ ok: false, code: "captured_at_not_monotonic" });
+  });
+
+  it("still refuses a pre-session timestamp", () => {
+    const later = ms(serverNow, 10 * 60_000);
+    const r = adoptedCapturedAt(ms(serverNow, -60_000), serverNow, later, null);
+    expect(r.ok).toBe(false);
+  });
+
+  it("classifies only envelope failures as clock skew", () => {
+    expect(isClockSkewError("captured_at_future")).toBe(true);
+    expect(isClockSkewError("captured_at_too_old")).toBe(true);
+    expect(isClockSkewError("captured_at_not_monotonic")).toBe(false);
+    expect(isClockSkewError("captured_at_before_session_start")).toBe(false);
+  });
+
+  it("keeps a skewed client crediting minute after minute", () => {
+    // The point of the whole exercise: a device an hour fast should still
+    // build a normal streak, because each adopted stamp is a real server
+    // instant one interval after the last.
+    let anchor: Date | null = null;
+    let count = 0;
+    let credited = 0;
+    for (let i = 0; i < 5; i++) {
+      const server = ms(serverNow, i * SCREENSHOT_INTERVAL_MS);
+      const skewed = ms(server, 60 * 60_000); // an hour fast
+      const r = adoptedCapturedAt(skewed, server, startedAt, null);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = creditCapture(r.capturedAt, anchor, count);
+      anchor = d.newAnchor;
+      count = d.newCount;
+      credited += d.credit;
+    }
+    // Seed credits 0, the next four credit 60 each.
+    expect(credited).toBe(4 * 60);
   });
 });
