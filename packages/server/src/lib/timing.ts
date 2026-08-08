@@ -44,6 +44,76 @@ export type CapturedAtValidation =
   | CapturedAtValidationFail;
 
 /**
+ * True for the two failures that mean "this client's clock is wrong" rather
+ * than "this client is misbehaving".
+ *
+ * The distinction matters because the two deserve opposite treatment. A
+ * non-monotonic or pre-session timestamp says something is wrong with the
+ * request; a timestamp five minutes off says nothing except that the user's
+ * system clock is off, which is common, invisible to them, and none of their
+ * doing. Rejecting the latter used to fail the upload-url request outright,
+ * so a skewed clock cost the user their entire recording — every upload 400'd
+ * before a presigned URL was ever issued. The caller substitutes server time
+ * for these instead. See adoptedCapturedAt.
+ */
+export function isClockSkewError(code: CapturedAtValidationError): boolean {
+  return code === "captured_at_future" || code === "captured_at_too_old";
+}
+
+/**
+ * Resolve the `captured_at` to actually use, adopting server time when the
+ * client's clock is too far off to trust.
+ *
+ * Server time is authoritative and unforgeable, so substituting it is
+ * strictly SAFER than accepting the client's claim — a hostile client gains
+ * nothing by sending a wild timestamp, it just gets its capture stamped with
+ * the moment the server saw it. What it costs is precision: a capture stamped
+ * on arrival includes upload latency, so a skewed client's credit is measured
+ * a little late rather than not at all. That is the right trade against
+ * losing the recording.
+ *
+ * Returns the timestamp to store plus whether a substitution happened, so the
+ * route can tell the client (which can then correct its own offset from the
+ * `serverTime` in the response) and operators can see it in telemetry.
+ */
+export function adoptedCapturedAt(
+  clientCapturedAt: Date,
+  serverNow: Date,
+  sessionStartedAt: Date,
+  latestCapturedAt: Date | null,
+):
+  | { ok: true; capturedAt: Date; adopted: boolean }
+  | { ok: false; code: CapturedAtValidationError } {
+  const first = validateCapturedAt(
+    clientCapturedAt,
+    serverNow,
+    sessionStartedAt,
+    latestCapturedAt,
+  );
+  if (first.ok) {
+    return { ok: true, capturedAt: clientCapturedAt, adopted: false };
+  }
+  if (!isClockSkewError(first.code)) {
+    return { ok: false, code: first.code };
+  }
+
+  // Clock skew: stamp with server time instead. Re-validate, because the
+  // substituted value still has to satisfy monotonicity and the session
+  // start — if it doesn't, something other than the clock is wrong and the
+  // caller should still refuse.
+  const second = validateCapturedAt(
+    serverNow,
+    serverNow,
+    sessionStartedAt,
+    latestCapturedAt,
+  );
+  if (!second.ok) {
+    return { ok: false, code: second.code };
+  }
+  return { ok: true, capturedAt: serverNow, adopted: true };
+}
+
+/**
  * Validate a client-attested `capturedAt` against the trust envelope and the
  * session's existing state. Returns a tagged result so the caller can map to
  * a specific 4xx error code.
@@ -54,6 +124,9 @@ export type CapturedAtValidation =
  *   is only allowed when the caller is in an idempotent retry path (same
  *   screenshotId); that check lives at the route handler since it requires
  *   the row lookup.
+ *
+ * Envelope failures are usually a wrong clock rather than a bad actor — use
+ * `adoptedCapturedAt` to absorb them rather than calling this directly.
  */
 export function validateCapturedAt(
   capturedAt: Date,
