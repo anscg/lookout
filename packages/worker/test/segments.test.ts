@@ -15,7 +15,13 @@ import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildSegment, probeFrameCount, SEGMENT_FPS } from "../src/segments.js";
+import {
+  buildSegment,
+  probeFrameCount,
+  SEGMENT_FPS,
+  PREVIEW_WIDTH,
+  PREVIEW_HEIGHT,
+} from "../src/segments.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +36,30 @@ async function hasFfmpeg(): Promise<boolean> {
 }
 
 const ffmpegAvailable = await hasFfmpeg();
+
+async function probeResolution(
+  filePath: string,
+): Promise<{ width: number; height: number }> {
+  const { stdout } = await execFileAsync(
+    "ffprobe",
+    [
+      "-v", "error",
+      "-select_streams", "v:0",
+      "-show_entries", "stream=width,height",
+      "-of", "csv=p=0",
+      filePath,
+    ],
+    { timeout: 30_000 },
+  );
+  // ffprobe lists the stream twice for MPEG-TS ("1280,720\n\n1280,720"), so
+  // take the first non-empty line rather than splitting the whole output.
+  const line = stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0)!;
+  const [width, height] = line.split(",").map(Number);
+  return { width, height };
+}
 
 async function probeDurationSeconds(filePath: string): Promise<number> {
   const { stdout } = await execFileAsync(
@@ -68,7 +98,9 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
       { timeout: 60_000 },
     );
 
-    // Clip unit: VP8/WebM, 20 frames over 60s (the Chromium/Firefox shape).
+    // Clip unit: VP8/WebM. A deliberately odd 20 frames — nothing in the
+    // pipeline may assume the nominal count, since clips are VFR and the
+    // real count comes from demuxing.
     webmPath = path.join(tmpDir, "unit_clip.webm");
     await execFileAsync(
       "ffmpeg",
@@ -159,6 +191,51 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
     await fs.writeFile(garbagePath, Buffer.from("not a webm file at all"));
     await expect(buildSegment(tmpDir, 99, garbagePath, "webm")).rejects.toThrow();
   }, 120_000);
+
+  /**
+   * The two-tier contract. The preview tier exists only to open the editor
+   * quickly and is deleted at publish, so it may be small and cheap — but it
+   * must still be one second on the same 30fps grid, because the editor maps
+   * video seconds to capture units.
+   */
+  describe("preview tier", () => {
+    it("keeps the 1-second grid while being smaller and cheaper", async () => {
+      const publishSeg = await buildSegment(tmpDir, 200, mp4Path, "mp4", "publish");
+      const previewSeg = await buildSegment(tmpDir, 201, mp4Path, "mp4", "preview");
+
+      // Same timeline shape — this is what the cut UI depends on.
+      expect(await probeFrameCount(previewSeg)).toBe(SEGMENT_FPS);
+      expect(await probeFrameCount(publishSeg)).toBe(SEGMENT_FPS);
+
+      // Reduced resolution is where the speed comes from.
+      expect(await probeResolution(previewSeg)).toEqual({
+        width: PREVIEW_WIDTH,
+        height: PREVIEW_HEIGHT,
+      });
+      expect(await probeResolution(publishSeg)).toEqual({
+        width: 1920,
+        height: 1080,
+      });
+
+      // The preview must also be cheaper to MOVE, not just to encode: the
+      // worker uploads it and the editor streams it back. This is what rules
+      // out the very fastest presets, whose output is bigger than the 1080p
+      // publish tier's — see segmentEncodeArgs.
+      const previewBytes = (await fs.stat(previewSeg)).size;
+      const publishBytes = (await fs.stat(publishSeg)).size;
+      expect(previewBytes).toBeLessThan(publishBytes);
+    }, 300_000);
+
+    it("still decodes cleanly, so the editor can scrub it", async () => {
+      const seg = await buildSegment(tmpDir, 202, mp4Path, "mp4", "preview");
+      const { stderr } = await execFileAsync(
+        "ffmpeg",
+        ["-v", "error", "-i", seg, "-f", "null", "-"],
+        { timeout: 120_000 },
+      );
+      expect(stderr.trim()).toBe("");
+    }, 120_000);
+  });
 });
 
 describe.skipIf(ffmpegAvailable)("segment pipeline (skipped)", () => {

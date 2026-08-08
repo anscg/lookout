@@ -25,13 +25,61 @@ import {
   buildSegment,
   cutVideoToKeptRanges,
   dropSeedUnit,
+  segmentEncodeArgs,
+  PREVIEW_WIDTH,
+  PREVIEW_HEIGHT,
   SEGMENT_CONCURRENCY,
   SEGMENT_FPS,
   SEGMENT_GOP_ARGS,
   ASSEMBLE_TIMEOUT_MS,
+  type SegmentQuality,
 } from "./segments.js";
 
 const execFileAsync = promisify(execFile);
+
+/** Whether a session is currently inside its edit hold. */
+function holdActiveOn(session: { editHoldUntil: Date | null }): boolean {
+  return (
+    session.editHoldUntil != null &&
+    session.editHoldUntil.getTime() > Date.now()
+  );
+}
+
+/**
+ * Post-build capture cleanup: drop the R2 objects for units that didn't make
+ * it into the video, and the rows for uploads that were never confirmed.
+ *
+ * SAMPLED units are deliberately kept. They were always kept (so /timings and
+ * the credit history stay queryable), and the two-tier split makes it load-
+ * bearing: a preview-grade original can't be published, so the publish step
+ * re-encodes from exactly these objects. Deleting them here would strand a
+ * held session with nothing to publish from.
+ */
+async function cleanUpCaptureLeftovers(sessionId: string): Promise<void> {
+  const unsampled = await db
+    .select({ r2Key: schema.screenshots.r2Key, id: schema.screenshots.id })
+    .from(schema.screenshots)
+    .where(
+      and(
+        eq(schema.screenshots.sessionId, sessionId),
+        eq(schema.screenshots.confirmed, true),
+        eq(schema.screenshots.sampled, false),
+      ),
+    );
+
+  for (const ss of unsampled) {
+    await deleteObjectQuiet(ss.r2Key);
+  }
+
+  await db
+    .delete(schema.screenshots)
+    .where(
+      and(
+        eq(schema.screenshots.sessionId, sessionId),
+        eq(schema.screenshots.confirmed, false),
+      ),
+    );
+}
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
@@ -43,7 +91,12 @@ const db = drizzle(pool, { schema });
 
 const r2Client = new S3Client({
   region: "auto",
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  // R2_ENDPOINT is the local-development escape hatch (an S3-compatible
+  // server instead of real R2); unset in production. Must stay in step with
+  // the server's config/r2.ts — the two read and write the same objects.
+  endpoint:
+    process.env.R2_ENDPOINT ||
+    `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID!,
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
@@ -58,6 +111,28 @@ const R2_PUBLIC_DOMAIN = process.env.R2_PUBLIC_DOMAIN || "";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Ceiling for reported per-unit progress. The unit loop is the only metered
+ *  stage; assembly, thumbnail and upload still run after the last unit lands,
+ *  so the ring must stop short of 100% — only the status flip to
+ *  complete/editable ends the wait. Mirrors the client's asymptotic estimate. */
+const PROGRESS_UNIT_CAP = 0.95;
+
+/** Write real compile progress for /status to report. `greatest(...)` keeps it
+ *  monotonic in the DB even if a pg-boss retry re-claims and re-counts from 0,
+ *  and never rewinds a value a prior attempt already reached. */
+async function writeCompileProgress(
+  sessionId: string,
+  fraction: number,
+): Promise<void> {
+  const clamped = Math.max(0, Math.min(PROGRESS_UNIT_CAP, fraction));
+  await db
+    .update(schema.sessions)
+    .set({
+      compileProgress: sql`greatest(coalesce(${schema.sessions.compileProgress}, 0), ${clamped})`,
+    })
+    .where(eq(schema.sessions.id, sessionId));
+}
 
 /** Verify a video file with ffprobe: check file size > 0 and frame count within tolerance. */
 async function verifyVideo(
@@ -222,7 +297,10 @@ export async function compileTimelapse(sessionId: string): Promise<{
   // Allow re-entry from 'compiling' so pg-boss retries can re-claim after a crash.
   const [claimed] = await db
     .update(schema.sessions)
-    .set({ status: "compiling", updatedAt: new Date() })
+    // Clear any progress a prior attempt left behind, so a cut-apply compile
+    // (which never meters) reports NULL → estimate, and a re-run of a
+    // half-built original starts the metered value fresh.
+    .set({ status: "compiling", compileProgress: null, updatedAt: new Date() })
     .where(
       and(
         eq(schema.sessions.id, sessionId),
@@ -255,6 +333,25 @@ export async function compileTimelapse(sessionId: string): Promise<{
 
     // ── Half A: original build (the pre-existing pipeline) ───────
 
+    // Two-tier decision, made BEFORE any encoding.
+    //
+    // A session stopped with `{edit: true}` carries an edit hold, which means
+    // the only consumer of this build is the editor: the published video is
+    // re-encoded from the capture units when the user publishes (see
+    // publishFromUnits). So build the cheap tier and skip the quality this
+    // file will never deliver. A session with no hold publishes THIS file
+    // directly, so it must be publish-grade — that path is unchanged.
+    const buildQuality: SegmentQuality = holdActiveOn(session)
+      ? "preview"
+      : "publish";
+    if (buildQuality === "preview") {
+      console.log(
+        `Session ${sessionId}: building PREVIEW-grade original ` +
+          `(${PREVIEW_WIDTH}x${PREVIEW_HEIGHT}) — the editor opens on this, ` +
+          `and publishing re-encodes from capture units at full quality.`,
+      );
+    }
+
     // Step 1: Sample selection — pick best screenshot per minute bucket
     // Using raw SQL for DISTINCT ON which Drizzle doesn't support directly
     const sampledScreenshots = await db.execute<{
@@ -280,7 +377,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
       // No screenshots — mark failed (no video possible)
       await db
         .update(schema.sessions)
-        .set({ status: "failed", updatedAt: new Date() })
+        .set({ status: "failed", compileProgress: null, updatedAt: new Date() })
         .where(eq(schema.sessions.id, sessionId));
       return {
         videoUrl: "",
@@ -325,6 +422,24 @@ export async function compileTimelapse(sessionId: string): Promise<{
     let buildFailures = 0;
     {
       let next = 0;
+      // Real progress: units finished (built OR skipped — a skip still
+      // advances the wait) over total, capped and written throttled. The
+      // event loop is single-threaded, so the shared counters need no lock.
+      let done = 0;
+      let lastWrittenFrac = 0;
+      const reportUnitDone = async () => {
+        done++;
+        const frac = PROGRESS_UNIT_CAP * (done / total);
+        // Write at most once per 1% of movement (≤ ~95 writes even for a
+        // 12-hour session), always flushing the final unit.
+        if (frac - lastWrittenFrac < 0.01 && done < total) return;
+        lastWrittenFrac = frac;
+        try {
+          await writeCompileProgress(sessionId, frac);
+        } catch {
+          // Progress is cosmetic; a failed write must never fail the compile.
+        }
+      };
       const worker = async () => {
         while (next < total) {
           const i = next++;
@@ -351,11 +466,18 @@ export async function compileTimelapse(sessionId: string): Promise<{
           }
           if (!downloadedUnit) {
             downloadFailures++;
+            await reportUnitDone();
             continue;
           }
 
           try {
-            segmentPaths[i] = await buildSegment(tmpDir, i, unitPath, ss.format);
+            segmentPaths[i] = await buildSegment(
+              tmpDir,
+              i,
+              unitPath,
+              ss.format,
+              buildQuality,
+            );
           } catch (err) {
             buildFailures++;
             console.warn(
@@ -363,6 +485,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
               err,
             );
           }
+          await reportUnitDone();
         }
       };
       await Promise.all(
@@ -452,14 +575,11 @@ export async function compileTimelapse(sessionId: string): Promise<{
           "-f", "concat",
           "-safe", "0",
           "-i", concatListPath,
-          "-c:v", "libx264",
-          "-preset", "fast",
-          // Match the segment encoder's visually-lossless setting — this
-          // fallback must not be a quality downgrade either.
-          "-crf", "18",
-          "-pix_fmt", "yuv420p",
+          // Match the segment encoder for this TIER — the fallback must not
+          // be a quality downgrade on the publish tier, and must not be an
+          // expensive upgrade on the throwaway preview tier.
+          ...segmentEncodeArgs(buildQuality, { singleThreaded: false }),
           "-r", String(SEGMENT_FPS),
-          ...SEGMENT_GOP_ARGS,
           "-movflags", "+faststart",
           "-y",
           originalPath,
@@ -572,10 +692,63 @@ export async function compileTimelapse(sessionId: string): Promise<{
       current?.editHoldUntil != null &&
       current.editHoldUntil.getTime() > Date.now();
 
+    // A PREVIEW-grade build may never publish, hold or no hold — the file is
+    // low-resolution and exists only for the editor. So it always records
+    // itself as the unpublished original, and if the hold lapsed while we
+    // were encoding (the one race the two-tier split introduces) it hands
+    // straight over to the publish path, which re-encodes from the capture
+    // units at full quality. That keeps exactly one implementation of
+    // "produce the published video" instead of a second copy here.
+    if (buildQuality === "preview") {
+      await db
+        .update(schema.sessions)
+        .set({
+          status: "stopped",
+          compileProgress: null,
+          videoUrl: null,
+          videoR2Key: null,
+          originalVideoR2Key: originalR2Key,
+          originalIsPreview: true,
+          videoUnits,
+          videoCopyAligned,
+          cutSeconds,
+          thumbnailUrl,
+          thumbnailR2Key,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.sessions.id, sessionId));
+
+      if (holdActive) {
+        console.log(
+          `Session ${sessionId} preview built, held for editing until ` +
+            `${current!.editHoldUntil!.toISOString()}`,
+        );
+        await cleanUpCaptureLeftovers(sessionId);
+        return {
+          videoUrl,
+          videoR2Key: publishR2Key,
+          thumbnailUrl,
+          thumbnailR2Key,
+        };
+      }
+
+      console.warn(
+        `Session ${sessionId}: edit hold lapsed during the preview build — ` +
+          `publishing at full quality from capture units instead.`,
+      );
+      const fresh = await db.query.sessions.findFirst({
+        where: eq(schema.sessions.id, sessionId),
+      });
+      return await applyCutCompile(fresh!, cuts, tmpDir);
+    }
+
     await db
       .update(schema.sessions)
       .set({
         status: holdActive ? "stopped" : "complete",
+        // The build is done — the wait now hinges on the status flip, not a
+        // fraction. Clear it so a later reopen doesn't show stale progress.
+        compileProgress: null,
         videoUrl: holdActive ? null : videoUrl,
         videoR2Key: holdActive ? null : publishR2Key,
         originalVideoR2Key: originalR2Key,
@@ -596,30 +769,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     }
 
     // Step 7: Cleanup unsampled screenshots from R2
-    const unsampled = await db
-      .select({ r2Key: schema.screenshots.r2Key, id: schema.screenshots.id })
-      .from(schema.screenshots)
-      .where(
-        and(
-          eq(schema.screenshots.sessionId, sessionId),
-          eq(schema.screenshots.confirmed, true),
-          eq(schema.screenshots.sampled, false),
-        ),
-      );
-
-    for (const ss of unsampled) {
-      await deleteObjectQuiet(ss.r2Key);
-    }
-
-    // Delete unconfirmed screenshot records
-    await db
-      .delete(schema.screenshots)
-      .where(
-        and(
-          eq(schema.screenshots.sessionId, sessionId),
-          eq(schema.screenshots.confirmed, false),
-        ),
-      );
+    await cleanUpCaptureLeftovers(sessionId);
 
     return {
       videoUrl,
@@ -645,6 +795,165 @@ export async function compileTimelapse(sessionId: string): Promise<{
  * recompile) falls back to Half A, which rebuilds from capture units and
  * applies the same cut list.
  */
+/**
+ * Build the PUBLISHED video from the session's capture units at full quality,
+ * including only the kept ranges.
+ *
+ * This is the second tier of the two-tier compile: the editor ran against a
+ * cheap preview, and this is where the timelapse that actually goes out is
+ * made. Cuts are applied by simply not encoding the removed units, so no
+ * separate cut step (and no generation of loss) is involved, and a session
+ * with half its minutes cut costs half as much to publish.
+ *
+ * Returns null when the units can no longer be read — the caller decides how
+ * to degrade rather than having a failure imposed on it.
+ */
+async function buildPublishFromUnits(
+  sessionId: string,
+  tmpDir: string,
+  keptRanges: KeptRange[],
+  totalUnits: number,
+): Promise<{ path: string; size: number } | null> {
+  // The unit map's index space is what keptRanges refer to: index i is the
+  // i-th unit in the compiled video, which is the i-th sampled screenshot in
+  // minute-bucket order (the same DISTINCT ON contract Half A uses, minus the
+  // dropped seed unit).
+  const sampled = await db.execute<{ r2_key: string; format: string }>(sql`
+    SELECT DISTINCT ON (minute_bucket) r2_key, format
+    FROM screenshots
+    WHERE session_id = ${sessionId} AND confirmed = true AND sampled = true
+    ORDER BY minute_bucket ASC, captured_at ASC NULLS LAST, requested_at ASC
+  `);
+  const rows = sampled.rows;
+  if (rows.length !== totalUnits) {
+    console.warn(
+      `Session ${sessionId}: expected ${totalUnits} sampled units for a ` +
+        `publish re-encode, found ${rows.length} — falling back.`,
+    );
+    return null;
+  }
+
+  const keptIndices: number[] = [];
+  for (const r of keptRanges) {
+    for (let i = r.start; i < r.end; i++) keptIndices.push(i);
+  }
+  if (keptIndices.length === 0) return null;
+
+  const segmentPaths: (string | null)[] = new Array(keptIndices.length).fill(null);
+  let failures = 0;
+  let next = 0;
+  const worker = async () => {
+    while (next < keptIndices.length) {
+      const slot = next++;
+      const unitIndex = keptIndices[slot];
+      const row = rows[unitIndex];
+      const ext = row.format === "jpeg" ? "jpg" : row.format;
+      const unitPath = path.join(tmpDir, `pub_${slot}.${ext}`);
+      try {
+        const response = await r2Client.send(
+          new GetObjectCommand({ Bucket: R2_BUCKET, Key: row.r2_key }),
+        );
+        await fs.writeFile(
+          unitPath,
+          await response.Body!.transformToByteArray(),
+        );
+      } catch {
+        failures++;
+        continue;
+      }
+      try {
+        // `pub_` index space, so these never collide with the preview run's
+        // segment files still sitting in tmpDir.
+        segmentPaths[slot] = await buildSegment(
+          tmpDir,
+          10_000 + slot,
+          unitPath,
+          row.format,
+          "publish",
+        );
+      } catch (err) {
+        failures++;
+        console.warn(`Session ${sessionId}: publish segment ${slot} failed`, err);
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(SEGMENT_CONCURRENCY, keptIndices.length) },
+      worker,
+    ),
+  );
+
+  const segments = segmentPaths.filter((p): p is string => p !== null);
+  // A gap would silently shorten the timelapse and desync the unit map the
+  // editor and /timings both read, so this is all-or-nothing.
+  if (failures > 0 || segments.length !== keptIndices.length) {
+    console.warn(
+      `Session ${sessionId}: ${failures} unit(s) unavailable for the publish ` +
+        `re-encode (${segments.length}/${keptIndices.length} built).`,
+    );
+    return null;
+  }
+
+  const concatListPath = path.join(tmpDir, "publish_concat.txt");
+  await fs.writeFile(
+    concatListPath,
+    segments.map((p) => `file '${p}'`).join("\n") + "\n",
+  );
+  const outPath = path.join(tmpDir, "publish.mp4");
+  try {
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concatListPath,
+        "-c", "copy",
+        "-movflags", "+faststart",
+        "-y",
+        outPath,
+      ],
+      { timeout: ASSEMBLE_TIMEOUT_MS },
+    );
+    const size = await verifyVideo(
+      outPath,
+      segments.length,
+      SEGMENT_FPS,
+      "Published MP4 (from units)",
+    );
+    return { path: outPath, size };
+  } catch (err) {
+    // Same safety net as Half A's assembly: re-encode the segments into one
+    // uniform stream, keeping the pinned grid so the result stays cuttable.
+    console.warn(
+      `Session ${sessionId}: stream-copy assembly of the published video ` +
+        `failed, re-encoding segments:`,
+      err,
+    );
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concatListPath,
+        ...segmentEncodeArgs("publish", { singleThreaded: false }),
+        "-r", String(SEGMENT_FPS),
+        "-movflags", "+faststart",
+        "-y",
+        outPath,
+      ],
+      { timeout: ASSEMBLE_TIMEOUT_MS },
+    );
+    const size = await verifyVideo(
+      outPath,
+      segments.length,
+      SEGMENT_FPS,
+      "Published MP4 (from units, re-encoded)",
+    );
+    return { path: outPath, size };
+  }
+}
+
 async function applyCutCompile(
   session: typeof schema.sessions.$inferSelect,
   cuts: CutInterval[],
@@ -660,9 +969,6 @@ async function applyCutCompile(
   const editedR2Key = `timelapses/${sessionId}/edited.mp4`;
   const videoUnits = session.videoUnits as VideoUnit[];
 
-  const originalPath = path.join(tmpDir, "original.mp4");
-  await downloadObject(originalR2Key, originalPath);
-
   const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
   const keptRanges = computeKeptRanges(unitTimesMs, cuts);
   const keptUnits = keptRanges.reduce((n, r) => n + (r.end - r.start), 0);
@@ -674,17 +980,64 @@ async function applyCutCompile(
     );
   }
 
-  let publishPath = originalPath;
-  let publishR2Key = originalR2Key;
+  let publishPath: string;
+  let publishR2Key: string;
 
-  if (hasEffectiveCuts) {
-    publishPath = await cutVideoToKeptRanges(
+  if (session.originalIsPreview) {
+    // The original is the throwaway preview: it is low-resolution, so it can
+    // neither be published nor cut-copied. Build the published video from the
+    // capture units at full quality, encoding ONLY the kept ones — which
+    // makes a heavily-cut session cheaper here than an uncut one, not dearer.
+    const built = await buildPublishFromUnits(
+      sessionId,
       tmpDir,
-      originalPath,
       keptRanges,
-      session.videoCopyAligned === true,
+      videoUnits.length,
     );
-    publishR2Key = editedR2Key;
+    if (built) {
+      publishPath = built.path;
+      publishR2Key = hasEffectiveCuts ? editedR2Key : originalR2Key;
+    } else {
+      // The units are gone (retention purge, or an R2 outage that outlasted
+      // the retries). Publishing the preview is a visible quality drop, but a
+      // held session that can never publish is worse — the user's recording
+      // would be lost. Take the copy path and say so loudly.
+      console.error(
+        `Session ${sessionId}: cannot re-encode from capture units — ` +
+          `publishing the PREVIEW-grade original instead. The timelapse will ` +
+          `be ${PREVIEW_WIDTH}x${PREVIEW_HEIGHT} rather than full resolution.`,
+      );
+      const originalPath = path.join(tmpDir, "original.mp4");
+      await downloadObject(originalR2Key, originalPath);
+      publishPath = originalPath;
+      publishR2Key = originalR2Key;
+      if (hasEffectiveCuts) {
+        publishPath = await cutVideoToKeptRanges(
+          tmpDir,
+          originalPath,
+          keptRanges,
+          session.videoCopyAligned === true,
+        );
+        publishR2Key = editedR2Key;
+      }
+    }
+  } else {
+    // Publish-grade original (a legacy session, or one that never entered the
+    // edit flow): cut it losslessly, exactly as before.
+    const originalPath = path.join(tmpDir, "original.mp4");
+    await downloadObject(originalR2Key, originalPath);
+    publishPath = originalPath;
+    publishR2Key = originalR2Key;
+
+    if (hasEffectiveCuts) {
+      publishPath = await cutVideoToKeptRanges(
+        tmpDir,
+        originalPath,
+        keptRanges,
+        session.videoCopyAligned === true,
+      );
+      publishR2Key = editedR2Key;
+    }
   }
 
   // Thumbnail follows the published video: a cut first minute must not leak
