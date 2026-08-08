@@ -11,7 +11,7 @@ interface SessionState {
   startedAt: string | null;
   createdAt: string | null;
   totalActiveSeconds: number;
-  /** Whether this session accepts clip uploads (~20 frames/min video).
+  /** Whether this session accepts clip uploads (~6 frames/min video).
    *  Known BEFORE the first capture — this fetch is the session-recovery
    *  load — so the very first upload can already be a clip. False when
    *  the server predates clips. */

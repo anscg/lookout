@@ -262,7 +262,7 @@ describe("capability discovery", () => {
   });
 });
 
-describe("internal API opt-in", () => {
+describe("internal API opt-out", () => {
   async function makeApiKey(): Promise<string> {
     const [row] = await db
       .insert(schema.apiKeys)
@@ -271,9 +271,11 @@ describe("internal API opt-in", () => {
     return row.key;
   }
 
-  it("creates clips-enabled sessions only when clips: true is passed", async () => {
+  it("enables clips by default, and only clips:false opts out", async () => {
     const key = await makeApiKey();
 
+    // Explicit true, omitted, and explicit false — the three ways a program
+    // can express intent. Only the last one turns clips off.
     const withClips = await app.inject({
       method: "POST",
       url: "/api/internal/sessions",
@@ -290,13 +292,26 @@ describe("internal API opt-in", () => {
     });
     expect(without.statusCode).toBe(201);
 
+    const optedOut = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: { name: "clips-off", clips: false },
+    });
+    expect(optedOut.statusCode).toBe(201);
+
     const onRow = await db.query.sessions.findFirst({
       where: eq(schema.sessions.id, withClips.json().sessionId),
     });
-    const offRow = await db.query.sessions.findFirst({
+    const defaultRow = await db.query.sessions.findFirst({
       where: eq(schema.sessions.id, without.json().sessionId),
     });
+    const offRow = await db.query.sessions.findFirst({
+      where: eq(schema.sessions.id, optedOut.json().sessionId),
+    });
     expect(onRow?.clipsEnabled).toBe(true);
+    // The whole point of the flip: saying nothing gets you clips.
+    expect(defaultRow?.clipsEnabled).toBe(true);
     expect(offRow?.clipsEnabled).toBe(false);
 
     // Internal GET surfaces the flag for program backends/ops.

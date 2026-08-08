@@ -46,7 +46,7 @@ API calls require the `X-API-Key` header.
 curl -X POST https://lookout.hackclub.com/api/internal/sessions \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
-  -d '{"metadata": {"userId": "user_123", "projectId": "proj_456"}, "clips": true}'
+  -d '{"metadata": {"userId": "user_123", "projectId": "proj_456"}}'
 ```
 
 Response:
@@ -62,7 +62,7 @@ Response:
 - `sessionId` — the server-side ID.
 - `sessionUrl` — a convenience URL you can redirect the user to.
 - `metadata` — any JSON you want to associate with the session (user info, project, etc.)
-- `clips` — opt this session into [clips](#clips-15-frames-per-minute) (~15 frames/min video capture instead of 1 JPEG/min → 15× smoother timelapses). Default `false`; immutable after creation.
+- `clips` — set `false` to opt this session OUT of [clips](#clips-6-frames-per-minute) and back to 1 JPEG/min. Default `true` (~6 frames/min video → 6× smoother timelapses); immutable after creation.
 - `redirectUrl` — optional [redirect hook](#redirect-hook): an http(s) URL the recording client sends the user to once their timelapse finishes compiling. Immutable after creation.
 
 ### Redirect hook
@@ -93,12 +93,13 @@ How it behaves:
   convenience, not a guaranteed callback. For server-side certainty, poll
   [session status](#get-session-info) instead.
 
-### Clips (15 frames per minute)
+### Clips (6 frames per minute)
 
-Sessions created with `"clips": true` record **clips**: instead of one JPEG per
-minute, the recording client uploads one ~60s video file per minute containing
-~15 frames captured 4s apart. The compiled timelapse has the same length but is
-15× smoother, with motion from the very first second.
+Sessions record **clips** by default: instead of one JPEG per minute, the
+recording client uploads one ~60s video file per minute containing ~6 frames
+captured 10s apart. The compiled timelapse has the same length but is 6×
+smoother, with motion from the very first second. Pass `"clips": false` at
+creation to opt out.
 
 What this means for your program:
 
@@ -110,15 +111,19 @@ What this means for your program:
   (≥0.4) detect the flag on the session and record clips; older clients and
   the desktop app keep uploading JPEGs to the same session, which stays fully
   valid (formats can even mix within one session).
-- **Network:** a clip is capped at 8 MB/min server-side; a typical screen
-  measures ~2.5 MB/min and even a deliberately incompressible one stays
-  around 3 MB/min, since the encoders undershoot easy content heavily.
+- **Network:** a clip is capped at 8 MB/min server-side. At 6 frames/min a
+  typical screen measures ~1.1 MB/min and a deliberately incompressible one
+  ~1.4 MB/min — under half of what the same content cost at 15 frames/min,
+  since bandwidth scales with the frame count and the per-frame quality
+  budget is held constant.
 - **Frame quality:** clip frames are bitrate-capped rather than encoded
-  independently, but the budget is sized to hold q0.85-JPEG-class detail at
-  1080p even on busy screens. For review purposes you get 15× more moments
-  per minute.
-- Roll it out gradually if you like — the flag is per session, so you can
-  enable it for a fraction of new sessions and compare.
+  independently, but the budget is sized per frame to hold q0.85-JPEG-class
+  detail at 1080p even on busy screens, and it is rescaled whenever the
+  cadence changes — so frames stay legible at any frame rate. For review
+  purposes you get 6× more moments per minute.
+- The flag is per session, so you can disable it for a fraction of new
+  sessions and compare, or turn it off entirely for a program that needs the
+  legacy payload.
 
 ### Get session info
 

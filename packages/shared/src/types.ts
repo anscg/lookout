@@ -61,9 +61,10 @@ export type ClientInfo = string;
 export interface CreateSessionRequest {
   name?: string;
   metadata?: Record<string, unknown>;
-  /** Allow this session to receive clip uploads (per-minute videos of
-   *  ~15 frames) instead of one JPEG per minute. Default false.
-   *  Immutable after creation. */
+  /** Whether this session receives clip uploads (per-minute videos of ~6
+   *  frames) instead of one JPEG per minute. Defaults to TRUE — pass false
+   *  to opt this session out and pin it to the legacy payload. Immutable
+   *  after creation. */
   clips?: boolean;
   /** Redirect hook: http(s) URL the recording client sends the user to once
    *  the timelapse finishes compiling (the desktop app opens it in the
@@ -202,6 +203,10 @@ export interface ApplyCutsResponse {
    *  (clearing all cuts just repoints the published video at the original). */
   instant: boolean;
   recompilesRemaining: number;
+  /** The session's redirect hook URL (immutable, set at creation). Echoed
+   *  here so the recording client can fire the redirect the instant publish
+   *  completes — no second request, no race. Null when none was configured. */
+  redirectUrl: string | null;
 }
 
 export interface UploadUrlResponse {
@@ -211,9 +216,19 @@ export interface UploadUrlResponse {
   minuteBucket: number;
   nextExpectedAt: string;
   /** Server wall-clock time at the moment this response was generated.
-   *  Optional — not present on responses from pre-0.3 servers. Clients
-   *  may use it for diagnostics; scheduling needs only `nextExpectedAt`. */
+   *  Optional — not present on responses from pre-0.3 servers. Clients use
+   *  it to learn their own clock offset (see `capturedAtAdopted`);
+   *  scheduling needs only `nextExpectedAt`. */
   serverTime?: string;
+  /** Set when the server replaced this capture's `capturedAt` with its own
+   *  clock because the client's was outside the trust envelope.
+   *
+   *  The upload still succeeded — a wrong system clock never costs a
+   *  recording. But the capture was stamped on ARRIVAL, so it carries upload
+   *  latency and its credit is measured slightly late. A client seeing this
+   *  should re-derive its offset from `serverTime` and apply it to later
+   *  timestamps. Absent on servers that predate skew adoption. */
+  capturedAtAdopted?: boolean;
   /** Sticky tracking mode for the session. Optional for backwards compat. */
   trackingMode?: TrackingMode;
   /** Echo of the GRANTED capture format — may differ from the requested
@@ -290,6 +305,12 @@ export interface StopResponse {
 
 export interface StatusResponse {
   status: SessionStatus;
+  /** Real compile progress as a fraction in [0, ~0.95], reported by the
+   *  worker while it builds an original timelapse (the per-unit
+   *  download+encode stage — the part whose cost scales with session
+   *  length). Capped below 1: assembly/upload still run after the last unit,
+   *  and only the status flip ends the wait. Absent for cut-apply compiles
+   *  and workers predating the column — fall back to the time estimate. */
   progress?: number;
   videoUrl?: string;
   /** @deprecated WebM is no longer produced. Populated only for legacy clients —

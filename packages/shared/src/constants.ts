@@ -58,18 +58,19 @@ export const STREAK_WINDOW_MS = 30_000;
 export const CREDIT_PER_CAPTURE_S = 60;
 
 // ──────────────────────────────────────────────────────────
-// Clips (20 frames/minute via per-minute video uploads)
+// Clips (6 frames/minute via per-minute video uploads)
 // ──────────────────────────────────────────────────────────
 
 /** Upload payload formats the server accepts on upload-url.
  *  "jpeg" is the legacy single-screenshot-per-minute payload.
- *  "webm"/"mp4" are per-minute video clips holding ~15 frames captured
+ *  "webm"/"mp4" are per-minute video clips holding ~6 frames captured
  *  seconds apart (webm from Chromium/Firefox MediaRecorder; mp4 from
  *  Safari MediaRecorder and the desktop hardware encoder). The
  *  per-minute request cadence, credit math, and rate limits are
  *  identical in all formats — a clip is still ONE capture unit.
- *  Clips are gated per session by `sessions.clips_enabled`, set at
- *  creation via the internal API and immutable thereafter. */
+ *  Clips are gated per session by `sessions.clips_enabled`, which defaults
+ *  to TRUE — a program opts OUT with `clips: false` at creation. Immutable
+ *  thereafter. */
 export const CAPTURE_FORMATS = ["jpeg", "webm", "mp4"] as const;
 export type CaptureFormat = (typeof CAPTURE_FORMATS)[number];
 
@@ -83,36 +84,111 @@ export const CAPTURE_FORMAT_CONTENT_TYPES: Record<CaptureFormat, string> = {
 };
 
 /** How often a clip-recording client grabs a frame into the current
- *  clip. 4000ms = 15 frames per SCREENSHOT_INTERVAL_MS. The cadence is
+ *  clip. 10000ms = 6 frames per SCREENSHOT_INTERVAL_MS. The cadence is
  *  server-authoritative: it's sent to clients as `frameIntervalMs` on
  *  the session GET and upload-url responses, clients capture at exactly
- *  that rate, and no client exposes an override. 15/min trades a hair
- *  of smoothness for ~33% more bitrate budget per frame — text
- *  legibility wins.
- *  Default: 4000 (4 seconds) */
-export const CLIP_FRAME_INTERVAL_MS = 4_000;
+ *  that rate, and no client exposes an override.
+ *
+ *  Every knob that used to be denominated in "frames" is now derived from
+ *  this value (per-frame byte budget, native encoder bitrate, the stall
+ *  cap, container size), so changing the cadence is a one-line change and
+ *  per-frame QUALITY is held constant — see CLIP_FRAME_BYTE_BUDGET.
+ *  Timelapse smoothness scales directly with it: each capture unit becomes
+ *  one second of output video, so 6/min renders 6 distinct images per
+ *  output second.
+ *  Default: 10000 (10 seconds) */
+export const CLIP_FRAME_INTERVAL_MS = 10_000;
 
 /** Nominal frames per clip (SCREENSHOT_INTERVAL_MS / CLIP_FRAME_INTERVAL_MS).
  *  Informational — clips are VFR and static screens legitimately emit
  *  fewer encoded frames. The worker derives real counts by demuxing.
- *  Default: 15 */
-export const FRAMES_PER_CLIP = 15;
+ *  Default: 6 */
+export const FRAMES_PER_CLIP = Math.round(
+  SCREENSHOT_INTERVAL_MS / CLIP_FRAME_INTERVAL_MS,
+);
 
-/** Encoder bitrate cap for clips recorded by a NATIVE encoder (the desktop
- *  app's VideoToolbox / Media Foundation / GStreamer paths).
+/** Hard cap on frames the client records into a SINGLE clip, as a multiple
+ *  of the nominal count.
  *
- *  Sized for TEXT LEGIBILITY: at 15 frames/min, 800 kbps allows ~400 KB
- *  per 4s frame — JPEG-q85-class keyframes at 1080p, the bar the legacy
- *  single-screenshot pipeline set. This is a VBR ceiling, not a floor:
- *  static screen content undershoots it heavily (measured 133 kbps-era
- *  clips landed at ~400 KB/min total). 133k and 400k were tried first
- *  and produced visibly soft H.264.
+ *  A clip is cut when its upload tick fires, so a slow uplink stretches the
+ *  clip: the recorder keeps grabbing frames at the cadence while the
+ *  previous upload drains. Uncapped, a 5-minute network stall produced a
+ *  30-frame clip that (a) blew MAX_CLIP_BYTES and was refused server-side,
+ *  costing the whole window, and (b) still rendered as ONE second of
+ *  output. Capping frames bounds the container instead: the tail of a
+ *  stalled window is dropped, the clip still uploads, and the minute still
+ *  credits.
+ *  Default: 3 */
+export const MAX_CLIP_FRAME_OVERRUN = 3;
+
+/** Absolute frame cap for one clip. See MAX_CLIP_FRAME_OVERRUN. */
+export const MAX_FRAMES_PER_CLIP = FRAMES_PER_CLIP * MAX_CLIP_FRAME_OVERRUN;
+
+/** Consecutive clip-upload failures a client tolerates before giving up on
+ *  clips and recording plain JPEGs for the rest of the session.
  *
- *  This "budget spread over the clip's 60s" reading only holds for
- *  encoders we hand real presentation timestamps to. Browsers do NOT
- *  work that way — see CLIP_WEB_VIDEO_BITS_PER_SECOND.
+ *  Every individual failure is already survivable — the tick retries as a
+ *  single JPEG, so the minute still credits. This bound is about not
+ *  re-attempting something structurally broken once a minute for hours:
+ *  a browser whose encoder emits containers the server rejects, or a session
+ *  whose clip support went away underneath the client. Any successful clip
+ *  upload resets the count, so a patch of bad network never disables clips.
+ *  Matches the desktop client's MAX_CLIP_ENCODER_FAILURES.
+ *  Default: 3 */
+export const MAX_CLIP_UPLOAD_FAILURES = 3;
+
+/** Wall-clock delay from capture start to the FIRST upload tick.
+ *
+ *  Deliberately NOT a multiple of CLIP_FRAME_INTERVAL_MS. The opening clip
+ *  is the session's seed capture: it credits 0 seconds and the compiler
+ *  drops it from the video entirely (see the worker's dropSeedUnit), so its
+ *  frame density is irrelevant. What this delay actually controls is how
+ *  long the user waits for the session to activate — tying it to the
+ *  cadence turned every slower cadence into a 20-second-plus wait on a
+ *  blank recorder.
+ *  Default: 8000 (8 seconds) */
+export const CLIP_FIRST_CUT_DELAY_MS = 8_000;
+
+/** Per-frame byte budget for a natively-encoded clip frame — the ACTUAL
+ *  quality dial, and the reason the native bitrate is derived rather than
+ *  hardcoded.
+ *
+ *  Sized for TEXT LEGIBILITY: ~400 KB buys a JPEG-q85-class keyframe at
+ *  1080p, the bar the legacy single-screenshot pipeline set. Native
+ *  encoders receive each frame's real presentation timestamp, so their
+ *  bitrate is denominated in bits per second of MEDIA time — meaning the
+ *  same bitrate buys 2.5x the bytes per frame when frames sit 10s apart
+ *  instead of 4s. Expressing the tuned number per-frame keeps quality
+ *  invariant when the cadence changes, in both directions.
+ *  Default: 400000 (400 KB) */
+export const CLIP_FRAME_BYTE_BUDGET = 400_000;
+
+/** Bitrate (bits/second of media time) a native encoder should be given to
+ *  land CLIP_FRAME_BYTE_BUDGET per frame at the supplied cadence.
+ *
+ *  At the historical 4s cadence this returns exactly 800 kbps — the value
+ *  that was measured and tuned by hand (133k and 400k were tried first and
+ *  produced visibly soft H.264). A VBR ceiling, not a floor: static screen
+ *  content undershoots it heavily. The desktop encoders mirror this
+ *  formula in Rust; keep the two in step. */
+export function nativeClipBitsPerSecond(frameIntervalMs: number): number {
+  const intervalS = Math.max(frameIntervalMs, 1) / 1000;
+  return Math.round((CLIP_FRAME_BYTE_BUDGET * 8) / intervalS);
+}
+
+/** Native encoder bitrate at the default cadence. Prefer
+ *  `nativeClipBitsPerSecond(frameIntervalMs)` wherever the real
+ *  server-supplied cadence is in hand. */
+export const CLIP_VIDEO_BITS_PER_SECOND = nativeClipBitsPerSecond(
+  CLIP_FRAME_INTERVAL_MS,
+);
+
+/** Floor for the browser recorder's adaptive bitrate backoff. NOT derived
+ *  from the native figure: the two are denominated in different things (see
+ *  CLIP_WEB_VIDEO_BITS_PER_SECOND), this is just the coarsest setting worth
+ *  uploading at all.
  *  Default: 800000 */
-export const CLIP_VIDEO_BITS_PER_SECOND = 800_000;
+export const CLIP_WEB_MIN_BITS_PER_SECOND = 800_000;
 
 /** Encoder bitrate cap for clips recorded by a BROWSER (MediaRecorder's
  *  `videoBitsPerSecond`). Deliberately ~50x the native constant, because
@@ -141,17 +217,21 @@ export const CLIP_VIDEO_BITS_PER_SECOND = 800_000;
  *         40M      335.4    38.6 dB   <- knee; ~parity with native
  *         80M      582.3    43.7 dB   worst case exceeds MAX_CLIP_BYTES
  *
- *  40 Mbps lands at ~335 KB/frame — the same order as the native
- *  encoder's ~400 KB budget. Measured over a full 15-frame clip, against
- *  the 8 MB MAX_CLIP_BYTES cap:
+ *  40 Mbps lands at ~335 KB/frame — the same order as the native encoder's
+ *  CLIP_FRAME_BYTE_BUDGET. Because the allocation is per-frame and NOT
+ *  per-second, this constant is cadence-independent: it needs no change
+ *  when CLIP_FRAME_INTERVAL_MS moves, and the clip simply carries fewer
+ *  frames. Measured over a full 15-frame clip (the 4s-cadence shape),
+ *  against the 8 MB MAX_CLIP_BYTES cap:
  *
  *                      before (vp9 @ 800k)   after (h264 @ 40M)
  *      busy screen        0.89 MB  23.8 dB     3.24 MB  43.3 dB
  *      typical screen     0.37 MB  23.8 dB     2.46 MB  43.3 dB
  *
- *  so even incompressible content sits at 40% of the cap. (0.37 MB
- *  matches the ~400 KB/min these clips were measured at in the field,
- *  which is what makes the rest of the table trustworthy.)
+ *  so even incompressible content sat at 40% of the cap; at 6 frames/min
+ *  the same content is under half of that. (0.37 MB matches the ~400 KB/min
+ *  these clips were measured at in the field, which is what makes the rest
+ *  of the table trustworthy.)
  *  ClipRecorder additionally backs the rate off if a clip ever does
  *  exceed the cap, so a browser with different rate-control semantics
  *  self-corrects instead of failing every upload.
@@ -281,6 +361,18 @@ export const MAX_HEIGHT = 1080;
  *  (presigned URL request, R2 PUT, confirmation POST).
  *  Default: 3 */
 export const MAX_UPLOAD_RETRIES = 3;
+
+/** Per-step deadline for one upload attempt: the presigned-URL request, the
+ *  R2 PUT, or the confirm POST. Matches the desktop client's STEP_TIMEOUT.
+ *
+ *  `fetch` has no default timeout, so without this a half-open socket or a
+ *  trickling uplink parks an upload attempt indefinitely, and everything
+ *  downstream of it stalls with no error to retry on. A bounded step turns
+ *  a dead connection into a normal retryable failure. Generous enough for a
+ *  multi-megabyte clip on a weak link — this is a stall detector, not a
+ *  bandwidth requirement.
+ *  Default: 30000 (30 seconds) */
+export const UPLOAD_STEP_TIMEOUT_MS = 30_000;
 
 /** Retry delays in ms (exponential backoff).
  *  Default: [2000, 4000, 8000] */

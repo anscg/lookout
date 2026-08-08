@@ -141,6 +141,27 @@
       "when": 1785080224937,
       "tag": "0019_edit_hold",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1785090000000,
+      "tag": "0020_compile_progress",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785100000000,
+      "tag": "0021_original_is_preview",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1785110000000,
+      "tag": "0022_clips_default_on",
+      "breakpoints": true
     }
   ]
 }
