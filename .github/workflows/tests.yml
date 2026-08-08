@@ -119,6 +119,10 @@ jobs:
       - name: Vitest (segment pipeline)
         run: npm test -w packages/worker
 
+      # Shared package: pure units — cut math, clock-offset estimation.
+      - name: Vitest (shared)
+        run: npm test -w packages/shared
+
   # ──────────────────────────────────────────────────────────────────
   # Desktop client: Rust unit + serde compat tests.
   # The 4-way matrix (legacy/new struct × legacy/new JSON) here is the
@@ -163,9 +167,15 @@ jobs:
           workspaces: "./clients/desktop/src-tauri -> target"
           shared-key: rust-ubuntu-24.04-native
 
-      - name: cargo test --lib
+      # Release, not debug. The clip encoders are unsafe FFI against
+      # VideoToolbox / Media Foundation / GStreamer, and that is exactly the
+      # code whose behaviour differs under optimisation — the kind of bug this
+      # project has already been bitten by once (a datatype-misalignment crash
+      # that only showed up in a release build). Testing debug binaries proves
+      # the wrong artifact.
+      - name: cargo test --lib --release
         working-directory: clients/desktop/src-tauri
-        run: cargo test --lib
+        run: cargo test --lib --release
 
   # ──────────────────────────────────────────────────────────────────
   # Windows type-check: the Media Foundation clip encoder is Windows-only
@@ -187,9 +197,12 @@ jobs:
           workspaces: "./clients/desktop/src-tauri -> target"
           shared-key: rust-windows-check
 
-      - name: cargo check
+      # Release profile, matching what actually ships (see the Linux job).
+      # This is the only job that compiles the Windows-only Media Foundation
+      # encoder at all, so it should compile it the way users get it.
+      - name: cargo check --release
         working-directory: clients/desktop/src-tauri
-        run: cargo check
+        run: cargo check --release
 
   # ──────────────────────────────────────────────────────────────────
   # Type-check the rest of the workspace (React/web clients). Catches
