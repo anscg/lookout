@@ -6,7 +6,12 @@ import {
   useState,
 } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { countCutUnits, type CutInterval, type UnitsResponse } from "@lookout/shared";
+import {
+  countCutUnits,
+  type ApplyCutsResponse,
+  type CutInterval,
+  type UnitsResponse,
+} from "@lookout/shared";
 import { createLookoutClient, type LookoutClient } from "../api/client.js";
 import {
   cutsToRegions,
@@ -35,8 +40,10 @@ export interface TimelapseEditorProps {
   token: string;
   apiBaseUrl: string;
   /** The timelapse was published — with cuts baked in, or without them.
-   *  The caller should return to its detail view and poll status. */
-  onApplied?: () => void;
+   *  The caller should return to its detail view and poll status. The
+   *  publish response is passed through: `instant`/`complete` means it's
+   *  already done (fire any redirect now), otherwise a compile is running. */
+  onApplied?: (result: ApplyCutsResponse) => void;
   /** Dismiss the editor. Only offered when it can't load — there is no
    *  "leave without deciding" exit, because closing the editor is itself
    *  the decision: the session publishes. */
@@ -123,6 +130,11 @@ export function TimelapseEditor({
    *  poll, re-running the progress effect and restarting the ring at 0. */
   const [preparingUnits, setPreparingUnits] = useState<number | null>(null);
   const [buildProgress, setBuildProgress] = useState(0);
+  /** Real compile progress from /status, when the worker reports it; null
+   *  until the first metered poll (or forever, for cut-apply/old workers). */
+  const [realProgress, setRealProgress] = useState<number | null>(null);
+  /** Once true, real progress owns the ring and the time estimate stands down. */
+  const sawRealRef = useRef(false);
   /** Anchored once per preparing spell, so even a genuine change in the
    *  unit count can't restart the estimate. */
   const prepareStartRef = useRef<number | null>(null);
@@ -194,6 +206,7 @@ export function TimelapseEditor({
       try {
         const status = await client.getStatus();
         if (cancelled) return;
+        if (typeof status.progress === "number") setRealProgress(status.progress);
         if (status.editable) {
           await loadUnits();
           return;
@@ -229,10 +242,17 @@ export function TimelapseEditor({
   }, [client]);
 
   // ── Build progress ──────────────────────────────────────────
-  // The worker doesn't report progress, so this is a time estimate scaled
-  // by how much footage there is to compile. It eases toward — and stops
-  // short of — 100%, and only completes when the real thing does; a ring
-  // that sat at 100% while the user waited would be worse than none.
+  // Real worker progress wins when the /status poll reports it. Until then
+  // (and for cut-apply/old-worker compiles that never report it) this is a
+  // time estimate scaled by how much footage there is to compile. Either
+  // source eases toward — and stops short of — 100%, and only the real
+  // thing completing ends the wait; a ring that sat at 100% while the user
+  // waited would be worse than none.
+  useEffect(() => {
+    if (realProgress === null) return;
+    sawRealRef.current = true;
+    setBuildProgress((prev) => Math.max(prev, realProgress));
+  }, [realProgress]);
   useEffect(() => {
     if (preparingUnits === null) {
       prepareStartRef.current = null;
@@ -242,6 +262,8 @@ export function TimelapseEditor({
     const startedAt = prepareStartRef.current;
     const estimateMs = compileEstimateMs(preparingUnits);
     const tick = () => {
+      // Ground truth, once it arrives, owns the ring.
+      if (sawRealRef.current) return;
       const next = estimateBuildProgress(Date.now() - startedAt, estimateMs);
       setBuildProgress((prev) => Math.max(prev, next));
     };
@@ -683,8 +705,8 @@ export function TimelapseEditor({
     try {
       const cuts = regionsToCuts(normalizeRegions(regionsRef.current), data.units);
       await client.setCuts(cuts);
-      await client.applyCuts();
-      onApplied?.();
+      const result = await client.applyCuts();
+      onApplied?.(result);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
       setSaving(false);

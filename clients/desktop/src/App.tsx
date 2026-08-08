@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { invoke } from "./logger.js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Gallery,
@@ -43,6 +44,12 @@ import { getApiBase } from "./serverConfig.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
+
+// How long to keep watching a post-edit cut-compile for `complete` before
+// giving up on firing the redirect hook. The worker's assemble step alone
+// can run up to 30 min (ASSEMBLE_TIMEOUT_MS); add slack for queue wait and
+// the final upload so a legitimately slow compile is never abandoned.
+const REDIRECT_POLL_MAX_MS = 35 * 60_000;
 
 interface Program {
   name: string;
@@ -156,39 +163,57 @@ function MainWindowApp() {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
-    listen<{ token: string }>(EDITED_EVENT, (event) => {
-      console.log("[app] editor window published — refreshing");
-      setEditNonce((n) => n + 1);
-      galleryRefreshRef.current();
+    listen<{ token: string; status?: string | null; redirectUrl?: string | null }>(
+      EDITED_EVENT,
+      (event) => {
+        console.log("[app] editor window published — refreshing");
+        setEditNonce((n) => n + 1);
+        galleryRefreshRef.current();
 
-      // Publishing from the editor can land instantly (no cuts) or after a
-      // short cut-compile. Either way SessionDetail may mount on an
-      // already-complete session, and its onComplete deliberately doesn't
-      // fire for that — so the redirect hook would be silently skipped in
-      // the whole edit flow. Watch it to completion here instead.
-      const token = event.payload?.token;
-      if (!token) return;
-      const deadline = Date.now() + 3 * 60_000;
-      const poll = async () => {
-        if (cancelled || Date.now() > deadline) return;
-        try {
-          const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.status === "complete") {
-              galleryRefreshRef.current();
-              fireRedirect(token, data.redirectUrl ?? null);
-              return;
-            }
-            if (data.status === "failed") return;
-          }
-        } catch {
-          // Transient — the retry below covers it.
+        // Publishing from the editor can land instantly (no cuts) or after a
+        // cut-compile. Either way SessionDetail may mount on an
+        // already-complete session, and its onComplete deliberately doesn't
+        // fire for that — so the redirect hook would be silently skipped in
+        // the whole edit flow. Fire it from here instead.
+        const token = event.payload?.token;
+        if (!token) return;
+
+        // Instant publish (no cuts): the /compile response already told us
+        // it's `complete` and carried the redirect URL. Fire now — no poll.
+        if (event.payload?.status === "complete") {
+          fireRedirect(token, event.payload.redirectUrl ?? null);
+          return;
         }
-        setTimeout(poll, 2500);
-      };
-      void poll();
-    }).then((fn) => { unlisten = fn; });
+
+        // A compile is running server-side. Poll until it's terminal.
+        // The worker's assemble step alone can run up to ASSEMBLE_TIMEOUT_MS
+        // (30 min); a fixed few-minute deadline abandoned long compiles
+        // before they finished. Cap at that budget plus queue/upload slack,
+        // and back off so a busy worker isn't hammered.
+        const deadline = Date.now() + REDIRECT_POLL_MAX_MS;
+        let delay = 2500;
+        const poll = async () => {
+          if (cancelled || Date.now() > deadline) return;
+          try {
+            const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
+            if (res.ok) {
+              const data = await res.json();
+              if (data.status === "complete") {
+                galleryRefreshRef.current();
+                fireRedirect(token, data.redirectUrl ?? null);
+                return;
+              }
+              if (data.status === "failed") return;
+            }
+          } catch {
+            // Transient — the retry below covers it.
+          }
+          delay = Math.min(delay * 1.5, 15_000);
+          setTimeout(poll, delay);
+        };
+        void poll();
+      },
+    ).then((fn) => { unlisten = fn; });
 
     return () => {
       cancelled = true;
@@ -331,6 +356,60 @@ function MainWindowApp() {
       await handleMenuChoice(choice);
     },
     [isMacOS, addMenu, fetchPrograms, navigate, handleMenuChoice],
+  );
+
+  // Opens a session the way clicking its card would: recordable sessions go to
+  // the record page, finished ones to their detail view.
+  const openSession = useCallback(
+    (token: string) => {
+      const session = gallery.sessions.find((s) => s.token === token);
+      if (session && ["pending", "active", "paused"].includes(session.status)) {
+        navigate({ page: "record", token });
+      } else {
+        navigate({ page: "session", token });
+      }
+    },
+    [gallery.sessions, navigate],
+  );
+
+  const archiveSession = useCallback(
+    async (token: string) => {
+      const yes = await confirm("Are you sure you want to archive this session?", {
+        title: "Archive Session",
+        kind: "warning",
+      });
+      if (yes) {
+        tokenStore.archiveToken(token);
+        gallery.refresh();
+      }
+    },
+    [tokenStore, gallery],
+  );
+
+  // Native right-click menu for a gallery card. Uses Tauri's menu plugin so the
+  // popup is a real OS context menu rather than a DOM overlay.
+  const handleSessionContextMenu = useCallback(
+    async (token: string) => {
+      const session = gallery.sessions.find((s) => s.token === token);
+      const items: (MenuItem | PredefinedMenuItem)[] = [
+        await MenuItem.new({ text: "Open", action: () => openSession(token) }),
+      ];
+      if (session && session.status === "complete") {
+        items.push(
+          await MenuItem.new({
+            text: "Open in Editor",
+            action: () => { void openEditorWindow(token); },
+          }),
+        );
+      }
+      items.push(await PredefinedMenuItem.new({ item: "Separator" }));
+      items.push(
+        await MenuItem.new({ text: "Archive", action: () => { void archiveSession(token); } }),
+      );
+      const menu = await Menu.new({ items });
+      await menu.popup();
+    },
+    [gallery.sessions, openSession, archiveSession],
   );
 
   // Deep link handler -- saves token and navigates appropriately.
@@ -550,21 +629,9 @@ function MainWindowApp() {
             sessions={gallery.sessions}
             loading={gallery.loading}
             error={gallery.error}
-            onSessionClick={(token) => {
-              const session = gallery.sessions.find((s) => s.token === token);
-              if (session && ["pending", "active", "paused"].includes(session.status)) {
-                navigate({ page: "record", token });
-              } else {
-                navigate({ page: "session", token });
-              }
-            }}
-            onArchive={async (token) => {
-              const yes = await confirm("Are you sure you want to archive this session?", { title: "Archive Session", kind: "warning" });
-              if (yes) {
-                tokenStore.archiveToken(token);
-                gallery.refresh();
-              }
-            }}
+            onSessionClick={openSession}
+            onArchive={archiveSession}
+            onSessionContextMenu={handleSessionContextMenu}
             onAdd={handleAdd}
             // Always available: the Server subpage works everywhere; only the
             // Filtered Apps subpage is Wayland-restricted (it shows a notice).

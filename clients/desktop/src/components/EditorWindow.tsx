@@ -296,18 +296,23 @@ export function EditorWindow({ token }: { token: string }) {
 
   const finishAndClose = useCallback(async () => {
     finishedRef.current = true;
+    let published: Awaited<ReturnType<typeof client.applyCuts>> | null = null;
     try {
       await client.setCuts(cutsRef.current);
-      await client.applyCuts();
+      published = await client.applyCuts();
     } catch (e) {
       console.error("[editor] publish on close failed:", e);
       // Don't trap the user in a window they asked to close: the hold
       // lapses on its own and publishes as recorded shortly after.
     }
-    // Fire-and-forget: the close must not wait on the notification.
-    emit(EDITED_EVENT, { token }).catch((e) =>
-      console.error("[editor] emit failed:", e),
-    );
+    // Fire-and-forget: the close must not wait on the notification. Carry
+    // the publish result so the main window can fire the redirect the
+    // instant it's done (`complete`) or watch the compile to completion.
+    emit(EDITED_EVENT, {
+      token,
+      status: published?.status ?? null,
+      redirectUrl: published?.redirectUrl ?? null,
+    }).catch((e) => console.error("[editor] emit failed:", e));
     await closeEditorWindow();
   }, [client, token]);
 
@@ -377,13 +382,15 @@ export function EditorWindow({ token }: { token: string }) {
             cutsRef.current = cuts;
             dirtyRef.current = dirty;
           }}
-          onApplied={() => {
+          onApplied={(result) => {
             // Saved from inside the editor. Flag it first so the close
             // handler doesn't prompt to publish what's already published.
             finishedRef.current = true;
-            emit(EDITED_EVENT, { token }).catch((e) =>
-              console.error("[editor] emit failed:", e),
-            );
+            emit(EDITED_EVENT, {
+              token,
+              status: result.status,
+              redirectUrl: result.redirectUrl,
+            }).catch((e) => console.error("[editor] emit failed:", e));
             void closeEditorWindow();
           }}
         />
