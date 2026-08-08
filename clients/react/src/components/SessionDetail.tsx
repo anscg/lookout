@@ -24,11 +24,15 @@ import { statusConfig, colors, spacing, fontSize, fontWeight, radii } from "../u
  */
 function HoldPanel({
   editable,
+  progress,
   client,
   onEdit,
   onPublish,
 }: {
   editable: boolean;
+  /** Real compile progress from /status, when the worker is reporting it.
+   *  Null/undefined → fall back to the time estimate. */
+  progress?: number | null;
   client: LookoutClient;
   onEdit: () => void;
   onPublish: () => void | Promise<void>;
@@ -39,20 +43,30 @@ function HoldPanel({
   // publish the timelapse out from under the person reading it.
   useEditLease(client, !publishing);
 
-  // Same asymptotic estimate the editor uses (the worker reports no real
-  // progress); it eases toward 100% and the `editable` flip is what
-  // actually ends it.
+  // Real worker progress wins when present; otherwise ease along the same
+  // asymptotic time estimate the editor uses. Either way the `editable` flip
+  // is what actually ends the wait, and the ring stays monotonic.
   const [buildProgress, setBuildProgress] = useState(0);
   const startedAtRef = useRef<number | null>(null);
+  const sawRealRef = useRef(false);
+  useEffect(() => {
+    if (typeof progress !== "number") return;
+    sawRealRef.current = true;
+    setBuildProgress((prev) => Math.max(prev, progress));
+  }, [progress]);
   useEffect(() => {
     if (editable) return;
     // Anchor the start once; a re-run must never rewind the ring.
     if (startedAtRef.current === null) startedAtRef.current = Date.now();
     const startedAt = startedAtRef.current;
-    const tick = () =>
+    const tick = () => {
+      // Once real progress has arrived it owns the ring — don't let the
+      // estimate race ahead of ground truth.
+      if (sawRealRef.current) return;
       setBuildProgress((prev) =>
         Math.max(prev, estimateBuildProgress(Date.now() - startedAt, 30_000)),
       );
+    };
     tick();
     const id = setInterval(tick, 250);
     return () => clearInterval(id);
@@ -296,6 +310,7 @@ export function SessionDetail({
       {status && !editing && inHold && (
         <HoldPanel
           editable={status.editable === true}
+          progress={status.progress}
           client={client}
           onEdit={() => (onEdit ? onEdit() : setEditing(true))}
           onPublish={async () => {

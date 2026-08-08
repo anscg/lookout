@@ -40,7 +40,6 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
   const [link, setLink] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [showLink, setShowLink] = useState(false);
 
   // Fetch the program registry. Failures and empty lists are non-fatal — the
   // paste-a-link backup always remains available.
@@ -122,64 +121,43 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
             <p style={{ ...note, color: colors.status.danger }}>{error}</p>
           )}
           {/* Backup: paste a lookout:// link, for when the deep link doesn't fire. */}
-          {showLink ? (
-            <>
-              <input
-                autoFocus
-                type="text"
-                value={link}
-                onChange={(e) => {
-                  setLink(e.target.value);
-                  setError(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !loading) handleStart();
-                }}
-                placeholder="Paste a lookout:// link here"
-                disabled={loading}
-                style={{
-                  width: "100%",
-                  padding: `${spacing.md}px ${spacing.lg}px`,
-                  fontSize: fontSize.md,
-                  fontWeight: fontWeight.medium,
-                  color: colors.text.primary,
-                  background: colors.bg.sunken,
-                  border: `1px solid ${error ? colors.status.danger : colors.border.default}`,
-                  borderRadius: radii.lg,
-                  outline: "none",
-                  boxSizing: "border-box",
-                  height: 48,
-                  opacity: loading ? 0.5 : 1,
-                }}
-              />
-              <Button
-                variant="primary"
-                size="lg"
-                fullWidth
-                disabled={!link.trim() || loading}
-                loading={loading}
-                onClick={handleStart}
-              >
-                Start from link
-              </Button>
-            </>
-          ) : (
-            <button
-              onClick={() => setShowLink(true)}
-              style={{
-                background: "none",
-                border: "none",
-                color: colors.text.tertiary,
-                fontSize: fontSize.sm,
-                cursor: "pointer",
-                padding: spacing.xs,
-                textDecoration: "underline",
-                alignSelf: "center",
-              }}
-            >
-              Deep link not working? Paste a link instead
-            </button>
-          )}
+          <input
+            type="text"
+            value={link}
+            onChange={(e) => {
+              setLink(e.target.value);
+              setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !loading) handleStart();
+            }}
+            placeholder="Paste a lookout:// link here"
+            disabled={loading}
+            style={{
+              width: "100%",
+              padding: `${spacing.md}px ${spacing.lg}px`,
+              fontSize: fontSize.md,
+              fontWeight: fontWeight.medium,
+              color: colors.text.primary,
+              background: colors.bg.sunken,
+              border: `1px solid ${error ? colors.status.danger : colors.border.default}`,
+              borderRadius: radii.lg,
+              outline: "none",
+              boxSizing: "border-box",
+              height: 48,
+              opacity: loading ? 0.5 : 1,
+            }}
+          />
+          <Button
+            variant="primary"
+            size="lg"
+            fullWidth
+            disabled={!link.trim() || loading}
+            loading={loading}
+            onClick={handleStart}
+          >
+            Start from link
+          </Button>
         </>
       }
     >

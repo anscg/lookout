@@ -21,6 +21,8 @@ export interface GalleryProps {
   error: string | null;
   onSessionClick?: (token: string) => void;
   onArchive?: (token: string) => void;
+  /** Right-click on a session card. The host decides how to present the menu. */
+  onSessionContextMenu?: (token: string, e: React.MouseEvent) => void;
   onRefresh?: () => void;
   onAdd?: (anchor: AddAnchor) => void;
   onSettings?: () => void;
@@ -78,6 +80,7 @@ export function Gallery({
   error,
   onSessionClick,
   onArchive,
+  onSessionContextMenu,
   onRefresh,
   onAdd,
   onSettings,
@@ -174,6 +177,7 @@ export function Gallery({
               session={s}
               onClick={() => onSessionClick?.(s.token)}
               onArchive={onArchive ? () => onArchive(s.token) : undefined}
+              onContextMenu={onSessionContextMenu ? (e) => onSessionContextMenu(s.token, e) : undefined}
             />
           ))}
         </div>
