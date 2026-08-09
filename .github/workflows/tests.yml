@@ -152,6 +152,25 @@ jobs:
             libgstreamer-plugins-base1.0-dev \
             libgbm-dev
 
+      # RUNTIME GStreamer plugins, not just the dev headers above. The Linux
+      # clip encoder builds `appsrc ! videoconvert ! x264enc ! h264parse !
+      # mp4mux ! filesink`, and those elements live in four different packages:
+      # videoconvert in -base, mp4mux in -good, h264parse in -bad, x264enc in
+      # -ugly. Without them ClipRecorder::new fails with "no H.264 encoder
+      # element available" and every clip test that touches a real encoder dies
+      # — which is exactly how this job has been failing.
+      #
+      # This is also the only place the Linux encoder path is executed at all
+      # (macOS runs it locally, Windows is check-only), so installing them is
+      # what makes that path tested rather than merely compiled.
+      - name: Install GStreamer runtime plugins
+        run: |
+          sudo apt-get install -y \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
