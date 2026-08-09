@@ -15,7 +15,7 @@ import {
   type AddAnchor,
 } from "@lookout/react";
 import { getVersion } from "@tauri-apps/api/app";
-import { ArrowSquareOutIcon, PlusIcon } from "@phosphor-icons/react";
+import { ArrowSquareOutIcon, GearSixIcon, PlusIcon } from "@phosphor-icons/react";
 import { isValidToken, extractToken } from "./utils.js";
 import {
   checkCameraPermission,
@@ -41,6 +41,9 @@ import { UpdatePill } from "./components/UpdatePill.js";
 import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.js";
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 import { getApiBase } from "./serverConfig.js";
+import { HeaderBar } from "./components/HeaderBar.js";
+import { applyLinuxChrome, DEFAULT_APPEARANCE, type DesktopAppearance } from "./linuxChrome.js";
+import { isLinux } from "./platform.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -555,6 +558,16 @@ function MainWindowApp() {
     }
   }, []);
 
+  // Linux only: overlay the Adwaita palette, adopt the session's accent and
+  // UI font, and learn which edge the user keeps their window controls on.
+  // Resolves to the defaults untouched on every other platform.
+  const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
+  useEffect(() => {
+    // The main window is undecorated on Linux (lib.rs), so it owns its
+    // corners and its header bar.
+    void applyLinuxChrome({ undecorated: true }).then(setAppearance);
+  }, []);
+
   // Listen for native menu navigation events
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -568,11 +581,17 @@ function MainWindowApp() {
     return () => { if (unlisten) unlisten(); };
   }, [navigate]);
 
-  // Set window title with version
+  // Set window title with version. Not on Linux: the title is drawn in the
+  // app's own header bar there, where the version rides along as the
+  // subtitle on the screens that have nothing better to say.
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   useEffect(() => {
-    getVersion().then((v) => {
-      getCurrentWindow().setTitle(`Lookout v${v}`);
-    }).catch(() => {});
+    getVersion()
+      .then((v) => {
+        setAppVersion(v);
+        void getCurrentWindow().setTitle(isLinux ? "Lookout" : `Lookout v${v}`);
+      })
+      .catch(() => {});
   }, []);
 
   // Enable vibrancy globally for the app
@@ -600,10 +619,10 @@ function MainWindowApp() {
         });
     } else {
       console.log("[vibrancy] skipped on Linux");
-      // Explicitly set opaque background on Linux to override any default transparent styling
-      html.style.background = "var(--color-bg-body)";
-      body.style.background = "var(--color-bg-body)";
-      if (root) root.style.background = "var(--color-bg-body)";
+      // Nothing to do: the window is undecorated here and linuxChrome.ts
+      // paints #root (rounding its corners) while leaving html and body
+      // transparent, which is what lets those corners read as corners
+      // rather than as squares in the window colour.
     }
 
     return () => {
@@ -637,6 +656,10 @@ function MainWindowApp() {
             // Filtered Apps subpage is Wayland-restricted (it shows a notice).
             onSettings={() => navigate({ page: "settings" })}
             banner={announcement ? <AnnouncementBanner announcement={announcement} /> : undefined}
+            // On Linux the gallery's title and its gear/+ live in the header
+            // bar instead, so stating them again here would be a second
+            // title row directly under the first.
+            showHeader={!isLinux}
           />
         );
       case "settings":
@@ -714,6 +737,55 @@ function MainWindowApp() {
     content
   );
 
+  // GNOME names the window after what's in it, not after the app, so the
+  // header bar carries the page rather than "Lookout". The subtitle is
+  // optional and only earns its line where there's something worth saying.
+  const header = ((): { title: string; subtitle?: string } => {
+    // "Lookout" on its own is a bare word in a bare bar — the version is
+    // the one thing worth saying underneath it, and it lost its old home in
+    // the window title when the header bar took over.
+    const appTitle = { title: "Lookout", subtitle: appVersion ? `v${appVersion}` : undefined };
+    if (!screenPermGranted || !cameraPermGranted) return appTitle;
+    if (editorWindowToken) return { title: "Lookout", subtitle: "Editing in another window" };
+    switch (route.page) {
+      // The home screen is the app itself, so it takes the app's name and
+      // nothing else — a running count under it is noise, not information.
+      case "gallery": return { title: "Lookout" };
+      case "settings": return { title: "Settings" };
+      case "add": return { title: "New Timelapse" };
+      case "record": return { title: "Recording" };
+      case "session": return { title: "Timelapse" };
+      default: return appTitle;
+    }
+  })();
+
+  const headerActions =
+    route.page === "gallery" && screenPermGranted && cameraPermGranted && !editorWindowToken ? (
+      <>
+        <button
+          type="button"
+          className="lookout-headerbar-action"
+          onClick={() => navigate({ page: "settings" })}
+          title="Settings"
+          aria-label="Settings"
+        >
+          <GearSixIcon size={19} weight="fill" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="lookout-headerbar-action"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            void handleAdd({ x: r.left, y: r.top, width: r.width, height: r.height });
+          }}
+          title="Start"
+          aria-label="Start"
+        >
+          <PlusIcon size={19} weight="bold" aria-hidden="true" />
+        </button>
+      </>
+    ) : undefined;
+
   const prevRouteRef = React.useRef(route);
   const routeDirection = React.useMemo(() => {
     const prev = prevRouteRef.current;
@@ -744,6 +816,14 @@ function MainWindowApp() {
       {/* Draggable Titlebar Area that dodges the traffic lights (macOS only).
           The update pill lives here, Ghostty-style — the titlebar is a
           transparent webview overlay, so it renders inside the real titlebar. */}
+      {isLinux && (
+        <HeaderBar
+          title={header.title}
+          subtitle={header.subtitle}
+          appearance={appearance}
+          actions={headerActions}
+        />
+      )}
       {isMacOS ? (
         <div
           data-tauri-drag-region

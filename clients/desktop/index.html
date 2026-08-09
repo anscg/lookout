@@ -36,6 +36,14 @@
         background: transparent;
       }
       body.os-windows { transform: rotate(0.001deg); }
+
+      /* Linux: prefer the desktop's own UI font over the bundled one, so the
+         app reads as part of the session rather than a page inside it. The
+         exact family the user configured is applied from linuxChrome.ts once
+         GSettings answers; this is what shows until then. */
+      html.os-linux body {
+        font-family: 'Adwaita Sans', Cantarell, system-ui, 'Geist', sans-serif;
+      }
     </style>
   </head>
   <body>
@@ -46,6 +54,16 @@
         const ua = navigator.userAgent.toLowerCase();
         if (ua.includes('windows') || ua.includes('linux')) {
           document.body.classList.add('os-windows');
+        }
+        if (ua.includes('linux') && !ua.includes('android')) {
+          document.documentElement.classList.add('os-linux');
+          // The Adwaita overrides are keyed on data-theme, and App.tsx only
+          // sets it once React has mounted. Setting it here means the window
+          // never paints pure black and then recolours a frame later.
+          document.documentElement.setAttribute(
+            'data-theme',
+            window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          );
         }
       })();
       window.__dbg = function(msg) {

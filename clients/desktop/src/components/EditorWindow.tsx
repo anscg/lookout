@@ -7,6 +7,10 @@ import { createLookoutClient, type CutInterval } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
+import { applyLinuxChrome, DEFAULT_APPEARANCE, type DesktopAppearance } from "../linuxChrome.js";
+import { HeaderBar } from "./HeaderBar.js";
+import { WindowResizeHandles, useSquareCornersWhenSnapped } from "./WindowResizeHandles.js";
+import { isLinux as IS_LINUX } from "../platform.js";
 
 /** Event the editor window emits after applying cuts, so the main window
  *  can refresh the session detail + gallery. Payload: { token }. */
@@ -69,6 +73,10 @@ export async function openEditorWindow(token: string): Promise<void> {
     // for us, so it can't drift out of alignment with the traffic lights
     // the way a hand-placed label does.
     ...(isMacOS ? { titleBarStyle: "overlay" as const } : {}),
+    // Linux: no GTK titlebar, because the window draws its own header bar.
+    // The resize borders that disappear with it are redrawn in the webview
+    // (WindowResizeHandles), so the window stays resizable.
+    ...(IS_LINUX ? { decorations: false } : {}),
   });
   win.once("tauri://error", (e) => {
     console.error("[editor] failed to open editor window:", e);
@@ -231,6 +239,9 @@ export function useEditorWindowOpen(): string | null {
  */
 export function EditorWindow({ token }: { token: string }) {
   const isMacOS = navigator.userAgent.includes("Mac");
+  const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
+  const [sessionName, setSessionName] = useState<string | null>(null);
+  useSquareCornersWhenSnapped();
 
   // Vibrancy: the main window does this too. The webview must be
   // transparent for the material to show, so only go transparent once the
@@ -243,9 +254,10 @@ export function EditorWindow({ token }: { token: string }) {
     const isLinux = navigator.userAgent.toLowerCase().includes("linux");
 
     if (isLinux) {
-      html.style.background = "var(--color-bg-body)";
-      body.style.background = "var(--color-bg-body)";
-      if (root) root.style.background = "var(--color-bg-body)";
+      // Adwaita palette, session accent, desktop font, and the rounded
+      // corners this window now owns — it's undecorated here, same as the
+      // main window.
+      void applyLinuxChrome({ undecorated: true }).then(setAppearance);
       return;
     }
 
@@ -275,7 +287,10 @@ export function EditorWindow({ token }: { token: string }) {
     fetch(`${getApiBase()}/api/sessions/${token}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (d?.name) void getCurrentWindow().setTitle(`Edit — ${d.name}`);
+        if (d?.name) {
+          setSessionName(d.name);
+          void getCurrentWindow().setTitle(`Edit — ${d.name}`);
+        }
       })
       .catch(() => {
         // Name is decoration — the editor works without it.
@@ -362,6 +377,21 @@ export function EditorWindow({ token }: { token: string }) {
         />
       )}
 
+      {/* Linux: the header bar IS the titlebar. Its close button goes
+          through the window's normal close path, so the publish-on-close
+          confirmation below still runs. */}
+      {IS_LINUX && (
+        <>
+          <HeaderBar
+            title={sessionName ?? "Edit timelapse"}
+            subtitle={sessionName ? "Editing timelapse" : undefined}
+            appearance={appearance}
+            maximizable
+          />
+          <WindowResizeHandles />
+        </>
+      )}
+
       {/* Body owns the rest. min-height:0 is what lets the stage inside
           letterboxe down instead of clipping the dock off the bottom. */}
       <div
@@ -370,7 +400,7 @@ export function EditorWindow({ token }: { token: string }) {
           minHeight: 0,
           display: "flex",
           flexDirection: "column",
-          padding: isMacOS
+          padding: isMacOS || IS_LINUX
             ? `0 ${spacing.lg}px ${spacing.lg}px`
             : spacing.lg,
         }}
