@@ -733,8 +733,21 @@ fn scan_installed_apps() -> Vec<AppEntry> {
             continue;
         };
         for entry in entries.flatten() {
+            // `entry.file_type()` reads the attributes the directory
+            // enumeration already returned; `entry.path().is_dir()` would stat
+            // each entry again. On Windows that is a real syscall per shortcut,
+            // through whatever filter drivers and AV hooks are installed, and
+            // the Start Menu tree has hundreds of entries.
+            // ...but file_type() does NOT follow symlinks where is_dir() did,
+            // so a directory junction in the Start Menu would stop being
+            // traversed. Fall back to the stat only for that rare case.
             let path = entry.path();
-            if path.is_dir() {
+            let is_dir = match entry.file_type() {
+                Ok(t) if t.is_symlink() => path.is_dir(),
+                Ok(t) => t.is_dir(),
+                Err(_) => path.is_dir(),
+            };
+            if is_dir {
                 if depth < 3 {
                     queue.push((path, depth + 1));
                 }
@@ -899,10 +912,44 @@ fn running_apps() -> Vec<(String, Option<String>)> {
 /// List apps for the Filtered Apps page, sorted by name: every installed app
 /// (scanned once per process and cached) merged with currently running apps.
 /// Only real applications appear — helper/XPC processes that merely own
-/// windows (e.g. "CursorUIViewService") don't. Async so scans run off the
-/// main thread.
+/// windows (e.g. "CursorUIViewService") don't.
+///
+/// The work is BLOCKING — a Start Menu tree walk on the first call, and a
+/// window enumeration on every call — so it runs on the blocking pool rather
+/// than on the async runtime. `async fn` alone was not enough: the body never
+/// yields, so it occupied a tokio worker for its whole duration, and the
+/// capture loop lives on those same workers. A slow enumeration could
+/// therefore delay a capture tick, not just the Settings page.
 #[tauri::command]
 async fn list_installed_apps() -> Vec<AppEntry> {
+    tauri::async_runtime::spawn_blocking(list_installed_apps_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+/// Pre-warm the installed-app cache so the first visit to Filtered Apps doesn't
+/// pay for the app scan while the user waits.
+///
+/// DEFERRED on purpose. The scan is disk-bound — a Start Menu tree walk on
+/// Windows, /Applications on macOS, .desktop files on Linux — and launch is
+/// already the most I/O-contended moment in the process's life: the webview is
+/// loading its own assets at the same time. Starting the scan immediately would
+/// trade a faster Settings page for a slower app open, which is the wrong way
+/// round. A few seconds' delay is still far earlier than anyone navigates to
+/// Filtered Apps, and by then the launch I/O has settled.
+fn prewarm_installed_apps() {
+    std::thread::Builder::new()
+        .name("app-scan-prewarm".into())
+        .spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let _ = installed_apps_cached();
+        })
+        // A failed prewarm is not worth failing startup over: the cache just
+        // fills lazily on first use, exactly as it did before.
+        .ok();
+}
+
+fn list_installed_apps_blocking() -> Vec<AppEntry> {
     // name -> (path, running); BTreeMap keeps the result sorted by name.
     let mut apps: std::collections::BTreeMap<String, (Option<String>, bool)> =
         installed_apps_cached()
@@ -3461,6 +3508,10 @@ pub fn run() {
         ])
         .manage(tray::TrayStateMutex(std::sync::Mutex::new(tray::TrayState::default())))
         .setup(|app| {
+            // Warm the installed-app cache off-thread so the first visit to
+            // Filtered Apps is instant rather than paying for the scan.
+            prewarm_installed_apps();
+
             #[cfg(target_os = "macos")]
             {
                 // NOTE: App Nap / idle-sleep suppression is scoped to active
