@@ -27,7 +27,12 @@ import {
   type UnitRegion,
 } from "../hooks/editorMath.js";
 import { useEditLease } from "../hooks/useEditLease.js";
-import { compileEstimateMs, estimateBuildProgress } from "../hooks/buildProgress.js";
+import {
+  compileEstimateMs,
+  estimateBuildProgress,
+  interpolateBuildProgress,
+  PROGRESS_CAP,
+} from "../hooks/buildProgress.js";
 import { injectEditorStyles } from "./editorStyles.js";
 import { Button } from "../ui/Button.js";
 import { MinutesFlow } from "../ui/MinutesFlow.js";
@@ -133,8 +138,11 @@ export function TimelapseEditor({
   /** Real compile progress from /status, when the worker reports it; null
    *  until the first metered poll (or forever, for cut-apply/old workers). */
   const [realProgress, setRealProgress] = useState<number | null>(null);
-  /** Once true, real progress owns the ring and the time estimate stands down. */
-  const sawRealRef = useRef(false);
+  /** Latest real value and when it landed. Real progress ANCHORS the ring
+   *  rather than owning it outright: it arrives once per 2s poll and only when
+   *  the worker has moved another 1%, so displaying it directly lurches in
+   *  steps with long dead pauses. The tick eases between anchors. */
+  const realAnchorRef = useRef<{ value: number; atMs: number } | null>(null);
   /** Anchored once per preparing spell, so even a genuine change in the
    *  unit count can't restart the estimate. */
   const prepareStartRef = useRef<number | null>(null);
@@ -250,7 +258,7 @@ export function TimelapseEditor({
   // waited would be worse than none.
   useEffect(() => {
     if (realProgress === null) return;
-    sawRealRef.current = true;
+    realAnchorRef.current = { value: realProgress, atMs: Date.now() };
     setBuildProgress((prev) => Math.max(prev, realProgress));
   }, [realProgress]);
   useEffect(() => {
@@ -262,10 +270,31 @@ export function TimelapseEditor({
     const startedAt = prepareStartRef.current;
     const estimateMs = compileEstimateMs(preparingUnits);
     const tick = () => {
-      // Ground truth, once it arrives, owns the ring.
-      if (sawRealRef.current) return;
-      const next = estimateBuildProgress(Date.now() - startedAt, estimateMs);
-      setBuildProgress((prev) => Math.max(prev, next));
+      // BOTH sources run, and the ring takes whichever is further along.
+      // Neither may switch the other off, and that is the whole trick:
+      //
+      //  - The estimate is a continuous function of time, so something is
+      //    always moving at every 200ms tick — the ring can never sit still.
+      //    Letting real progress silence it is what made this feel like a
+      //    hang: updates dropped to one per 2s poll, in >=1% steps.
+      //  - Real worker progress pulls the ring UP whenever the compile is
+      //    further along than the guess, so the number stays tied to truth
+      //    instead of drifting off on a curve.
+      //  - Easing out of the last real anchor keeps the gaps between polls
+      //    smooth, bounded by what one poll is expected to deliver.
+      //
+      // Monotonic via `prev`, and capped short of 100% — only the status flip
+      // ends the wait, so a full ring while the user is still waiting would
+      // be a lie.
+      const now = Date.now();
+      const anchor = realAnchorRef.current;
+      const estimated = estimateBuildProgress(now - startedAt, estimateMs);
+      const fromReal = anchor
+        ? interpolateBuildProgress(anchor.value, now - anchor.atMs, estimateMs)
+        : 0;
+      setBuildProgress((prev) =>
+        Math.min(PROGRESS_CAP, Math.max(prev, estimated, fromReal)),
+      );
     };
     tick();
     const id = setInterval(tick, 200);

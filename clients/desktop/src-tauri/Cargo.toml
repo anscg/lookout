@@ -5,8 +5,15 @@ opt-level = 3
 opt-level = 1
 
 # Emit debug info (.pdb on MSVC) for release builds so crash offsets can be
-# symbolized. Does not change codegen/optimization; debug info ships only in the
-# separate .pdb, never in the released binary.
+# symbolized. Does not change codegen/optimization.
+#
+# PLATFORM CAVEAT — the reason release.yml overrides this for Linux. Debug info
+# lands in a separate file only on MSVC (.pdb) and macOS (.dSYM, outside the
+# .app). On Linux it is embedded directly in the ELF, which made the 0.3.7
+# bundles 136MB against a 6MB Windows installer, and cost 76 minutes of
+# single-threaded xz in the rpm bundler — 85% of the Linux job. So the workflow
+# sets CARGO_PROFILE_RELEASE_DEBUG=false on Linux; if you build a Linux release
+# by hand and care about size, do the same.
 [profile.release]
 debug = true
 
