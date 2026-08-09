@@ -205,6 +205,10 @@ fn remove_stale_deep_link_handler(app: &AppHandle) {
         applications_dir.join(format!("{}-handler.desktop", exe_name.to_string_lossy()));
     if handler_file.exists() && std::fs::remove_file(&handler_file).is_ok() {
         eprintln!("[deep-link] removed stale handler {}", handler_file.display());
+        // Also drop the mimeapps.list default the old register_all() set,
+        // which points at the file just deleted. GIO would skip a missing
+        // default anyway, but a KDE/XFCE launcher might not.
+        let _ = app.deep_link().unregister("lookout");
         let _ = std::process::Command::new("update-desktop-database")
             .arg(&applications_dir)
             .status();
