@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { randomBytes } from "node:crypto";
 import {
   S3Client,
   GetObjectCommand,
@@ -36,6 +37,29 @@ import {
 } from "./segments.js";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * R2 key for a session's UNCUT original — deliberately unguessable.
+ *
+ * This file is the one piece of a session that is not meant to be shareable:
+ * during the edit hold it holds every minute the user is about to cut out, and
+ * it stays readable until the publish deletes it. The key used to be
+ * `timelapses/<sessionId>/original.mp4`, and sessionId is public — it appears
+ * in the `/api/media/:sessionId/...` URLs handed out with any shared timelapse.
+ * So anyone holding a share link could reconstruct the original's URL and, if
+ * the bucket is readable at all (R2_PUBLIC_DOMAIN fronts it publicly in the
+ * documented setup), fetch the footage the user had cut — bypassing the token
+ * gate that `/units` presigns behind.
+ *
+ * 128 bits of randomness in the key closes that whether or not the bucket is
+ * public, which is the property worth having: it doesn't depend on an ACL
+ * staying right. The published video keeps a predictable key — it is meant to
+ * be fetched — and every reader gets this key from
+ * `sessions.original_video_r2_key` rather than rebuilding it.
+ */
+function uncutOriginalKey(sessionId: string): string {
+  return `timelapses/${sessionId}/original-${randomBytes(16).toString("hex")}.mp4`;
+}
 
 /** Whether a session is currently inside its edit hold. */
 function holdActiveOn(session: { editHoldUntil: Date | null }): boolean {
@@ -611,8 +635,11 @@ export async function compileTimelapse(sessionId: string): Promise<{
 
     let publishPath = originalPath;
     let publishSize = originalSize;
-    let publishR2Key = `timelapses/${sessionId}/original.mp4`;
-    const originalR2Key = `timelapses/${sessionId}/original.mp4`;
+    // Reuse the existing key on a recompile so the old object is overwritten
+    // rather than orphaned; mint a fresh unguessable one otherwise.
+    const originalR2Key =
+      session.originalVideoR2Key ?? uncutOriginalKey(sessionId);
+    let publishR2Key = originalR2Key;
 
     if (hasEffectiveCuts) {
       publishPath = await cutVideoToKeptRanges(tmpDir, originalPath, keptRanges, videoCopyAligned);
