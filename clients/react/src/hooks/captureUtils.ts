@@ -2,6 +2,7 @@ import {
   CANVAS_TO_BLOB_TIMEOUT_MS,
   VIDEO_READY_TIMEOUT_MS,
 } from "@lookout/shared";
+import { drawScaledHQ } from "./hqScale.js";
 import type { CaptureResult } from "../types.js";
 
 /** Wait for the video element to have decoded dimensions after play(). */
@@ -42,12 +43,14 @@ export function captureFrameAsJpeg(
   canvas.width = Math.round(video.videoWidth * scale);
   canvas.height = Math.round(video.videoHeight * scale);
 
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
+  if (!canvas.getContext("2d")) {
     return Promise.resolve(null);
   }
 
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  // Stepped high-quality downscale — the capture video is native
+  // resolution (Retina displays hand us 4-5K), and a single bilinear
+  // drawImage of that shreds UI text. See hqScale.ts.
+  drawScaledHQ(video, video.videoWidth, video.videoHeight, canvas);
 
   // Stamp the capture moment in the client clock. The toBlob callback may
   // resolve milliseconds later — what matters is when the frame was

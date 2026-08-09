@@ -41,10 +41,14 @@ export function useScreenCapture(overrides?: CaptureSettings) {
 
   const startSharing = useCallback(async () => {
     const s = settingsRef.current;
+    // Deliberately NO width/height constraint: constraining makes the
+    // browser pre-scale the track to 1080p with an uncontrollable filter
+    // (in 4:2:0 chroma, no less), which is where Retina text goes soft.
+    // We take native pixels and do the maxWidth/maxHeight downscale
+    // ourselves with a proper stepped filter — see hqScale.ts. The frame
+    // rate stays pinned low so the unscaled track costs next to nothing.
     const constraints: DisplayMediaStreamOptions = {
       video: {
-        width: { ideal: s.maxWidth, max: s.maxWidth },
-        height: { ideal: s.maxHeight, max: s.maxHeight },
         frameRate: { ideal: 1, max: 5 },
       },
       audio: false,

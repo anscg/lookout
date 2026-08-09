@@ -53,6 +53,7 @@ export { useUploader } from "./hooks/useUploader.js";
 export type { UploadPayload } from "./hooks/useUploader.js";
 export { ClipRecorder } from "./hooks/clipRecorder.js";
 export type { ClipCaptureResult, ClipRecorderOptions } from "./hooks/clipRecorder.js";
+export { drawScaledHQ } from "./hooks/hqScale.js";
 export { useSession } from "./hooks/useSession.js";
 export {
   useSessionTimer,

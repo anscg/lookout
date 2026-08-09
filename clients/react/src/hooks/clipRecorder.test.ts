@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CLIP_FRAME_INTERVAL_MS,
+  CLIP_WEBCODECS_QP,
+  CLIP_WEBCODECS_QP_STEP,
   FRAMES_PER_CLIP,
   MAX_CLIP_FRAME_OVERRUN,
   MAX_CLIP_BYTES,
@@ -55,6 +57,7 @@ function fakeVideo(): HTMLVideoElement {
 
 beforeEach(() => {
   framesRequested = 0;
+  ClipRecorder.webCodecsDisabled = false;
   vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
   vi.spyOn(document, "createElement").mockImplementation(((tag: string) => {
     if (tag !== "canvas") throw new Error(`unexpected createElement(${tag})`);
@@ -121,7 +124,7 @@ describe("clip frame cap", () => {
     recorder.stop();
   });
 
-  it("keeps the encoder bitrate when an oversize clip was merely stalled", async () => {
+  it("keeps the encoder settings when an oversize clip was merely stalled", async () => {
     const recorder = new ClipRecorder(fakeVideo(), CLIP_FRAME_INTERVAL_MS);
     recorder.start();
     const before = (recorder as unknown as { bitrate: number }).bitrate;
@@ -138,6 +141,164 @@ describe("clip frame cap", () => {
     // The backoff is permanent, so charging a network stall to the encoder
     // would leave the rest of the session soft.
     expect((recorder as unknown as { bitrate: number }).bitrate).toBe(before);
+    recorder.stop();
+  });
+});
+
+// ── WebCodecs engine selection and fallback ─────────────────────────
+
+/** Minimal WebCodecs stubs. The chunk class doubles as the global because
+ *  mp4-muxer type-checks samples with instanceof. */
+class FakeEncodedVideoChunk {
+  constructor(
+    public type: "key" | "delta",
+    public timestamp: number,
+    public duration: number,
+    private data: Uint8Array,
+  ) {}
+  get byteLength() {
+    return this.data.byteLength;
+  }
+  copyTo(dest: Uint8Array) {
+    dest.set(this.data);
+  }
+}
+
+class FakeVideoFrame {
+  constructor(
+    public source: unknown,
+    public init: { timestamp: number; duration: number },
+  ) {}
+  close() {}
+}
+
+let webCodecsSupported = true;
+let webCodecsBytesPerChunk = 1000;
+let webCodecsEncodeCalls: Array<{ quantizer?: number }> = [];
+
+class FakeVideoEncoder {
+  static isConfigSupported = async (config: {
+    bitrateMode?: string;
+    codec: string;
+  }) => ({
+    supported: webCodecsSupported && config.bitrateMode === "quantizer",
+    config,
+  });
+
+  private emitted = 0;
+  constructor(
+    private callbacks: {
+      output: (chunk: unknown, meta: unknown) => void;
+      error: (err: Error) => void;
+    },
+  ) {}
+  configure(_config: unknown) {}
+  encode(
+    frame: FakeVideoFrame,
+    opts?: { keyFrame?: boolean; avc?: { quantizer?: number } },
+  ) {
+    webCodecsEncodeCalls.push({ quantizer: opts?.avc?.quantizer });
+    const meta =
+      this.emitted++ === 0
+        ? { decoderConfig: { description: new Uint8Array([1, 100, 0, 40]) } }
+        : {};
+    this.callbacks.output(
+      new FakeEncodedVideoChunk(
+        opts?.keyFrame ? "key" : "delta",
+        frame.init.timestamp,
+        frame.init.duration,
+        new Uint8Array(webCodecsBytesPerChunk),
+      ),
+      meta,
+    );
+  }
+  async flush() {}
+  close() {}
+}
+
+function stubWebCodecs() {
+  webCodecsEncodeCalls = [];
+  vi.stubGlobal("VideoEncoder", FakeVideoEncoder);
+  vi.stubGlobal("VideoFrame", FakeVideoFrame);
+  vi.stubGlobal("EncodedVideoChunk", FakeEncodedVideoChunk);
+}
+
+describe("engine selection", () => {
+  beforeEach(() => {
+    webCodecsSupported = true;
+    webCodecsBytesPerChunk = 1000;
+  });
+
+  it("prefers the WebCodecs engine and cuts an MP4", async () => {
+    stubWebCodecs();
+    const recorder = new ClipRecorder(fakeVideo(), CLIP_FRAME_INTERVAL_MS);
+    recorder.start();
+    // Real frames arrive seconds apart; let the async config probe settle
+    // before the synchronous draw loop below.
+    await new Promise((r) => setTimeout(r, 0));
+    for (let i = 1; i < FRAMES_PER_CLIP; i++) {
+      (recorder as unknown as { drawFrame(): void }).drawFrame();
+    }
+
+    const clip = await recorder.cut();
+    expect(clip).not.toBeNull();
+    expect(clip!.format).toBe("mp4");
+    expect(clip!.blob.type).toBe("video/mp4");
+    // MediaRecorder was never involved.
+    expect(framesRequested).toBe(0);
+    // The recorder's QP flowed into every frame.
+    expect(
+      webCodecsEncodeCalls.every((c) => c.quantizer === CLIP_WEBCODECS_QP),
+    ).toBe(true);
+    expect(ClipRecorder.webCodecsDisabled).toBe(false);
+    recorder.stop();
+  });
+
+  it("downgrades the session to MediaRecorder after a WebCodecs failure", async () => {
+    webCodecsSupported = false; // engine exists but no config is accepted
+    stubWebCodecs();
+    // Distinct cadence: the engine caches supported configs per
+    // dimensions+cadence, and this test needs a fresh (failing) probe.
+    const recorder = new ClipRecorder(fakeVideo(), CLIP_FRAME_INTERVAL_MS + 1);
+    recorder.start();
+    await new Promise((r) => setTimeout(r, 0));
+    (recorder as unknown as { drawFrame(): void }).drawFrame();
+
+    // The failing engine costs this tick (JPEG fallback) and latches the
+    // session away from WebCodecs.
+    const first = await recorder.cut();
+    expect(first).toBeNull();
+    expect(ClipRecorder.webCodecsDisabled).toBe(true);
+
+    // cut() restarted the recorder on the MediaRecorder engine.
+    for (let i = 0; i < FRAMES_PER_CLIP; i++) {
+      (recorder as unknown as { drawFrame(): void }).drawFrame();
+    }
+    const second = await recorder.cut();
+    expect(second).not.toBeNull();
+    expect(second!.format).toBe("mp4");
+    expect(framesRequested).toBeGreaterThan(0);
+    recorder.stop();
+  });
+
+  it("coarsens the quantizer when a normal WebCodecs clip overruns the cap", async () => {
+    stubWebCodecs();
+    webCodecsBytesPerChunk = Math.ceil((MAX_CLIP_BYTES + 1) / (FRAMES_PER_CLIP + 1));
+    const recorder = new ClipRecorder(fakeVideo(), CLIP_FRAME_INTERVAL_MS + 2);
+    recorder.start();
+    await new Promise((r) => setTimeout(r, 0));
+    for (let i = 1; i < FRAMES_PER_CLIP; i++) {
+      (recorder as unknown as { drawFrame(): void }).drawFrame();
+    }
+
+    const clip = await recorder.cut();
+    // Oversize clips are withheld (the tick falls back to a JPEG)...
+    expect(clip).toBeNull();
+    // ...and the next clip encodes coarser, but WebCodecs stays enabled.
+    expect((recorder as unknown as { quantizer: number }).quantizer).toBe(
+      CLIP_WEBCODECS_QP + CLIP_WEBCODECS_QP_STEP,
+    );
+    expect(ClipRecorder.webCodecsDisabled).toBe(false);
     recorder.stop();
   });
 });
