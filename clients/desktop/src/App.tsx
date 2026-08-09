@@ -745,16 +745,32 @@ function MainWindowApp() {
   // GNOME names the window after what's in it, not after the app, so the
   // header bar carries the page rather than "Lookout". The subtitle is
   // optional and only earns its line where there's something worth saying.
-  // What the mounted page has published for the header, if anything. Kept
-  // with its publisher's id so an outgoing page's unmount can't wipe the
-  // header the incoming one just set during a route transition.
-  const [pageNav, setPageNav] = useState<{ owner: string; nav: HeaderNav } | null>(null);
+  // What the mounted page has published for the header, if anything.
+  //
+  // Stamped with two things. The publisher's id, so an outgoing page's
+  // unmount can't wipe the header the incoming one just set. And the route
+  // it was published for, because the outgoing page stays mounted for the
+  // length of the exit animation — without the stamp its back button would
+  // sit in the header for a few hundred ms after the title had already
+  // moved on, which is exactly as broken as it looks.
+  const navRouteKey = `${route.page}:${(route as { token?: string }).token ?? ""}`;
+  const navRouteKeyRef = React.useRef(navRouteKey);
+  navRouteKeyRef.current = navRouteKey;
+
+  const [pageNav, setPageNav] = useState<
+    { owner: string; nav: HeaderNav; routeKey: string } | null
+  >(null);
   const publishHeaderNav = useCallback((owner: string, nav: HeaderNav | null) => {
     setPageNav((prev) => {
-      if (nav) return { owner, nav };
+      if (nav) return { owner, nav, routeKey: navRouteKeyRef.current };
       return prev && prev.owner !== owner ? prev : null;
     });
   }, []);
+
+  // A contribution only counts while its own route is the current one. The
+  // route's own defaults cover the gap until the incoming page publishes,
+  // so nothing flickers on the way in either.
+  const activeNav = pageNav && pageNav.routeKey === navRouteKey ? pageNav.nav : null;
 
   const routeHeader = ((): { title: string; subtitle?: string; onBack?: () => void } => {
     // "Lookout" on its own is a bare word in a bare bar — the version is
@@ -779,9 +795,9 @@ function MainWindowApp() {
   // this so its subpages send you back to the settings menu rather than all
   // the way out to the gallery.
   const header = {
-    title: pageNav?.nav.title ?? routeHeader.title,
-    subtitle: pageNav?.nav.title ? pageNav.nav.subtitle : (pageNav?.nav.subtitle ?? routeHeader.subtitle),
-    onBack: pageNav?.nav.onBack ?? routeHeader.onBack,
+    title: activeNav?.title ?? routeHeader.title,
+    subtitle: activeNav?.title ? activeNav.subtitle : (activeNav?.subtitle ?? routeHeader.subtitle),
+    onBack: activeNav?.onBack ?? routeHeader.onBack,
   };
 
   // The gallery is the app's home, and the only place chrome that talks
