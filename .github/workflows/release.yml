@@ -122,6 +122,18 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
           SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+          # `[profile.release] debug = true` in Cargo.toml exists to emit the
+          # Windows .pdb. On MSVC that debug info lands in a SEPARATE file, and
+          # on macOS in a .dSYM outside the .app — but on Linux it is embedded
+          # straight into the ELF. Measured on 0.3.7: a 136MB .deb and .rpm
+          # against a 6MB Windows installer and a 20MB universal macOS dmg.
+          #
+          # Two costs. Linux users download 136MB per update through the
+          # updater, and the rpm bundler spends 76 MINUTES single-threaded
+          # xz-compressing it (06:24:56 -> 07:41:03 on the 0.3.7 build), which
+          # is 85% of a 90-minute job. Turning debug off for Linux only keeps
+          # the .pdb that this setting was added for.
+          CARGO_PROFILE_RELEASE_DEBUG: ${{ runner.os == 'Linux' && 'false' || 'true' }}
 
       - name: Build app (without signing)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -136,6 +148,18 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
           SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+          # `[profile.release] debug = true` in Cargo.toml exists to emit the
+          # Windows .pdb. On MSVC that debug info lands in a SEPARATE file, and
+          # on macOS in a .dSYM outside the .app — but on Linux it is embedded
+          # straight into the ELF. Measured on 0.3.7: a 136MB .deb and .rpm
+          # against a 6MB Windows installer and a 20MB universal macOS dmg.
+          #
+          # Two costs. Linux users download 136MB per update through the
+          # updater, and the rpm bundler spends 76 MINUTES single-threaded
+          # xz-compressing it (06:24:56 -> 07:41:03 on the 0.3.7 build), which
+          # is 85% of a 90-minute job. Turning debug off for Linux only keeps
+          # the .pdb that this setting was added for.
+          CARGO_PROFILE_RELEASE_DEBUG: ${{ runner.os == 'Linux' && 'false' || 'true' }}
 
       - name: Build Arch Linux package (.pkg.tar.zst)
         if: runner.os == 'Linux'
