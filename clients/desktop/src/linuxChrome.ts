@@ -47,6 +47,22 @@ export const WINDOW_RADIUS = 12;
 export const WINDOW_MARGIN = 20;
 
 /**
+ * How much of that frame still accepts pointer input, measured inward from
+ * the visible window's edge.
+ *
+ * The rest of the frame is passed through to whatever is behind, so a click
+ * on the shadow doesn't land on Lookout — but this band has to stay live,
+ * because it's where the resize strips are. Mirrored in window_shape.rs.
+ */
+export const RESIZE_BAND = 8;
+
+/**
+ * The outer ring of the frame that passes clicks through: everything
+ * between the window's real edge and the resize band.
+ */
+export const SHADOW_PASSTHROUGH = WINDOW_MARGIN - RESIZE_BAND;
+
+/**
  * Linux-only chrome that the shared theme can't carry.
  *
  * The Adwaita palette itself now lives in the shared theme — it's the app's
@@ -231,6 +247,23 @@ if (isLinux && typeof document !== "undefined" && !document.querySelector("style
 }
 
 /**
+ * Ask the native side to pass pointer input through the outer frame.
+ *
+ * `inset` is how far in from the window's real edge input starts being
+ * accepted — 0 while snapped, when there is no frame to pass through.
+ */
+export async function setShadowPassthrough(inset: number): Promise<void> {
+  if (!isLinux) return;
+  try {
+    await invoke("set_window_shadow_inset", { inset });
+  } catch (e) {
+    // Worth knowing about, not worth breaking over: the window simply keeps
+    // catching clicks on its own shadow.
+    console.warn("[csd] could not set the window input shape:", e);
+  }
+}
+
+/**
  * Track focus and mirror it onto the document as GTK's :backdrop state.
  *
  * One class for the whole window rather than per-component opacity, because
@@ -299,7 +332,13 @@ export async function applyLinuxChrome(
   document.documentElement.classList.add("os-linux");
   // Opts this window into drawing its own rounded corners. Only the windows
   // that actually had their decorations taken away may claim it.
-  if (undecorated) document.documentElement.classList.add("lookout-csd");
+  if (undecorated) {
+    document.documentElement.classList.add("lookout-csd");
+    // Stop the shadow from catching clicks. Windows that can snap re-apply
+    // this as their frame collapses (useSquareCornersWhenSnapped); a
+    // fixed-size window is done after this one call.
+    void setShadowPassthrough(SHADOW_PASSTHROUGH);
+  }
 
   let appearance = DEFAULT_APPEARANCE;
   try {

@@ -3174,6 +3174,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "gstreamer-video",
+ "gtk",
  "image",
  "objc2",
  "objc2-app-kit",

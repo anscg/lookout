@@ -8,6 +8,7 @@ mod native_tray;
 mod pipewire;
 mod screencast;
 mod tray;
+mod window_shape;
 #[cfg(target_os = "windows")]
 mod windows_permissions;
 
@@ -3492,6 +3493,7 @@ pub fn run() {
             disable_vibrancy,
             is_wayland,
             desktop_appearance::desktop_appearance,
+            window_shape::set_window_shadow_inset,
             open_external_url,
             native_menu::show_add_menu,
             native_menu::prefetch_add_menu_icons,
