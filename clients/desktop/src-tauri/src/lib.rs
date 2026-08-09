@@ -3688,10 +3688,11 @@ pub fn run() {
             }
 
             // On Linux, deb/rpm installs already ship a desktop file that
-            // claims lookout://. Registering again at runtime writes a
-            // second lookout-desktop-handler.desktop, and the system's
-            // "Open with" chooser then lists two Lookouts — one of which
-            // launches the app without passing the URL along. Only
+            // claims lookout:// AND forwards the URL (%u comes from our
+            // custom template, linux/lookout.desktop — Tauri's stock one
+            // drops the URL). Registering again at runtime writes a second
+            // lookout-desktop-handler.desktop, and the system's "Open with"
+            // chooser then lists two indistinguishable Lookouts. Only
             // AppImages and dev builds, which install no desktop file,
             // need runtime registration.
             #[cfg(target_os = "linux")]

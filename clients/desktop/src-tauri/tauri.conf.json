@@ -58,6 +58,7 @@
     ],
     "linux": {
       "deb": {
+        "desktopTemplate": "./linux/lookout.desktop",
         "depends": [
           "gstreamer1.0-pipewire",
           "gstreamer1.0-plugins-base",
@@ -69,6 +70,7 @@
         ]
       },
       "rpm": {
+        "desktopTemplate": "./linux/lookout.desktop",
         "depends": [
           "pipewire-gstreamer",
           "gstreamer1-plugins-base",
