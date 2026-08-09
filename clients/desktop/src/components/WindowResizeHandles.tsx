@@ -14,7 +14,7 @@
  */
 import React, { useEffect, useState } from "react";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
-import { RESIZE_BAND, SHADOW_PASSTHROUGH, setShadowPassthrough } from "../linuxChrome.js";
+import { RESIZE_BAND, SHADOW_PASSTHROUGH, syncWindowFrame } from "../linuxChrome.js";
 
 /** Mirrors Tauri's ResizeDirection, which the package declares but doesn't export. */
 type ResizeDirection =
@@ -55,18 +55,15 @@ const ZONES: Zone[] = [
 ];
 
 /**
- * True when the window is flush with an edge of the work area — maximized,
- * or snapped to a half by the window manager.
+ * Fallback for when the native side can't report the window's state.
  *
- * Why this shape: `isMaximized()` answers for maximize alone, and GNOME's
- * side-snap is not maximize. There's no portable "am I tiled" question to
- * ask, so we infer it from the geometry — a snapped window matches the work
- * area exactly along at least one axis.
+ * A geometry guess: a window the WM has sized usually matches the work area
+ * on at least one axis. It cannot see a quarter-tile, which is exactly why
+ * it is only the fallback — `syncWindowFrame` asks the compositor.
  *
  * Deliberately compares sizes and not positions: Wayland doesn't tell a
  * client where its own window is, so `outerPosition()` is either unavailable
- * or a lie there, and folding it in would make this wrong on the desktop it
- * most needs to be right on.
+ * or a lie there.
  */
 async function isFlushWithWorkArea(): Promise<boolean> {
   const win = getCurrentWindow();
@@ -92,26 +89,28 @@ async function isFlushWithWorkArea(): Promise<boolean> {
 }
 
 /**
- * Square the window's corners whenever it's snapped or maximized, and round
- * them again when it floats free.
+ * Keep the window's frame in step with the compositor: drawn while the
+ * window floats, collapsed the moment the window manager takes over sizing
+ * it.
  *
- * Rounded corners on a maximized window leave four notches of desktop
- * showing through, which is the single most obvious way a client-side-
- * decorated app gives itself away.
+ * Both halves matter. Rounded corners on a maximized window leave four
+ * notches of desktop showing through, and a transparent frame under a
+ * tiling WM becomes a gap between neighbouring windows rather than a
+ * shadow.
  */
-export function useSquareCornersWhenSnapped(): void {
+export function useWindowFrameState(): void {
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const sync = async () => {
-      const flush = await isFlushWithWorkArea();
+      // One round trip: applies the input shape (recomputed from the current
+      // size, so this has to run on every resize) and reports whether the
+      // compositor is sizing us.
+      const reported = await syncWindowFrame(SHADOW_PASSTHROUGH);
+      const collapsed = reported ?? (await isFlushWithWorkArea());
       if (cancelled) return;
-      document.documentElement.classList.toggle("lookout-snapped", flush);
-      // A snapped window has no frame to pass through, and the shape is
-      // computed from the window's size — so it needs redoing on every
-      // resize, not only when the snapped state flips.
-      void setShadowPassthrough(flush ? 0 : SHADOW_PASSTHROUGH);
+      document.documentElement.classList.toggle("lookout-snapped", collapsed);
     };
 
     // `onResized` fires continuously through a drag, and each check costs a

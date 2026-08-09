@@ -1,4 +1,5 @@
 mod capture;
+mod capture_diagnostics;
 mod clips;
 mod crop;
 mod desktop_appearance;
@@ -3514,8 +3515,9 @@ pub fn run() {
             enable_vibrancy,
             disable_vibrancy,
             is_wayland,
+            capture_diagnostics::capture_environment,
             desktop_appearance::desktop_appearance,
-            window_shape::set_window_shadow_inset,
+            window_shape::sync_window_frame,
             open_external_url,
             native_menu::show_add_menu,
             native_menu::prefetch_add_menu_icons,
@@ -3696,7 +3698,7 @@ pub fn run() {
                     // maximum would just be clamped back. Widen the limits
                     // first, then resize, then re-centre — the window grew
                     // around its old top-left otherwise.
-                    const MARGIN: f64 = 20.0;
+                    const MARGIN: f64 = 40.0;
                     let scale = window.scale_factor()?;
                     let inner: tauri::LogicalSize<f64> = window.inner_size()?.to_logical(scale);
                     let grown = tauri::LogicalSize::new(

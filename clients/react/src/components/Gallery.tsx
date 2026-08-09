@@ -34,6 +34,12 @@ export interface GalleryProps {
    * header bar — pass false so the title isn't stated twice.
    */
   showHeader?: boolean;
+  /**
+   * Fade the list out at its bottom edge when there's more to scroll to.
+   * The top fade is unaffected — hosts pass false when the bottom of the
+   * list already sits against chrome of their own.
+   */
+  showBottomFade?: boolean;
 }
 
 const addButtonStyle: React.CSSProperties = {
@@ -92,6 +98,7 @@ export function Gallery({
   onSettings,
   banner,
   showHeader = true,
+  showBottomFade = true,
 }: GalleryProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showTopMask, setShowTopMask] = useState(false);
@@ -118,6 +125,15 @@ export function Gallery({
     window.addEventListener('resize', handleScroll);
     return () => window.removeEventListener('resize', handleScroll);
   }, [sessions, handleScroll]);
+
+  // One expression, used for both the standard and -webkit- properties.
+  const fadeMask = `linear-gradient(to bottom, ${
+    showTopMask ? "transparent 0%, black 20px" : "black 0%, black 20px"
+  }, ${
+    showBottomMask && showBottomFade
+      ? "black calc(100% - 20px), transparent 100%"
+      : "black calc(100% - 20px), black 100%"
+  })`;
 
   if (loading && sessions.length === 0) {
     return <GallerySkeleton />;
@@ -173,8 +189,8 @@ export function Gallery({
           flex: 1,
           overflowY: "auto",
           padding: spacing.lg,
-          maskImage: `linear-gradient(to bottom, ${showTopMask ? 'transparent 0%, black 20px' : 'black 0%, black 20px'}, ${showBottomMask ? 'black calc(100% - 20px), transparent 100%' : 'black calc(100% - 20px), black 100%'})`,
-          WebkitMaskImage: `linear-gradient(to bottom, ${showTopMask ? 'transparent 0%, black 20px' : 'black 0%, black 20px'}, ${showBottomMask ? 'black calc(100% - 20px), transparent 100%' : 'black calc(100% - 20px), black 100%'})`,
+          maskImage: fadeMask,
+          WebkitMaskImage: fadeMask,
         }}
       >
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: spacing.md }}>

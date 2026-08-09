@@ -4,6 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Lookout</title>
+    <script>
+      // Before the stylesheet below, deliberately. The rules keyed on
+      // .os-linux decide whether this window is opaque or transparent, and
+      // a class added at the end of <body> arrives after the browser has
+      // already painted — which showed as a fifth of a second of solid,
+      // square window every launch before the real chrome appeared.
+      //
+      // Kept to what CSS needs before that first paint. Anything touching
+      // <body> cannot run here: it does not exist yet.
+      (function () {
+        var ua = navigator.userAgent.toLowerCase();
+        if (ua.indexOf('linux') !== -1 && ua.indexOf('android') === -1) {
+          document.documentElement.classList.add('os-linux');
+          // The Adwaita overrides are keyed on data-theme, and App.tsx only
+          // sets it once React has mounted.
+          document.documentElement.setAttribute(
+            'data-theme',
+            window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          );
+        }
+      })();
+    </script>
     <style>
       
       @font-face {
@@ -61,21 +83,21 @@
       html.os-linux { background: transparent; }
       html.os-linux #root {
         position: fixed;
-        inset: 20px;
+        inset: 40px;
         height: auto;
         background: #242424;
         border-radius: 12px;
         box-shadow:
           0 0 0 1px rgba(255, 255, 255, 0.18),
-          0 4px 12px rgba(0, 0, 0, 0.1),
-          0 14px 40px rgba(0, 0, 0, 0.14);
+          0 2px 8px rgba(0, 0, 0, 0.1),
+          0 8px 28px rgba(0, 0, 0, 0.14);
       }
       html.os-linux[data-theme="light"] #root {
         background: #fafafa;
         box-shadow:
           0 0 0 1px rgba(0, 0, 0, 0.18),
-          0 4px 12px rgba(0, 0, 0, 0.08),
-          0 14px 40px rgba(0, 0, 0, 0.1);
+          0 2px 8px rgba(0, 0, 0, 0.08),
+          0 8px 28px rgba(0, 0, 0, 0.1);
       }
 
       /* Linux: prefer the desktop's own UI font over the bundled one, so the
@@ -95,16 +117,6 @@
         const ua = navigator.userAgent.toLowerCase();
         if (ua.includes('windows') || ua.includes('linux')) {
           document.body.classList.add('os-windows');
-        }
-        if (ua.includes('linux') && !ua.includes('android')) {
-          document.documentElement.classList.add('os-linux');
-          // The Adwaita overrides are keyed on data-theme, and App.tsx only
-          // sets it once React has mounted. Setting it here means the window
-          // never paints pure black and then recolours a frame later.
-          document.documentElement.setAttribute(
-            'data-theme',
-            window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-          );
         }
       })();
       window.__dbg = function(msg) {

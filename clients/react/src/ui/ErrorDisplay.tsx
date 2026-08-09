@@ -13,6 +13,8 @@ export interface ErrorDisplayProps {
   reassurance?: string;
   onDismiss?: () => void;
   onCopy?: () => void;
+  /** Primary way out of the error — retry, troubleshoot, reconnect. Rendered
+   *  in every variant. */
   action?: { label: string; onClick: () => void };
 }
 
@@ -44,9 +46,26 @@ export function ErrorDisplay({ error, variant = "banner", title, reassurance, on
         <span style={{ fontFamily: "monospace" }}>{error}</span>
         {reassurance && <span style={{ opacity: 0.8 }}>{`\n\n${reassurance}`}</span>}
       </div>
+      {action && (
+        <motion.button
+          onClick={action.onClick}
+          whileTap="active"
+          initial="idle"
+          style={{ background: "transparent", border: "none", color: colors.text.error, cursor: "pointer", fontSize: fontSize.xs, lineHeight: 1, padding: "2px 8px", borderRadius: radii.sm, whiteSpace: "nowrap" as const, position: "relative" }}
+        >
+          <motion.div
+            variants={{ idle: { scale: 1 }, active: { scale: 0.96 } }}
+            transition={{ type: "spring", stiffness: 1500, damping: 60 }}
+            style={{ position: "absolute", inset: 0, borderRadius: radii.sm, border: "1px solid " + colors.text.error, zIndex: 0 }}
+          />
+          <span style={{ position: "relative", zIndex: 1, display: "inline-block" }}>
+            {action.label}
+          </span>
+        </motion.button>
+      )}
       {onCopy && (
-        <motion.button 
-          onClick={onCopy} 
+        <motion.button
+          onClick={onCopy}
           whileTap="active"
           initial="idle"
           style={{ background: "transparent", border: "none", color: colors.text.error, cursor: "pointer", fontSize: fontSize.xs, lineHeight: 1, padding: "2px 8px", borderRadius: radii.sm, whiteSpace: "nowrap" as const, position: "relative" }}

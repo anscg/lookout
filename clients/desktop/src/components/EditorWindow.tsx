@@ -9,7 +9,7 @@ import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
 import { applyLinuxChrome, useBackdropState, WINDOW_MARGIN, DEFAULT_APPEARANCE, type DesktopAppearance } from "../linuxChrome.js";
 import { HeaderBar } from "./HeaderBar.js";
-import { WindowResizeHandles, useSquareCornersWhenSnapped } from "./WindowResizeHandles.js";
+import { WindowResizeHandles, useWindowFrameState } from "./WindowResizeHandles.js";
 import { isLinux as IS_LINUX } from "../platform.js";
 
 /** Event the editor window emits after applying cuts, so the main window
@@ -245,7 +245,7 @@ export function EditorWindow({ token }: { token: string }) {
   const isMacOS = navigator.userAgent.includes("Mac");
   const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
   const [sessionName, setSessionName] = useState<string | null>(null);
-  useSquareCornersWhenSnapped();
+  useWindowFrameState();
   useBackdropState();
 
   // Vibrancy: the main window does this too. The webview must be
