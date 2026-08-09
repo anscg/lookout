@@ -7,7 +7,7 @@ import { createLookoutClient, type CutInterval } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
-import { applyLinuxChrome, DEFAULT_APPEARANCE, type DesktopAppearance } from "../linuxChrome.js";
+import { applyLinuxChrome, useBackdropState, WINDOW_MARGIN, DEFAULT_APPEARANCE, type DesktopAppearance } from "../linuxChrome.js";
 import { HeaderBar } from "./HeaderBar.js";
 import { WindowResizeHandles, useSquareCornersWhenSnapped } from "./WindowResizeHandles.js";
 import { isLinux as IS_LINUX } from "../platform.js";
@@ -54,16 +54,20 @@ export async function openEditorWindow(token: string): Promise<void> {
     return;
   }
   const isMacOS = navigator.userAgent.includes("Mac");
+  // Linux reserves a transparent frame around the visible window for its
+  // outer border and shadow, so every dimension grows by twice it — the
+  // content keeps the size these numbers describe.
+  const pad = IS_LINUX ? WINDOW_MARGIN * 2 : 0;
   const win = new WebviewWindow(label, {
     url: `${window.location.pathname}#/editor?token=${token}`,
     title: "Edit timelapse",
-    width: 940,
-    height: 660,
+    width: 940 + pad,
+    height: 660 + pad,
     // The floor is what the shell actually needs: chrome + a legible
     // stage + the dock. Below this the layout would be cramped rather
     // than broken — it still reflows — but there's no reason to allow it.
-    minWidth: 620,
-    minHeight: 480,
+    minWidth: 620 + pad,
+    minHeight: 480 + pad,
     resizable: true,
     center: true,
     // Transparent + overlay titlebar is what lets the vibrancy material
@@ -242,6 +246,7 @@ export function EditorWindow({ token }: { token: string }) {
   const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
   const [sessionName, setSessionName] = useState<string | null>(null);
   useSquareCornersWhenSnapped();
+  useBackdropState();
 
   // Vibrancy: the main window does this too. The webview must be
   // transparent for the material to show, so only go transparent once the

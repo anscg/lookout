@@ -6,6 +6,7 @@
  * colour and UI font, read from GSettings, plus the chrome that only an
  * undecorated GTK window needs. macOS and Windows never load any of it.
  */
+import { useEffect } from "react";
 import { setAccentColor } from "@lookout/react";
 import { isLinux } from "./platform.js";
 import { invoke } from "./logger.js";
@@ -27,6 +28,22 @@ export const HEADER_BAR_HEIGHT = 47;
 
 /** Adwaita rounds windows and dialogs at 12px; the shared tokens stop at 10. */
 export const WINDOW_RADIUS = 12;
+
+/**
+ * Transparent frame reserved around the visible window, in px per side.
+ *
+ * A window is normally exactly the size of its content, which leaves nowhere
+ * to draw an outer border or a shadow — both paint outside the content box,
+ * i.e. off the window, where the compositor clips them. GTK solves this by
+ * making the window bigger than it looks and keeping the extra transparent;
+ * the shadow lives in there, and so does the invisible frame you grab to
+ * resize. Same trick here.
+ *
+ * The native side grows each window by twice this (lib.rs for the main
+ * window, EditorWindow.tsx for the editor), so the content keeps its
+ * intended size.
+ */
+export const WINDOW_MARGIN = 20;
 
 /**
  * Linux-only chrome that the shared theme can't carry.
@@ -61,6 +78,7 @@ const ADWAITA_CSS = `
     --color-popover-border: rgba(255, 255, 255, 0.14);
     --color-popover-hover: rgba(255, 255, 255, 0.1);
     --color-popover-separator: rgba(255, 255, 255, 0.15);
+    --color-window-border: rgba(255, 255, 255, 0.18);
   }
   html.os-linux[data-theme="light"] {
     --color-headerbar-control: rgba(0, 0, 0, 0.08);
@@ -70,6 +88,7 @@ const ADWAITA_CSS = `
     --color-popover-border: rgba(0, 0, 0, 0.12);
     --color-popover-hover: rgba(0, 0, 0, 0.08);
     --color-popover-separator: rgba(0, 0, 0, 0.12);
+    --color-window-border: rgba(0, 0, 0, 0.18);
   }
   /* GTK never swaps in a hand cursor over a button — the pointer is a web
      convention, and having it follow every control around is one of the
@@ -100,6 +119,7 @@ const ADWAITA_CSS = `
   }
   html.os-linux.lookout-csd {
     --lookout-window-radius: ${WINDOW_RADIUS}px;
+    --lookout-window-margin: ${WINDOW_MARGIN}px;
   }
   /* Snapped or maximized: the window is flush with the screen edge, and
      rounding it there leaves four notches of desktop showing through — the
@@ -107,10 +127,50 @@ const ADWAITA_CSS = `
   html.os-linux.lookout-csd.lookout-snapped {
     --lookout-window-radius: 0px;
   }
+  /* The visible window: inset from the real one by the transparent frame,
+     so the outer border and the shadow have somewhere to land. Both are
+     spread/blur on one box-shadow — the 1px spread ring IS the outer
+     border, which keeps it off the content box entirely and lets it follow
+     the corner radius. */
   html.os-linux.lookout-csd #root {
+    position: fixed;
+    inset: var(--lookout-window-margin);
+    height: auto;
     background: var(--color-bg-body);
     border-radius: var(--lookout-window-radius);
     overflow: hidden;
+    /* Wide and faint rather than tight and dark. A compositor shadow is
+       mostly a large, very soft falloff — reading the alpha off a dark
+       screenshot tempts you into something far heavier than GNOME's, which
+       then looks like a drop shadow on a web card. */
+    box-shadow:
+      0 0 0 1px var(--color-window-border),
+      0 4px 12px rgba(0, 0, 0, 0.1),
+      0 14px 40px rgba(0, 0, 0, 0.14);
+    transition: box-shadow 160ms ease-out;
+  }
+  /* Unfocused windows cast less. GTK pulls its shadow back in :backdrop so
+     the focused window is the one that looks lifted. */
+  html.os-linux.lookout-csd.lookout-backdrop #root {
+    box-shadow:
+      0 0 0 1px var(--color-window-border),
+      0 2px 8px rgba(0, 0, 0, 0.06),
+      0 8px 24px rgba(0, 0, 0, 0.09);
+  }
+  /* Snapped or maximized: the frame collapses so the content fills the
+     screen edge to edge, and the outline and shadow have nothing to
+     separate the window from. */
+  html.os-linux.lookout-csd.lookout-snapped #root {
+    inset: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  /* The header bar dims with the window, GTK's :backdrop state. */
+  html.os-linux .lookout-headerbar {
+    transition: opacity 160ms ease-out;
+  }
+  html.os-linux.lookout-backdrop .lookout-headerbar {
+    opacity: 0.55;
   }
 `;
 
@@ -151,6 +211,31 @@ if (isLinux && typeof document !== "undefined" && !document.querySelector("style
   style.setAttribute("data-lookout-linux-chrome", "");
   style.textContent = ADWAITA_CSS;
   document.head.appendChild(style);
+}
+
+/**
+ * Track focus and mirror it onto the document as GTK's :backdrop state.
+ *
+ * One class for the whole window rather than per-component opacity, because
+ * both the header bar and the window's own shadow have to dim together —
+ * they're the same signal, and driving them from two places is how they end
+ * up disagreeing.
+ */
+export function useBackdropState(): void {
+  useEffect(() => {
+    if (!isLinux) return;
+    const sync = () => {
+      document.documentElement.classList.toggle("lookout-backdrop", !document.hasFocus());
+    };
+    sync();
+    window.addEventListener("focus", sync);
+    window.addEventListener("blur", sync);
+    return () => {
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("blur", sync);
+      document.documentElement.classList.remove("lookout-backdrop");
+    };
+  }, []);
 }
 
 /**

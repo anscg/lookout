@@ -3658,7 +3658,32 @@ pub fn run() {
                 // two visual systems in one window, which is most of why
                 // Lookout read as a visitor on the desktop.
                 #[cfg(target_os = "linux")]
-                window.set_decorations(false)?;
+                {
+                    window.set_decorations(false)?;
+
+                    // Grow the window by the transparent frame the webview
+                    // draws its outer border and shadow into (see
+                    // WINDOW_MARGIN in linuxChrome.ts). Both paint outside
+                    // the content box, so without the extra room the
+                    // compositor simply clips them away.
+                    //
+                    // The bounds have to move with it: this window is fixed
+                    // at 480x640 by min == max, and a set_size past the
+                    // maximum would just be clamped back. Widen the limits
+                    // first, then resize, then re-centre — the window grew
+                    // around its old top-left otherwise.
+                    const MARGIN: f64 = 20.0;
+                    let scale = window.scale_factor()?;
+                    let inner: tauri::LogicalSize<f64> = window.inner_size()?.to_logical(scale);
+                    let grown = tauri::LogicalSize::new(
+                        inner.width + MARGIN * 2.0,
+                        inner.height + MARGIN * 2.0,
+                    );
+                    window.set_min_size(Some(grown))?;
+                    window.set_max_size(Some(grown))?;
+                    window.set_size(grown)?;
+                    window.center()?;
+                }
 
                 // Auto-grant camera/microphone permissions on Windows so the
                 // WebView2 native prompt never appears.

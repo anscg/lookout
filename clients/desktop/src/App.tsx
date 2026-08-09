@@ -42,7 +42,7 @@ import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.j
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 import { getApiBase } from "./serverConfig.js";
 import { HeaderBar } from "./components/HeaderBar.js";
-import { applyLinuxChrome, DEFAULT_APPEARANCE, type DesktopAppearance } from "./linuxChrome.js";
+import { applyLinuxChrome, useBackdropState, DEFAULT_APPEARANCE, type DesktopAppearance } from "./linuxChrome.js";
 import { isLinux } from "./platform.js";
 import { HeaderNavProvider, type HeaderNav } from "./headerNav.js";
 
@@ -563,6 +563,7 @@ function MainWindowApp() {
   // UI font, and learn which edge the user keeps their window controls on.
   // Resolves to the defaults untouched on every other platform.
   const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
+  useBackdropState();
   useEffect(() => {
     // The main window is undecorated on Linux (lib.rs), so it owns its
     // corners and its header bar.
