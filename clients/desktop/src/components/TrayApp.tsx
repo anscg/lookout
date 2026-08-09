@@ -2,8 +2,33 @@ import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "../logger.js";
 import { isGlassSupported, setLiquidGlassEffect, GlassMaterialVariant } from "tauri-plugin-liquid-glass-api";
-import { Button, colors, spacing, fontSize, fontWeight } from "@lookout/react";
+import { Button, colors, spacing, fontSize, fontWeight, deriveDisplaySeconds } from "@lookout/react";
 import NumberFlow from "@number-flow/react";
+
+interface TrayState {
+  /** Ratcheted server-authoritative tracked seconds (the anchor value). */
+  baseSeconds: number;
+  screenshotCount: number;
+  controlMode: "recording" | "paused";
+  /** `Date.now()` when `baseSeconds` last advanced. */
+  anchorAt: number;
+}
+
+/**
+ * Re-derive the ticking clock from the anchor the main window pushed, using
+ * the *same* shared function the main window's own timer uses. Rolling a
+ * local version of this is how the popup ended up showing a different time
+ * from the main app: it extrapolated without a cap, from an already
+ * interpolated value.
+ */
+function deriveLiveSeconds(state: TrayState, now: number): number {
+  return deriveDisplaySeconds(
+    state.baseSeconds,
+    state.anchorAt,
+    state.controlMode === "recording",
+    now,
+  );
+}
 
 function TrayTimer({ totalSeconds }: { totalSeconds: number }) {
   const h = Math.floor(totalSeconds / 3600);
@@ -31,11 +56,11 @@ function TrayTimer({ totalSeconds }: { totalSeconds: number }) {
 }
 
 export function TrayApp() {
-  const [state, setState] = useState({
-    displaySeconds: 0,
+  const [state, setState] = useState<TrayState>({
+    baseSeconds: 0,
     screenshotCount: 0,
-    controlMode: "recording" as "recording" | "paused",
-    updatedAt: Date.now(),
+    controlMode: "recording",
+    anchorAt: Date.now(),
   });
 
   const [liveSeconds, setLiveSeconds] = useState(0);
@@ -91,20 +116,13 @@ export function TrayApp() {
 
   // Derive the live real-time seconds ticking up
   useEffect(() => {
-    // Immediate sync
-    let current = state.displaySeconds;
-    if (state.controlMode === "recording") {
-      const elapsed = Math.floor((Date.now() - state.updatedAt) / 1000);
-      current += Math.max(0, elapsed);
-    }
-    setLiveSeconds(current);
+    setLiveSeconds(deriveLiveSeconds(state, Date.now()));
 
     if (state.controlMode !== "recording") return;
 
     // Tick locally so we don't depend on the asleep main window
     const interval = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - state.updatedAt) / 1000);
-      setLiveSeconds(state.displaySeconds + Math.max(0, elapsed));
+      setLiveSeconds(deriveLiveSeconds(state, Date.now()));
     }, 1000);
 
     return () => clearInterval(interval);
@@ -116,7 +134,7 @@ export function TrayApp() {
     
     const syncState = async () => {
       try {
-        const backendState = await invoke<any>("get_tray_state");
+        const backendState = await invoke<TrayState>("get_tray_state");
         setState(backendState);
       } catch (e) {
         console.error("Failed to sync tray state from backend", e);
@@ -125,12 +143,12 @@ export function TrayApp() {
     
     const setup = async () => {
       // Listen for regular state updates
-      unlistenState = await listen<any>("tray-state", (event) => {
+      unlistenState = await listen<TrayState>("tray-state", (event) => {
         setState(event.payload);
       });
-      
+
       // When the tray window is opened, explicitly request the latest state
-      unlistenOpened = await listen<any>("tray-opened", syncState);
+      unlistenOpened = await listen("tray-opened", syncState);
       
       // Request initial state on first mount
       syncState();

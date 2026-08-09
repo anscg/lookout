@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, type ReactNode } from "r
 import { buildBrowserClientInfo } from "@lookout/shared";
 import { createLookoutClient, type LookoutClient } from "./api/client.js";
 import { resolveConfig } from "./defaults.js";
+import { setAccentColor } from "./ui/theme.js";
 import type { LookoutConfig, ResolvedConfig } from "./types.js";
 
 // Injected at build time by tsup (see tsup.config.ts `define`). Falls back to
@@ -30,13 +31,32 @@ export function useLookoutContext(): LookoutContextValue {
 
 export interface LookoutProviderProps extends LookoutConfig {
   children: ReactNode;
+  /** Replace Lookout's blue accent with your own brand colour. Applies to
+   *  primary buttons, focus rings, and progress — everywhere the UI is
+   *  saying "this is the main action". Any CSS colour. */
+  accentColor?: string;
+  /** Colour drawn ON the accent (button labels). Defaults to white; set it
+   *  when your accent is light enough that white would be unreadable. */
+  accentTextColor?: string;
 }
 
 export function LookoutProvider({
   children,
+  accentColor,
+  accentTextColor,
   ...config
 }: LookoutProviderProps) {
   const resolved = useMemo(() => resolveConfig(config), [config]);
+
+  // Applied to the document root, not a wrapper: the stop dialog and the
+  // editor portal to document.body, so a scoped subtree wouldn't reach
+  // them. Restored on unmount so a page that mounts Lookout temporarily
+  // doesn't leave its accent behind.
+  useEffect(() => {
+    if (!accentColor && !accentTextColor) return;
+    setAccentColor(accentColor ?? null, accentTextColor ?? null);
+    return () => setAccentColor(null, null);
+  }, [accentColor, accentTextColor]);
 
   // Telemetry string, e.g. "Lookout Sdk (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)".
   const clientInfo = useMemo(

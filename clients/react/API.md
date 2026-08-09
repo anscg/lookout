@@ -1,6 +1,6 @@
 # @lookout/react — React SDK Documentation
 
-**Package:** `@lookout/react` v0.1.0
+**Package:** `@lookout/react` v0.3.7
 **Peer Dependencies:** React 18+ or 19+
 **Exports:** ESM + CJS with TypeScript declarations
 
@@ -97,6 +97,8 @@ Context provider that configures the API client and settings for all child hooks
 | `statusPollIntervalMs` | `number` | `3000` | Compilation status poll interval (ms) |
 | `autoStart` | `boolean` | `false` | Auto-start screen sharing on mount |
 | `appName` | `string` | — | Host program embedding Lookout (e.g. `"Fallout"`). Reported in client telemetry as `Lookout Sdk (Fallout)/<version> (…)` and surfaced server-side as the session's `clientInfo`. |
+| `accentColor` | `string` | `#3b82f6` | Replace Lookout's blue with your brand colour — primary buttons, focus rings, progress. Any CSS colour. |
+| `accentTextColor` | `string` | `#fff` | Colour drawn *on* the accent. Set it if your accent is light enough that white labels would be unreadable. |
 | `children` | `ReactNode` | *required* | Child components |
 
 #### `TokenProvider`
@@ -183,7 +185,7 @@ const { state, actions } = useLookout();
 | `stopSharing` | `() => void` | Stop capture source without stopping session (auto-pauses) |
 | `pause` | `() => Promise<void>` | Pause the session |
 | `resume` | `() => Promise<void>` | Resume a paused session |
-| `stop` | `(options?: { name?: string }) => Promise<void>` | Stop the session and trigger compilation. Optionally name the timelapse before stopping. |
+| `stop` | `(options?: { name?: string; edit?: boolean }) => Promise<void>` | Stop the session and trigger compilation. Optionally name it first. `edit: true` holds it unpublished so the user can cut it before programs see it. |
 | `selectCamera` | `(deviceId: string) => void` | Select a camera device by ID. Works during preview and recording. |
 | `startPreview` | `() => Promise<void>` | Acquire camera stream for live preview without starting the capture loop. Camera mode only. |
 | `stopPreview` | `() => void` | Stop the preview stream. Camera mode only. |
@@ -334,7 +336,7 @@ const session = useSession();
 | `error` | `string \| null` | Error message |
 | `pause` | `() => Promise<void>` | Pause the session |
 | `resume` | `() => Promise<void>` | Resume the session |
-| `stop` | `(name?: string) => Promise<void>` | Stop the session. Optionally name the timelapse before stopping (non-fatal if rename fails). |
+| `stop` | `(name?: string, opts?: { edit?: boolean }) => Promise<void>` | Stop the session. Optionally name it first (non-fatal if rename fails). `edit: true` requests an edit hold. |
 | `reload` | `() => Promise<void>` | Re-fetch session from server |
 | `syncStatus` | `() => Promise<void>` | Best-effort fetch of latest server status (used when a 409 surfaces in the uploader to reconcile local state) |
 | `updateTrackedSeconds` | `(seconds: number) => void` | Update tracked seconds locally |
@@ -364,6 +366,33 @@ const displaySeconds = useSessionTimer(trackedSeconds, isActive);
 | `isActive` | `boolean` | Whether to tick the timer. Set to `false` on pause/stop/compile to snap display to the server value |
 
 **Returns:** `number` — display seconds (`baseRef + capped interpolated elapsed` while active; `baseRef` when inactive)
+
+---
+
+### `useSessionTimerState(serverTrackedSeconds, isActive)`
+
+Same timer, but returns the interpolation **anchor** alongside the display value. Use this when another surface has to tick its own copy of the clock — the desktop app's menu-bar title (Rust) and tray popup window both do, so they stay live while the main WebView is throttled.
+
+**Returns:** `SessionTimerState`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `displaySeconds` | `number` | What to render |
+| `baseSeconds` | `number` | The ratcheted server-authoritative value the display is anchored to |
+| `anchorAt` | `number` | `Date.now()` when `baseSeconds` last advanced |
+
+### `deriveDisplaySeconds(baseSeconds, anchorAt, isActive, now)`
+
+The pure function behind the hook, exported so independently-ticking surfaces derive the clock identically instead of reimplementing it:
+
+```ts
+const seconds = deriveDisplaySeconds(baseSeconds, anchorAt, isRecording, Date.now());
+```
+
+Any surface ticking its own clock must go through this (or mirror it exactly — see `tray_display_seconds` in the desktop crate). Two rules are easy to get wrong and both produce a visibly wrong clock:
+
+- **Interpolate from `baseSeconds`, never from `displaySeconds`.** The latter already contains the interpolated remainder, so extrapolating from it double-counts and the surface drifts ahead of the main window.
+- **Pass through `anchorAt` unchanged.** It marks when the base last advanced; re-stamping it to "now" on each push restarts the interpolation window and loses time the main window is still counting.
 
 ---
 
@@ -468,7 +497,18 @@ Drop-in recorder widget. Handles the full lifecycle: capture, upload, pause/resu
 <LookoutRecorder />
 ```
 
-No props — reads everything from context.
+**Props (`LookoutRecorderProps`):**
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `editing` | `boolean?` | Offer "Edit & save" when stopping (default `true`). Pass `false` to keep stopping a single click. |
+
+Everything else is read from context.
+
+**Stopping** opens a `<StopChoiceModal>` with three ways out: keep
+recording, stop and save, or edit and save. Choosing to edit stops the
+session with a hold, so it compiles without publishing, and swaps the view
+for a `<TimelapseEditor>` until the user publishes.
 
 **Renders based on status:**
 - `loading` — spinner
@@ -699,6 +739,107 @@ Full session detail view with video player, stats, and compilation polling. Stan
 | `apiBaseUrl` | `string` | Server API base URL |
 | `onBack` | `() => void?` | Back button handler |
 | `onArchive` | `() => void?` | Archive button handler |
+| `onEdit` | `() => void?` | Override the review panel's "Edit & save" — open your own editor surface instead of the inline one |
+
+A session in its **edit hold** (stopped with `edit`, not yet published)
+renders a review panel instead of the compile spinner: "Edit & save" opens
+the editor, "Publish as recorded" ends the hold immediately, and a
+countdown shows when it publishes on its own. Pass `onEdit` to open your
+own editor surface (the desktop app opens a separate window).
+
+---
+
+### `useEditLease(client, active?)`
+
+Holds a held session's **edit lease** open while an editing surface is
+mounted. The server publishes a held timelapse once nothing has renewed the
+lease for ~2 minutes, so "is the user still editing?" is answered by the
+surface existing rather than by a countdown. Returns `false` once the
+session is no longer held (published, failed, or past the ceiling).
+
+Called automatically by `<TimelapseEditor>` and by `<SessionDetail>`'s
+review panel. Use it directly only if you build your own editing surface.
+
+---
+
+### `<StopChoiceModal>`
+
+The stop confirmation: keep recording, stop and save, or edit and save.
+Rendered automatically by `<LookoutRecorder>`; exported for custom
+recorders.
+
+**Props (`StopChoiceModalProps`):**
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `onResume` | `() => void` | Keep recording |
+| `onStopAndSave` | `(name: string \| null) => void` | Stop and publish as recorded |
+| `onEditAndSave` | `((name: string \| null) => void)?` | Stop with a hold, then edit. Omit to hide the option |
+| `withName` | `boolean?` | Show a name field (default `false`) |
+| `loading` | `boolean?` | Disable inputs while the stop is in flight |
+
+---
+
+### `<TimelapseEditor>`
+
+The "Edit & save" step. The session is compiled but deliberately
+**unpublished**, so nothing downstream has consumed it yet; this previews
+that video (1 second = 1 capture unit = 1 real-world minute), lets the user
+drag out cut regions on a filmstrip timeline, and publishes — with the cuts
+baked in (a lossless server-side stream copy) or without them. Standalone
+(no provider needed).
+
+```tsx
+<TimelapseEditor
+  token="..."
+  apiBaseUrl="https://lookout.hackclub.com"
+  onApplied={() => refetchStatus()}
+/>
+```
+
+**Props (`TimelapseEditorProps`):**
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `token` | `string` | Session token |
+| `apiBaseUrl` | `string` | Server API base URL |
+| `onApplied` | `() => void?` | The timelapse was published — return to your detail view and poll `/status` |
+| `onCancel` | `() => void?` | Dismiss the editor. Only surfaced when it can't load; there is no "leave without deciding" exit |
+| `onCutsChange` | `((cuts, dirty) => void)?` | Fires on every cut-list change, so a host can publish the working edit when the user closes it |
+
+The editor normally opens **before** the preview video exists — the compile
+starts at stop and takes tens of seconds — so it polls through that state
+and shows a `<ProgressRing>` sized from the session's capture count, then
+swaps to the timeline when the video lands.
+
+`<LookoutRecorder>` and `<SessionDetail>` both present this in an
+**`<Overlay>`** — a modal panel portalled to `document.body`, so it gets
+the viewport rather than whatever width the host gave the recorder, and so
+a transformed ancestor in the host page can't trap it. It is deliberately
+not dismissible: closing without deciding would leave the session
+unpublished, so Save is the way out (and if the tab goes away, the edit
+lease lapses and it publishes as recorded).
+
+The timeline ruler labels at a step chosen from the track width
+(`rulerStep`), with a grabbable playhead tag above it. While mounted the
+editor holds the session's **edit lease** (see `useEditLease`),
+so there's no deadline for the user to race: the timelapse stays
+unpublished for as long as the editor is open, and publishes on its own
+about two minutes after it closes.
+
+**Interactions:**
+- **Drag on the filmstrip** creates a cut region in one gesture (edges snap to
+  whole minutes); **plain click seeks**; the **ruler lane scrubs**.
+- Regions are first-class objects: drag to move, edge handles to resize
+  (the preview follows the dragged edge, showing the boundary frame),
+  click to select, Delete/Backspace to remove.
+- **Space** plays/pauses. Playback **skips cut regions** (previewing the
+  published result); scrubbing passes through them with a "will be removed"
+  overlay so edges can be judged.
+- Footer shows server-authoritative "kept / removed" durations; recording
+  pauses appear as dashed gap markers on the strip.
+- Shows "n edits remaining" as the per-session recompile budget runs low,
+  and a not-editable state once the original video has been purged.
 
 ---
 
@@ -777,10 +918,14 @@ const session = await client.getSession();
 | `uploadToR2` | `(uploadUrl, blob) => Promise<void>` | PUT blob to presigned URL |
 | `pause` | `() => Promise<PauseResponse>` | Pause session |
 | `resume` | `() => Promise<ResumeResponse>` | Resume session |
-| `stop` | `() => Promise<StopResponse>` | Stop session |
+| `stop` | `(opts?: { edit?: boolean }) => Promise<StopResponse>` | Stop session; `edit: true` holds it for editing before publication |
 | `rename` | `(name: string) => Promise<RenameSessionResponse>` | Rename the timelapse |
 | `getStatus` | `() => Promise<StatusResponse>` | Poll compilation status |
 | `getVideo` | `() => Promise<VideoResponse>` | Get video URL |
+| `getUnits` | `() => Promise<UnitsResponse>` | Editor metadata: unit map, cuts, presigned preview-video URL |
+| `setCuts` | `(cuts: CutInterval[]) => Promise<SetCutsResponse>` | Replace the session's cut list (`[]` clears). Only during an edit hold |
+| `applyCuts` | `() => Promise<ApplyCutsResponse>` | Publish the held timelapse with its cuts baked in |
+| `heartbeatEditing` | `() => Promise<EditHeartbeatResponse>` | Renew the edit lease — "an editor is still open" |
 
 ---
 
@@ -792,12 +937,41 @@ The SDK exports styled UI primitives used by its components. All use inline styl
 |--------|-------------|
 | `Button` | Styled button with variants: `primary`, `secondary`, `success`, `warning`, `danger`, `ghost` and sizes: `sm`, `md`, `lg` |
 | `Spinner` | Loading spinner with sizes: `sm`, `md`, `lg` |
+| `ProgressRing` | Determinate circular progress (`progress` 0–1, optional `showPercent`) — for waits long enough that a spinner under-informs |
+| `MinutesFlow` | A minute count with rolling digits (`@number-flow/react`), splitting into hours past 60 |
 | `Badge` | Status badge with variants: `default`, `overlay` |
 | `Card` | Styled card container |
 | `ErrorDisplay` | Error message display with variants: `inline`, `banner`, `page` |
 | `PageContainer` | Page layout wrapper |
+| `Overlay` | Modal panel portalled to `document.body` (immune to transformed ancestors), with backdrop, scroll lock, and optional dismiss |
 | `Skeleton` / `GallerySkeleton` / `SessionDetailSkeleton` / `RecordPageSkeleton` | Loading skeletons |
 | `colors` / `spacing` / `radii` / `fontSize` / `fontWeight` / `statusConfig` | Theme tokens |
+| `setAccentColor(accent, on?)` | Imperative accent override, for surfaces used without `<LookoutProvider>` (`<SessionDetail>`, `<TimelapseEditor>`). Pass `null` to restore the default. |
+
+### Theming the accent
+
+```tsx
+<LookoutProvider token="…" apiBaseUrl="…" accentColor="#16a34a">
+  <LookoutRecorder />
+</LookoutProvider>
+```
+
+That recolours the primary buttons ("Edit & save", "Save"), keyboard focus
+rings, and the compile progress ring — everywhere the UI says *this is the
+main action*. The hover shade is derived from your colour with
+`color-mix`, so you don't supply a second one.
+
+Two deliberate limits:
+
+- **Semantic colours don't change.** Success green, warning amber, and the
+  red that marks removed footage carry meaning rather than brand, and a
+  green "this will be deleted" would be worse than an off-brand one.
+- **It's set on the document root, not a wrapper.** The stop dialog and the
+  editor portal to `document.body`, so a scoped subtree wouldn't reach
+  them. The provider restores the previous value on unmount.
+
+For surfaces rendered outside a provider, call `setAccentColor("#16a34a")`
+once at startup instead.
 
 ---
 

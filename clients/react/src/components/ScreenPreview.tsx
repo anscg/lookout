@@ -11,8 +11,10 @@ export function ScreenPreview({ imageUrl }: ScreenPreviewProps) {
 
   return (
     <div style={styles.container}>
-      <img src={imageUrl} alt="Last captured screenshot" style={styles.image} />
-      <span style={styles.label}>Latest screenshot</span>
+      {/* On clip sessions this is the final frame of the latest clip (the
+          upload itself is video); on legacy sessions it's the screenshot. */}
+      <img src={imageUrl} alt="Latest capture" style={styles.image} />
+      <span style={styles.label}>Latest capture</span>
     </div>
   );
 }

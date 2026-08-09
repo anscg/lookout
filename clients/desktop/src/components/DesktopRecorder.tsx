@@ -3,7 +3,8 @@ import { invoke } from "../logger.js";
 import { listen, emit } from "@tauri-apps/api/event";
 import {
   useSession,
-  useSessionTimer,
+  useSessionTimerState,
+  computeBestTrackedSeconds,
   formatTime,
   Button,
   ErrorDisplay,
@@ -18,9 +19,11 @@ import {
 } from "@lookout/react";
 import { getReport } from "../logger.js";
 import { NamingModal } from "./NamingModal.js";
+import { openEditorWindow } from "./EditorWindow.js";
 import { useNativeCapture } from "../hooks/useNativeCapture.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
+import { useWindowFocus } from "../hooks/useWindowFocus.js";
 import { useCameraCapture, waitForVideoReady } from "../hooks/useCameraCapture.js";
 import { useSessionNotifications } from "../hooks/useSessionNotifications.js";
 
@@ -32,24 +35,29 @@ interface DesktopRecorderProps {
   onViewSession: (token: string) => void;
 }
 
-const API_BASE = "https://lookout.hackclub.com";
+import { getApiBase } from "../serverConfig.js";
 
-function RecorderPreviewItem({ 
-  src, 
-  isMain, 
-  captureUrl, 
-  isMulti 
-}: { 
-  src: CaptureSource; 
-  isMain: boolean; 
-  captureUrl: string | null; 
+// Read once per webview load; Settings → Server reloads the view on change.
+const API_BASE = getApiBase();
+
+function RecorderPreviewItem({
+  src,
+  captureUrl,
+  isMulti,
+  live,
+}: {
+  src: CaptureSource;
+  /** Latest uploaded capture, shown when the live loop is parked. */
+  captureUrl: string | null;
   isMulti: boolean;
+  /** Poll the native live preview. When false, useScreenPreview fetches at
+   *  most one frame and parks — the tile freezes (or shows captureUrl)
+   *  instead of burning a native capture per second off-focus. */
+  live: boolean;
 }) {
-  const { previewUrl: livePreviewUrl } = useScreenPreview(
-    isMain && captureUrl ? null : src,
-    1
-  );
-  const previewUrl = (isMain ? captureUrl : null) || livePreviewUrl;
+  const { previewUrl: livePreviewUrl } = useScreenPreview(src, 1, live);
+  const showingLive = live && !!livePreviewUrl;
+  const previewUrl = showingLive ? livePreviewUrl : captureUrl ?? livePreviewUrl;
 
   if (!previewUrl) {
     return (
@@ -75,13 +83,13 @@ function RecorderPreviewItem({
         alt="Screen preview"
         style={{ width: "100%", height: "100%", objectFit: isMulti ? "cover" : "contain", display: "block" }}
       />
-      {isMain && (
+      {!isMulti && (
         <span style={{
           position: "absolute", bottom: 6, right: 6, fontSize: fontSize.xs,
           color: colors.badge.overlayText, background: colors.badge.overlayBg,
           padding: "2px 6px", borderRadius: radii.sm,
         }}>
-          {captureUrl ? "Latest capture" : "Live preview"}
+          {showingLive ? "Preview" : captureUrl ? "Latest capture" : "Preview"}
         </span>
       )}
     </div>
@@ -91,15 +99,15 @@ function RecorderPreviewItem({
 function formatTimeTray(totalSeconds: number): string {
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
-  
+
   if (h > 0) return `${h}h ${m}m`;
-  if (m === 0) return `< 1m`;
   return `${m}m`;
 }
 
 export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource, onBack, onViewSession }: DesktopRecorderProps) {
   const isMacOS = navigator.userAgent.includes("Mac");
   const isCamera = source.length === 1 && source[0].type === "camera";
+  const windowFocused = useWindowFocus();
   const session = useSession();
   const camera = useCameraCapture();
 
@@ -122,6 +130,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     source,
     isCamera ? cameraFrameCapture : undefined,
     handleSessionTerminated,
+    session.trackedSeconds,
   );
 
   // Native OS notifications: alert the user when a session pauses, errors,
@@ -157,10 +166,23 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     };
   }, [capture.isCapturing, capture.lastCaptureAt]);
 
-  const displaySeconds = useSessionTimer(
-    capture.trackedSeconds || session.trackedSeconds,
-    capture.isCapturing,
-  );
+  // The single authoritative baseline for every surface that shows the time
+  // (main window, menu-bar title, tray popup). Both inputs are server-derived;
+  // `max` rather than `||` so a capture-local value that hasn't caught up with
+  // the session poll yet can't drag the baseline down.
+  const bestTrackedSeconds = computeBestTrackedSeconds({
+    sessionTrackedSeconds: session.trackedSeconds,
+    uploaderTrackedSeconds: capture.trackedSeconds,
+  });
+
+  const timer = useSessionTimerState(bestTrackedSeconds, capture.isCapturing);
+  const displaySeconds = timer.displaySeconds;
+
+  // Read the baseline from a ref inside async handlers: `session.resume()`
+  // awaits a round trip that itself refreshes `session.trackedSeconds`, so the
+  // value captured at render time is stale by the time we seed the ticker.
+  const bestTrackedRef = useRef(bestTrackedSeconds);
+  bestTrackedRef.current = bestTrackedSeconds;
 
   const [pauseLoading, setPauseLoading] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
@@ -211,7 +233,11 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
         await startCameraAndWait();
         // Camera sources use JS-side capture loop, so we need to
         // explicitly start the Rust tray ticker for the menu bar time.
-        invoke("start_tray_ticker", { trackedSeconds: 0 }).catch(console.error);
+        // Seed it with the session's existing time — hardcoding 0 made the
+        // menu bar restart from "0m" when recording an already-started session.
+        invoke("start_tray_ticker", {
+          trackedSeconds: session.trackedSeconds,
+        }).catch(console.error);
       }
       capture.startCapturing();
     })();
@@ -237,12 +263,14 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     };
   }, []);
 
-  // Finalize stop: optionally name, then stop the session.
-  const handleConfirmStop = useCallback(async (name: string | null) => {
+  // Finalize stop: optionally name, then stop the session. With `edit`,
+  // the timelapse is held unpublished after compiling so the user can cut
+  // it first — programs only ever observe it once, finished.
+  const finalizeStop = useCallback(async (name: string | null, edit: boolean) => {
     if (stopActionHandled.current) return;
     stopActionHandled.current = true;
     setStopLoading(true);
-    console.log(`[session] stopping, name: ${name?.trim() || "(none)"}`);
+    console.log(`[session] stopping, name: ${name?.trim() || "(none)"}, edit: ${edit}`);
     if (name && name.trim()) {
       try {
         await fetch(`${API_BASE}/api/sessions/${token}/name`, {
@@ -256,9 +284,11 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     }
 
     try {
-      await session.stop();
+      // Name was already applied above via the rename endpoint.
+      await session.stop(undefined, { edit });
       console.log("[session] stopped, navigating to session detail");
       if (isCamera) camera.stopStream();
+      if (edit) void openEditorWindow(token);
       setIsPrompting(false);
       setStopLoading(false);
     } catch (e) {
@@ -267,6 +297,16 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
       stopActionHandled.current = false;
     }
   }, [token, session, isCamera, camera]);
+
+  const handleConfirmStop = useCallback(
+    (name: string | null) => finalizeStop(name, false),
+    [finalizeStop],
+  );
+
+  const handleEditAndSave = useCallback(
+    (name: string | null) => finalizeStop(name, true),
+    [finalizeStop],
+  );
 
   const handlePause = useCallback(async () => {
     console.log("[session] pausing...");
@@ -287,7 +327,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
       console.log(`[session] restarting camera stream for device ${cameraDeviceId}`);
       await startCameraAndWait();
     }
-    invoke("resume_tray_ticker", { trackedSeconds: capture.trackedSeconds }).catch(console.error);
+    invoke("resume_tray_ticker", { trackedSeconds: bestTrackedRef.current }).catch(console.error);
     await capture.startCapturing();
     console.log("[session] resumed");
     setResumeLoading(false);
@@ -312,7 +352,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     if (isCamera) {
       await startCameraAndWait();
     }
-    invoke("resume_tray_ticker", { trackedSeconds: capture.trackedSeconds }).catch(console.error);
+    invoke("resume_tray_ticker", { trackedSeconds: bestTrackedRef.current }).catch(console.error);
     await capture.startCapturing();
     setResumeLoading(false);
   }, [capture, session, isCamera, cameraDeviceId, camera, startCameraAndWait]);
@@ -336,9 +376,27 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
 
   const screenshotCount = session.screenshotCount + capture.screenshotCount;
 
-  // Keep a ref of the latest state
-  const trayStateRef = useRef({ displaySeconds, screenshotCount, controlMode });
-  trayStateRef.current = { displaySeconds, screenshotCount, controlMode };
+  // Keep a ref of the latest state for the tray popup.
+  //
+  // This carries the interpolation ANCHOR (`baseSeconds` + `anchorAt`), never
+  // `displaySeconds`. The popup ticks its own clock, so handing it an
+  // already-interpolated value made it extrapolate on top of an
+  // extrapolation — it drifted ahead of the main window and never came back.
+  // `anchorAt` must likewise be when the base last advanced, not `Date.now()`
+  // at push time: re-stamping it on every push restarted the popup's
+  // interpolation window and lost the seconds the main window kept.
+  const trayStateRef = useRef({
+    baseSeconds: timer.baseSeconds,
+    screenshotCount,
+    controlMode,
+    anchorAt: timer.anchorAt,
+  });
+  trayStateRef.current = {
+    baseSeconds: timer.baseSeconds,
+    screenshotCount,
+    controlMode,
+    anchorAt: timer.anchorAt,
+  };
 
   // Listen for tray requesting initial state (fallback)
   useEffect(() => {
@@ -355,7 +413,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
   // The Rust tray ticker is the authoritative source for the menu-bar title
   // and runs at 1s cadence; calling update_tray_time from JS every second
   // creates two writers fighting over the title, which produces the visible
-  // flicker between "<1m"/"1m" and "1m"/"2m" at the minute boundaries
+  // flicker between "0m"/"1m" and "1m"/"2m" at the minute boundaries
   // (JS interpolates to one second, Rust to another).
   //
   // We still split the writes:
@@ -377,23 +435,34 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controlMode]);
 
-  // Per-second state sync (tray window, not menu-bar title)
+  // Tray-window state sync — event-driven, NOT per-second.
+  //
+  // The tray window ticks its own clock from the anchor we push, and the Rust
+  // ticker owns the menu-bar title. So the only things worth pushing over IPC
+  // are the ones the tray can't derive locally: screenshot count changes,
+  // pause/resume, and a new anchor when the server credits time. Syncing every
+  // second (3 IPC calls + a broadcast event) was pure overhead that also
+  // drowned the debug log in [ipc] noise.
   useEffect(() => {
-    const state = {
-      displaySeconds,
-      screenshotCount,
-      controlMode,
-      updatedAt: Date.now(),
-    };
+    const state = trayStateRef.current;
     invoke("set_tray_state", { state }).catch(console.error);
     emit("tray-state", state).catch(console.error);
+  }, [screenshotCount, controlMode, timer.baseSeconds, timer.anchorAt]);
 
-    // Sync tracked seconds to Rust tray timer so it stays accurate
-    // after server corrections or session timer updates.
-    if (capture.trackedSeconds > 0) {
-      invoke("sync_tray_tracked_seconds", { trackedSeconds: capture.trackedSeconds }).catch(console.error);
+  // Sync the baseline to the Rust tray timer whenever it advances. Rust
+  // ratchets and re-anchors on its own, so pushing the same value twice is a
+  // no-op there.
+  //
+  // Uses `bestTrackedSeconds`, not `capture.trackedSeconds`: the latter is
+  // hook-local state that starts at 0, so resuming a session that already had
+  // recorded time (app reopened on a paused session) seeded the menu bar with
+  // 0 and it showed "0m" next to a main window reading 25:00 until the first
+  // confirm landed.
+  useEffect(() => {
+    if (bestTrackedSeconds > 0) {
+      invoke("sync_tray_tracked_seconds", { trackedSeconds: bestTrackedSeconds }).catch(console.error);
     }
-  }, [displaySeconds, screenshotCount, controlMode]);
+  }, [bestTrackedSeconds]);
 
   // Hide tray on unmount or session end
   useEffect(() => {
@@ -502,11 +571,17 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
           </span>
         </div>
         <span style={{ fontSize: fontSize.md, color: colors.text.secondary }}>
-          {screenshotCount} {screenshotCount === 1 ? "screenshot" : "screenshots"}
+          {/* One capture unit per recorded minute — a JPEG screenshot on
+              legacy sessions, a ~15-frame clip on clips sessions. */}
+          {screenshotCount} {screenshotCount === 1 ? "capture" : "captures"}
         </span>
       </div>
 
-      {/* Preview — fills available space */}
+      {/* Preview — fills available space. Once the Rust capture loop is
+          running it feeds this image directly: in-between frames arrive at
+          the clip cadence (20/min) while the window is focused, and stop
+          when it isn't — so the same element is a live preview when watched
+          and the latest capture when not. No separate preview loop. */}
       <div style={{
         flex: 1,
         minHeight: 0,
@@ -541,7 +616,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
               color: colors.badge.overlayText, background: colors.badge.overlayBg,
               padding: "2px 6px", borderRadius: radii.sm,
             }}>
-              Latest capture
+              {windowFocused && !isCamera ? "Preview" : "Latest capture"}
             </span>
           </div>
         ) : (
@@ -549,9 +624,9 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
             <RecorderPreviewItem
               key={`${src.type}:${src.id}`}
               src={src}
-              isMain={false}
               captureUrl={null}
               isMulti={source.length > 1}
+              live={windowFocused && !isCamera}
             />
           ))
         )}
@@ -641,6 +716,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
         <NamingModal
           loading={stopLoading}
           onConfirm={handleConfirmStop}
+          onEditAndSave={handleEditAndSave}
           onResume={handleResumeFromModal}
         />
       )}

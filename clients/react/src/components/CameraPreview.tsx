@@ -68,7 +68,7 @@ export function CameraPreview({ stream, fallbackImageUrl }: CameraPreviewProps) 
           borderRadius: radii.sm,
         }}
       >
-        {stream ? "Live preview" : "Latest capture"}
+        {stream ? "Preview" : "Latest capture"}
       </span>
     </div>
   );

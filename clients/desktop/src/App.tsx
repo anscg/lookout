@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { invoke } from "./logger.js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Gallery,
@@ -11,24 +12,51 @@ import {
   useTokenStore,
   useGallery,
   useHashRouter,
-  spacing,
+  type AddAnchor,
 } from "@lookout/react";
 import { getVersion } from "@tauri-apps/api/app";
+import { ArrowSquareOutIcon, PlusIcon } from "@phosphor-icons/react";
 import { isValidToken, extractToken } from "./utils.js";
-import { PermissionScreen } from "./components/PermissionScreen.js";
+import {
+  checkCameraPermission,
+  checkScreenRecordingPermission,
+} from "tauri-plugin-macos-permissions-api";
+import { PermissionScreen, permCacheKey } from "./components/PermissionScreen.js";
 import { RecordPage } from "./components/RecordPage.js";
 import { AddSessionPage } from "./components/AddSessionPage.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { TrayApp } from "./components/TrayApp.js";
+import {
+  EditorWindow,
+  EditorOpenPlaceholder,
+  useEditorWindowOpen,
+  openEditorWindow,
+  EDITED_EVENT,
+} from "./components/EditorWindow.js";
 import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
-import { useUpdateCheck } from "./hooks/useUpdateCheck.js";
-import { useBackgroundUpdate } from "./hooks/useBackgroundUpdate.js";
+import { useAppUpdate } from "./hooks/useAppUpdate.js";
 import { useAnnouncement } from "./hooks/useAnnouncement.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
-import { UpdateBanner } from "./components/UpdateBanner.js";
+import { UpdatePill } from "./components/UpdatePill.js";
+import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.js";
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
+import { getApiBase } from "./serverConfig.js";
 
-const API_BASE = "https://lookout.hackclub.com";
+// Read once per webview load; Settings → Server reloads the view on change.
+const API_BASE = getApiBase();
+
+// How long to keep watching a post-edit cut-compile for `complete` before
+// giving up on firing the redirect hook. The worker's assemble step alone
+// can run up to 30 min (ASSEMBLE_TIMEOUT_MS); add slack for queue wait and
+// the final upload so a legitimately slow compile is never abandoned.
+const REDIRECT_POLL_MAX_MS = 35 * 60_000;
+
+interface Program {
+  name: string;
+  displayName?: string;
+  newSessionUrl: string;
+  iconUrl?: string | null;
+}
 
 /** Pause a session by token. Fire-and-forget, logs errors. */
 async function pauseSession(token: string): Promise<void> {
@@ -58,35 +86,156 @@ export function App() {
   if (isTray) {
     return <TrayApp />;
   }
+  // Dedicated editor window (see EditorWindow.tsx). Branches before
+  // MainWindowApp so it skips the permission gates, vibrancy, deep-link
+  // handlers, and the rest of the main-window machinery.
+  const editorMatch = window.location.hash.match(/^#\/?editor\?token=([0-9a-fA-F]{64})/);
+  if (editorMatch) {
+    return <EditorWindow token={editorMatch[1]} />;
+  }
   return <MainWindowApp />;
 }
 
 function MainWindowApp() {
   const isMacOS = navigator.userAgent.includes("Mac");
-  const [screenPermGranted, setScreenPermGranted] = useState(!isMacOS);
-  const [cameraPermGranted, setCameraPermGranted] = useState(!isMacOS);
+  // A cached grant skips the permission gate (no boot flicker); a background
+  // re-check below yanks it back if the permission was revoked since.
+  const [screenPermGranted, setScreenPermGranted] = useState(
+    () => !isMacOS || localStorage.getItem(permCacheKey("screen")) === "1",
+  );
+  const [cameraPermGranted, setCameraPermGranted] = useState(
+    () => !isMacOS || localStorage.getItem(permCacheKey("camera")) === "1",
+  );
+
+  useEffect(() => {
+    if (!isMacOS) return;
+    (async () => {
+      try {
+        if (localStorage.getItem(permCacheKey("screen")) === "1" && !(await checkScreenRecordingPermission())) {
+          console.warn("[permissions] screen recording revoked — regating");
+          localStorage.removeItem(permCacheKey("screen"));
+          setScreenPermGranted(false);
+        }
+        if (localStorage.getItem(permCacheKey("camera")) === "1" && !(await checkCameraPermission())) {
+          console.warn("[permissions] camera revoked — regating");
+          localStorage.removeItem(permCacheKey("camera"));
+          setCameraPermGranted(false);
+        }
+      } catch {
+        // Plugin unavailable — leave the cached grants alone
+      }
+    })();
+  }, [isMacOS]);
   const [isWayland, setIsWayland] = useState(false);
   const { route, navigate } = useHashRouter();
   const tokenStore = useTokenStore();
-  const updateStatus = useUpdateCheck();
+  const appUpdate = useAppUpdate();
   const gallery = useGallery({
     apiBaseUrl: API_BASE,
     tokens: tokenStore.getAllTokenValues(),
   });
 
+  // While the editor window is up, the main window steps aside entirely —
+  // two views of the same session competing for attention is worse than
+  // one clear pointer to where the work is happening.
+  const editorWindowToken = useEditorWindowOpen();
+
+  // Bumped when an editor window applies cuts — remounts the open
+  // SessionDetail so it re-fetches (picks up the compiling → complete flip
+  // and the recompiled video) and refreshes gallery thumbnails.
+  const [editNonce, setEditNonce] = useState(0);
+  const galleryRefreshRef = React.useRef(gallery.refresh);
+  galleryRefreshRef.current = gallery.refresh;
+
+  // The redirect hook must fire exactly once per session, from whichever
+  // path observes the timelapse finish. Both paths funnel through here.
+  const redirectFiredRef = React.useRef<Set<string>>(new Set());
+  const fireRedirect = useCallback((token: string, url: string | null) => {
+    if (!url || redirectFiredRef.current.has(token)) return;
+    redirectFiredRef.current.add(token);
+    console.log("[app] firing redirect hook");
+    invoke("open_external_url", { url }).catch((e) =>
+      console.error("[app] redirect hook failed:", e),
+    );
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    listen<{ token: string; status?: string | null; redirectUrl?: string | null }>(
+      EDITED_EVENT,
+      (event) => {
+        console.log("[app] editor window published — refreshing");
+        setEditNonce((n) => n + 1);
+        galleryRefreshRef.current();
+
+        // Publishing from the editor can land instantly (no cuts) or after a
+        // cut-compile. Either way SessionDetail may mount on an
+        // already-complete session, and its onComplete deliberately doesn't
+        // fire for that — so the redirect hook would be silently skipped in
+        // the whole edit flow. Fire it from here instead.
+        const token = event.payload?.token;
+        if (!token) return;
+
+        // Instant publish (no cuts): the /compile response already told us
+        // it's `complete` and carried the redirect URL. Fire now — no poll.
+        if (event.payload?.status === "complete") {
+          fireRedirect(token, event.payload.redirectUrl ?? null);
+          return;
+        }
+
+        // A compile is running server-side. Poll until it's terminal.
+        // The worker's assemble step alone can run up to ASSEMBLE_TIMEOUT_MS
+        // (30 min); a fixed few-minute deadline abandoned long compiles
+        // before they finished. Cap at that budget plus queue/upload slack,
+        // and back off so a busy worker isn't hammered.
+        const deadline = Date.now() + REDIRECT_POLL_MAX_MS;
+        let delay = 2500;
+        const poll = async () => {
+          if (cancelled || Date.now() > deadline) return;
+          try {
+            const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
+            if (res.ok) {
+              const data = await res.json();
+              if (data.status === "complete") {
+                galleryRefreshRef.current();
+                fireRedirect(token, data.redirectUrl ?? null);
+                return;
+              }
+              if (data.status === "failed") return;
+            }
+          } catch {
+            // Transient — the retry below covers it.
+          }
+          delay = Math.min(delay * 1.5, 15_000);
+          setTimeout(poll, delay);
+        };
+        void poll();
+      },
+    ).then((fn) => { unlisten = fn; });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [fireRedirect]);
+
   // Initialize blacklisted apps sync from localStorage to Rust backend
   useBlacklistedApps();
 
-  // Request notification permission as soon as the app is past the update
-  // gate — so the OS prompt appears at launch, not deferred to recording start.
-  const updateSettled = updateStatus.state === "idle";
+  // Boot timing: first React commit and the frame after it (≈ first paint).
   useEffect(() => {
-    if (updateSettled) void ensureNotificationPermission();
-  }, [updateSettled]);
+    console.log(`[boot] app mounted at ${Math.round(performance.now())}ms`);
+    requestAnimationFrame(() =>
+      console.log(`[boot] first frame at ${Math.round(performance.now())}ms`),
+    );
+  }, []);
 
-  // Poll the update server in the background once past the launch update gate;
-  // surfaces a "restart to update" banner on the gallery when a build ships.
-  const backgroundUpdate = useBackgroundUpdate(updateSettled);
+  // Request notification permission at launch, not deferred to recording start.
+  useEffect(() => {
+    void ensureNotificationPermission();
+  }, []);
 
   // Admin-authored announcement banner; checked on open and every 15 min.
   const announcement = useAnnouncement();
@@ -95,6 +244,173 @@ function MainWindowApp() {
   useEffect(() => {
     invoke<boolean>("is_wayland").then(setIsWayland).catch(() => {});
   }, []);
+
+  // Program registry cache for the + button's native popup menu. Warmed at
+  // launch and refreshed on every open so the menu appears instantly with
+  // whatever we have; the AddSessionPage stays the fallback (paste-a-link,
+  // empty registry, non-macOS).
+  const programsRef = React.useRef<Program[]>([]);
+  const fetchPrograms = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/programs`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.programs)) {
+        programsRef.current = data.programs;
+        // Warm the icon cache so the menu never opens with fallback symbols
+        // while images load — the Swift-side cache on macOS, the browser's
+        // HTTP cache for the DOM popup elsewhere.
+        const urls = programsRef.current
+          .map((p) => p.iconUrl)
+          .filter((u): u is string => !!u);
+        if (urls.length) {
+          if (isMacOS) {
+            invoke("prefetch_add_menu_icons", { urls }).catch(() => {});
+          } else {
+            for (const url of urls) new Image().src = url;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[programs] failed to load registry:", e);
+    }
+  }, [isMacOS]);
+  useEffect(() => {
+    void fetchPrograms();
+  }, [fetchPrograms]);
+
+  // Windows/Linux add menu — a DOM replica of the macOS NSPanel popup.
+  const [addMenu, setAddMenu] = useState<{ items: AddMenuPopupItem[]; anchor: AddAnchor } | null>(null);
+
+  /** Acts on an add-menu choice, from either the native panel or the DOM popup. */
+  const handleMenuChoice = useCallback(
+    async (choice: string | null) => {
+      if (!choice) return; // dismissed
+      if (choice === "create-new") {
+        navigate({ page: "add" });
+        return;
+      }
+      const program = programsRef.current.find((p) => `program:${p.name}` === choice);
+      if (!program) return;
+      try {
+        await invoke("open_external_url", { url: program.newSessionUrl });
+      } catch (e) {
+        console.error("[add-menu] failed to open program url:", e);
+        navigate({ page: "add" });
+      }
+    },
+    [navigate],
+  );
+
+  const handleAdd = useCallback(
+    async (anchor: AddAnchor) => {
+      // Clicking the + while the DOM popup is open toggles it closed (the
+      // popup ignores pointerdowns on the anchor so this click reaches us).
+      if (addMenu) {
+        setAddMenu(null);
+        return;
+      }
+      const programs = programsRef.current;
+      void fetchPrograms(); // refresh behind the menu for next open
+      if (programs.length === 0) {
+        navigate({ page: "add" });
+        return;
+      }
+      if (!isMacOS) {
+        setAddMenu({
+          items: [
+            ...programs.map((p) => ({
+              id: `program:${p.name}`,
+              label: p.displayName || p.name,
+              iconUrl: p.iconUrl ?? undefined,
+              // Stays visible while the icon loads or when a program has none.
+              fallbackIcon: <ArrowSquareOutIcon size={15} weight="bold" />,
+            })),
+            { separator: true },
+            { id: "create-new", label: "Create new timelapse", fallbackIcon: <PlusIcon size={15} weight="bold" /> },
+          ],
+          anchor,
+        });
+        return;
+      }
+      const entries = [
+        ...programs.map((p) => ({
+          id: `program:${p.name}`,
+          label: p.displayName || p.name,
+          // The symbol stays as the fallback while the icon loads or when a
+          // program has none.
+          symbol: "arrow.up.forward.app",
+          iconUrl: p.iconUrl ?? undefined,
+        })),
+        { separator: true },
+        { id: "create-new", label: "Start from link", symbol: "plus" },
+      ];
+      let choice: string | null;
+      try {
+        choice = await invoke<string | null>("show_add_menu", { entries, anchor });
+      } catch (e) {
+        console.warn("[add-menu] native menu failed, falling back to page:", e);
+        navigate({ page: "add" });
+        return;
+      }
+      await handleMenuChoice(choice);
+    },
+    [isMacOS, addMenu, fetchPrograms, navigate, handleMenuChoice],
+  );
+
+  // Opens a session the way clicking its card would: recordable sessions go to
+  // the record page, finished ones to their detail view.
+  const openSession = useCallback(
+    (token: string) => {
+      const session = gallery.sessions.find((s) => s.token === token);
+      if (session && ["pending", "active", "paused"].includes(session.status)) {
+        navigate({ page: "record", token });
+      } else {
+        navigate({ page: "session", token });
+      }
+    },
+    [gallery.sessions, navigate],
+  );
+
+  const archiveSession = useCallback(
+    async (token: string) => {
+      const yes = await confirm("Are you sure you want to archive this session?", {
+        title: "Archive Session",
+        kind: "warning",
+      });
+      if (yes) {
+        tokenStore.archiveToken(token);
+        gallery.refresh();
+      }
+    },
+    [tokenStore, gallery],
+  );
+
+  // Native right-click menu for a gallery card. Uses Tauri's menu plugin so the
+  // popup is a real OS context menu rather than a DOM overlay.
+  const handleSessionContextMenu = useCallback(
+    async (token: string) => {
+      const session = gallery.sessions.find((s) => s.token === token);
+      const items: (MenuItem | PredefinedMenuItem)[] = [
+        await MenuItem.new({ text: "Open", action: () => openSession(token) }),
+      ];
+      if (session && session.status === "complete") {
+        items.push(
+          await MenuItem.new({
+            text: "Open in Editor",
+            action: () => { void openEditorWindow(token); },
+          }),
+        );
+      }
+      items.push(await PredefinedMenuItem.new({ item: "Separator" }));
+      items.push(
+        await MenuItem.new({ text: "Archive", action: () => { void archiveSession(token); } }),
+      );
+      const menu = await Menu.new({ items });
+      await menu.popup();
+    },
+    [gallery.sessions, openSession, archiveSession],
+  );
 
   // Deep link handler -- saves token and navigates appropriately.
   // If currently recording another session, pauses it first.
@@ -213,14 +529,14 @@ function MainWindowApp() {
       // So we just rely on standard browser matchMedia to get the universal native standard.
       const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
       const getSystemTheme = () => mediaQuery.matches ? "dark" : "light";
-      
+
       const applyTheme = () => {
         const theme = getSystemTheme();
         updateTheme(theme);
         // Force the Tauri window GTK decorations to match the media query since winit is confused
         getCurrentWindow().setTheme(theme).catch(() => {});
       };
-      
+
       applyTheme();
 
       const listener = () => applyTheme();
@@ -269,7 +585,7 @@ function MainWindowApp() {
     const prevRootBg = root?.style.background ?? "";
 
     let effectsApplied = false;
-    
+
     const isLinux = navigator.userAgent.toLowerCase().includes("linux");
     if (!isLinux) {
       invoke("enable_vibrancy")
@@ -302,6 +618,10 @@ function MainWindowApp() {
 
   // Step 2: Route
   const content = (() => {
+    // The editor owns the session while its window is open.
+    if (editorWindowToken) {
+      return <EditorOpenPlaceholder token={editorWindowToken} />;
+    }
     switch (route.page) {
       case "gallery":
         return (
@@ -309,38 +629,14 @@ function MainWindowApp() {
             sessions={gallery.sessions}
             loading={gallery.loading}
             error={gallery.error}
-            onSessionClick={(token) => {
-              const session = gallery.sessions.find((s) => s.token === token);
-              if (session && ["pending", "active", "paused"].includes(session.status)) {
-                navigate({ page: "record", token });
-              } else {
-                navigate({ page: "session", token });
-              }
-            }}
-            onArchive={async (token) => {
-              const yes = await confirm("Are you sure you want to archive this session?", { title: "Archive Session", kind: "warning" });
-              if (yes) {
-                tokenStore.archiveToken(token);
-                gallery.refresh();
-              }
-            }}
-            onAdd={() => navigate({ page: "add" })}
-            onSettings={isWayland ? undefined : () => navigate({ page: "settings" })}
-            banner={
-              announcement || backgroundUpdate.availableVersion ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
-                  {/* Announcement sits above the update banner. */}
-                  {announcement && <AnnouncementBanner announcement={announcement} />}
-                  {backgroundUpdate.availableVersion && (
-                    <UpdateBanner
-                      version={backgroundUpdate.availableVersion}
-                      restarting={backgroundUpdate.restarting}
-                      onRestart={backgroundUpdate.restart}
-                    />
-                  )}
-                </div>
-              ) : undefined
-            }
+            onSessionClick={openSession}
+            onArchive={archiveSession}
+            onSessionContextMenu={handleSessionContextMenu}
+            onAdd={handleAdd}
+            // Always available: the Server subpage works everywhere; only the
+            // Filtered Apps subpage is Wayland-restricted (it shows a notice).
+            onSettings={() => navigate({ page: "settings" })}
+            banner={announcement ? <AnnouncementBanner announcement={announcement} /> : undefined}
           />
         );
       case "settings":
@@ -378,9 +674,17 @@ function MainWindowApp() {
       case "session":
         return (
           <SessionDetail
-            key={route.token}
+            key={`${route.token}:${editNonce}`}
             token={route.token}
             apiBaseUrl={API_BASE}
+            onEdit={() => { void openEditorWindow(route.token); }}
+            onComplete={({ redirectUrl }) => {
+              // Redirect hook: the session's creator asked us to send the
+              // user somewhere once their timelapse is ready. Shared
+              // de-dupe with the post-edit watcher above, so a session
+              // seen finishing by both paths only redirects once.
+              fireRedirect(route.token, redirectUrl);
+            }}
             onBack={() => {
               gallery.refresh();
               navigate({ page: "gallery" });
@@ -429,46 +733,45 @@ function MainWindowApp() {
     Sentry.setTag("session_token", token ?? null);
   }, [route]);
 
-  const routeKey = `${route.page}:${(route as { token?: string }).token ?? ""}`;
-
-  if (updateStatus.state !== "idle") {
-    return (
-      <div style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        height: "100vh",
-        gap: 12,
-        fontFamily: "inherit",
-      }}>
-        {isMacOS && (
-          <div
-            data-tauri-drag-region
-            style={{ position: "absolute", top: 0, left: 0, right: 0, height: 32, background: "transparent", cursor: "default" }}
-          />
-        )}
-        <div style={{ fontSize: 14, opacity: 0.7 }}>
-          {updateStatus.state === "checking" && "Checking for updates…"}
-          {updateStatus.state === "no-update" && updateStatus.message}
-          {updateStatus.state === "downloading" && `Updating… ${updateStatus.progress}%`}
-          {updateStatus.state === "installing" && "Installing update…"}
-          {updateStatus.state === "done" && "Restarting…"}
-        </div>
-      </div>
-    );
-  }
+  // The editor placeholder participates in the route transition, so the
+  // main window slides to it and back instead of hard-cutting.
+  const routeKey = editorWindowToken
+    ? `editor-open:${editorWindowToken}`
+    : `${route.page}:${(route as { token?: string }).token ?? ""}`;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-      {/* Draggable Titlebar Area that dodges the traffic lights (macOS only) */}
-      {isMacOS && (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", position: "relative" }}>
+      {/* Draggable Titlebar Area that dodges the traffic lights (macOS only).
+          The update pill lives here, Ghostty-style — the titlebar is a
+          transparent webview overlay, so it renders inside the real titlebar. */}
+      {isMacOS ? (
         <div
           data-tauri-drag-region
           className="titlebar"
-          style={{ height: 32, flexShrink: 0, width: "100%", zIndex: 9999, background: "transparent", cursor: "default" }}
-        />
+          style={{ height: 32, flexShrink: 0, width: "100%", zIndex: 9999, background: "transparent", cursor: "default", display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 6, boxSizing: "border-box" }}
+        >
+          <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} />
+        </div>
+      ) : (
+        /* No overlay titlebar on Windows/Linux — float the pill bottom-left. */
+        <div style={{ position: "absolute", bottom: 8, left: 8, zIndex: 9999 }}>
+          <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} origin="bottom" />
+        </div>
       )}
+      {/* Windows/Linux + menu. Rendered here, outside the route transition's
+          transformed wrapper, so position:fixed anchors to the viewport. */}
+      <AnimatePresence>
+        {addMenu && (
+          <AddMenuPopup
+            items={addMenu.items}
+            anchor={addMenu.anchor}
+            onSelect={(choice) => {
+              setAddMenu(null);
+              void handleMenuChoice(choice);
+            }}
+          />
+        )}
+      </AnimatePresence>
       <div style={{
         flex: 1,
         overflow: "hidden",

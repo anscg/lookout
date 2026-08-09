@@ -1,16 +1,28 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+#[cfg(not(target_os = "macos"))]
 use tauri::image::Image;
+#[cfg(not(target_os = "macos"))]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
 
+/// State handed to the tray popup window, which ticks its own clock so it
+/// stays live while the main WebView is throttled.
+///
+/// It carries the interpolation *anchor*, not a display value: the popup
+/// re-derives the ticking time with the same rules as the main window
+/// (see `useSessionTimerState` in @lookout/react). Passing the main
+/// window's already-interpolated `displaySeconds` here meant the popup
+/// extrapolated on top of an extrapolation and drifted ahead of it.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrayState {
-    pub display_seconds: u32,
+    /// Ratcheted server-authoritative tracked seconds.
+    pub base_seconds: u32,
     pub screenshot_count: u32,
     pub control_mode: String,
-    pub updated_at: u64,
+    /// `Date.now()` (ms) when `base_seconds` last advanced.
+    pub anchor_at: u64,
 }
 
 impl Default for TrayState {
@@ -21,10 +33,10 @@ impl Default for TrayState {
             .unwrap()
             .as_millis() as u64;
         Self {
-            display_seconds: 0,
+            base_seconds: 0,
             screenshot_count: 0,
             control_mode: "recording".to_string(),
-            updated_at: now,
+            anchor_at: now,
         }
     }
 }
@@ -33,6 +45,18 @@ pub struct TrayStateMutex(pub Mutex<TrayState>);
 
 #[tauri::command]
 pub fn show_tray(time_text: String, app: AppHandle) -> Result<(), String> {
+    // macOS gets a native NSStatusItem rendered with SwiftUI so the time
+    // digits animate with contentTransition(.numericText()) — see
+    // swift/lookout-tray. Other platforms keep the tauri tray.
+    #[cfg(target_os = "macos")]
+    return crate::native_tray::show(&app, &time_text);
+
+    #[cfg(not(target_os = "macos"))]
+    show_tauri_tray(time_text, app)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_tauri_tray(time_text: String, app: AppHandle) -> Result<(), String> {
     if app.tray_by_id("timelapse_tray").is_some() {
         return Ok(());
     }
@@ -42,6 +66,9 @@ pub fn show_tray(time_text: String, app: AppHandle) -> Result<(), String> {
 
     let _tray = TrayIconBuilder::with_id("timelapse_tray")
         .title(&time_text)
+        // Windows doesn't render tray titles — the tooltip is the only place
+        // the recorded time is visible there.
+        .tooltip(format!("Lookout — {time_text} recorded"))
         .icon(icon)
         .icon_as_template(true)
         .on_tray_icon_event(move |tray, event| {
@@ -63,7 +90,7 @@ pub fn show_tray(time_text: String, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn toggle_tray_window(app: &AppHandle, rect: tauri::Rect) {
+pub(crate) fn toggle_tray_window(app: &AppHandle, rect: tauri::Rect) {
     if let Some(window) = app.get_webview_window("tray") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
@@ -164,15 +191,42 @@ fn position_and_show_window(
 }
 
 #[tauri::command]
-pub fn update_tray_time(time_text: String, _is_paused: bool, app: AppHandle) -> Result<(), String> {
-    if let Some(tray) = app.tray_by_id("timelapse_tray") {
-        let _ = tray.set_title(Some(time_text));
+pub fn update_tray_time(time_text: String, is_paused: bool, app: AppHandle) -> Result<(), String> {
+    // The Swift side renders its own pause glyph and tooltip.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        return crate::native_tray::update(&time_text, Some(is_paused));
     }
-    Ok(())
+
+    // Show a pause glyph in the menu bar while paused. The Rust ticker skips
+    // its updates while the timer is paused, so this sticks until resume —
+    // and its first running tick force-refreshes the plain title back.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let title = if is_paused {
+            format!("⏸ {time_text}")
+        } else {
+            time_text.clone()
+        };
+        let tooltip = if is_paused {
+            format!("Lookout — paused at {time_text}")
+        } else {
+            format!("Lookout — {time_text} recorded")
+        };
+        if let Some(tray) = app.tray_by_id("timelapse_tray") {
+            let _ = tray.set_title(Some(title));
+            let _ = tray.set_tooltip(Some(tooltip));
+        }
+        Ok(())
+    }
 }
 
 #[tauri::command]
 pub fn hide_tray(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    crate::native_tray::hide();
+    #[cfg(not(target_os = "macos"))]
     app.remove_tray_by_id("timelapse_tray");
     if let Some(w) = app.get_webview_window("tray") {
         let _ = w.close();

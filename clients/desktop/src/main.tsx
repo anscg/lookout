@@ -8,6 +8,10 @@ import { App } from "./App.js";
 
 declare const __APP_VERSION__: string;
 
+// Boot timing — measured from the webview's navigation start. Shows up in
+// the console and the backtick debug log as [boot] lines.
+console.log(`[boot] main.tsx eval at ${Math.round(performance.now())}ms`);
+
 Sentry.init({
   dsn: import.meta.env.VITE_SENTRY_DSN,
   release: `lookout-desktop@${__APP_VERSION__}`,
@@ -31,7 +35,11 @@ const originalFetch = window.fetch;
 window.fetch = function (input, init) {
   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
   const method = init?.method || "GET";
-  console.log(`[net] ${method} ${url}`);
+  // Preview frames fetch once per second per source — logging them floods
+  // the 200-entry debug buffer and buries real diagnostics. Failures are
+  // still logged below.
+  const isPreviewFrame = url.includes("lookout-preview");
+  if (!isPreviewFrame) console.log(`[net] ${method} ${url}`);
 
   // On Windows, Tauri v2 uses fetch('http://ipc.localhost/...') for IPC and
   // 'http://asset.localhost/...' for assets. We must NOT intercept these or
@@ -44,7 +52,7 @@ window.fetch = function (input, init) {
 
   return (doFetch as Promise<Response>).then(
     (res) => {
-      console.log(`[net] ${method} ${url} → ${res.status}`);
+      if (!isPreviewFrame) console.log(`[net] ${method} ${url} → ${res.status}`);
       return res;
     },
     (err: Error) => {

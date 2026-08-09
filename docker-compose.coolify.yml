@@ -1,0 +1,79 @@
+# Coolify variant of docker-compose.prod.yml: no host port binding —
+# Coolify's proxy (Traefik) routes the assigned domain to the server
+# container over the Docker network, so binding host port 3000 would
+# only conflict with whatever else runs on the box. Point Coolify's
+# "Docker Compose Location" at this file.
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    expose:
+      - "3000"
+    environment:
+      - DATABASE_URL=postgresql://lookout:${POSTGRES_PASSWORD:?}@postgres:5432/lookout
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+      - R2_BUCKET_NAME=${R2_BUCKET_NAME}
+      - R2_PUBLIC_DOMAIN=${R2_PUBLIC_DOMAIN}
+      # Admin dashboard (/admin) for managing per-program API keys. Required to
+      # mint program keys; leave unset to disable the dashboard.
+      - ADMIN_USERNAME=${ADMIN_USERNAME}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - BASE_URL=${BASE_URL:-http://localhost:3000}
+      - PORT=3000
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - DATABASE_URL=postgresql://lookout:${POSTGRES_PASSWORD:?}@postgres:5432/lookout
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+      - R2_BUCKET_NAME=${R2_BUCKET_NAME}
+      - R2_PUBLIC_DOMAIN=${R2_PUBLIC_DOMAIN}
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: lookout
+      POSTGRES_USER: lookout
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lookout"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+networks:
+  frontend:
+  backend:

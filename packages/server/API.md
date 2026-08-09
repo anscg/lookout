@@ -122,6 +122,25 @@ Pre-0.2.1 the bucket count caused timer jump-back when two captures arrived in t
 
 ---
 
+## Clips
+
+Each capture unit is a **clip** by default: a per-minute video file (~6 frames captured 10s apart, WebM from Chromium/Firefox MediaRecorder, MP4 from Safari and desktop) that compiles into a 6×-smoother timelapse. Pass `"clips": false` on the [internal create endpoint](#create-session) to opt a session out and pin it to the legacy one-JPEG-per-minute payload.
+
+A clip is still **one capture unit** — one `upload-url` request, one R2 PUT, one confirm per minute. Nothing about rate limits, session caps, credit/bucket tracking math, `trackedSeconds`, `screenshotCount`, or the `/timings` endpoint changes with clips: one confirmed unit per minute, one timestamp per minute.
+
+**Contract:**
+
+- **Session-level, immutable opt-out.** `clips_enabled` defaults to true, is set at creation, and is enforced server-side on every `upload-url`. It cannot be changed later — a session's capture character never changes mid-recording.
+- **Capability discovery before the first upload.** `GET /api/sessions/:token` returns `clipsEnabled` and `frameIntervalMs`. A clip-capable client checks these on its session-recovery fetch and, when enabled, records clips from the very first upload — timelapses start with motion, not a still frame.
+- **Granted format is law.** The client requests a format with `?format=webm|mp4`; the response's `format` is what the server *granted* (clip requests on non-clips sessions silently downgrade to `jpeg`). The presigned URL is signed with the granted format's content type, so uploading anything else fails the signature. Confirm re-validates the stored object's content type against the granted format.
+- **Server-authoritative cadence.** `frameIntervalMs` (default 10000 = 6 frames/min) is dictated by the server; clients capture at exactly that rate and expose no override. Clips are VFR — a static screen legitimately produces fewer encoded frames, and the compiler derives real counts by demuxing (the confirm body's `frameCount` is telemetry only).
+- **Size cap:** clips are validated at ≤ 4 MB via HeadObject (clients cap their encoder at ~400 kbps ≈ 3 MB/min worst case; static screen content lands far below since VBR undershoots easy content).
+- **Mixed sessions are legal.** A clip client that hits an encoder hiccup falls back to a JPEG for that minute; the compiler handles formats per capture unit.
+
+Sessions without the flag — and every pre-clips client — behave exactly as before.
+
+---
+
 ## Client Info
 
 Recording clients report a free-form **client telemetry string** on every `upload-url` request (query param `clientInfo`). It is **not** the HTTP `User-Agent` — it's explicit info the Lookout client builds for telemetry/debugging. The server stores it opaquely per screenshot (**never parses it**) and surfaces the session's first recorded value on session-info endpoints (`GET /api/sessions/:token`, `GET /api/sessions/:token/timings`, internal admin).
@@ -170,11 +189,18 @@ Returns the current state of a session.
   "createdAt": "2024-01-01T11:50:00.000Z",
   "thumbnailUrl": "https://...",
   "videoUrl": "https://...",
+  "clipsEnabled": false,
+  "frameIntervalMs": 4000,
+  "redirectUrl": null,
   "metadata": {}
 }
 ```
 
 `clientInfo` is the [client telemetry string](#client-info) recorded on the session's **first** screenshot upload. It is `null` for sessions recorded before this was added, or where the client sent none.
+
+`clipsEnabled` / `frameIntervalMs` are the [clips](#clips) capability signal. This endpoint is the session-recovery fetch clients make before recording, so a clip-capable client knows **before its first capture** whether to record clips (and at what cadence) — the very first upload of a clips session is already a clip.
+
+`redirectUrl` is the session's [redirect hook](#create-session) (`null` when unset): clients watching the compile open it once the status flips to `complete`.
 
 ---
 
@@ -230,6 +256,7 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
 |------|------|-------------|
 | `capturedAt` | ISO-8601 (optional) | Client-attested moment the frame was grabbed. Presence on the **first** upload of a session sticks it to **credit mode** for life; absence sticks it to **bucket mode**. Subsequent uploads on a credit-mode session **must** include it. Must fall within ±5 min of server time and must be strictly monotonic across uploads. |
 | `clientInfo` | string (optional) | [Client telemetry string](#client-info) (User-Agent-like). Stored opaquely per screenshot; the session's first non-empty value is surfaced on session-info endpoints. Best-effort — never parsed or validated, silently truncated to 1024 chars; an invalid/oversized value never fails the upload. |
+| `format` | `jpeg` \| `webm` \| `mp4` (optional) | Payload format for this capture unit. Omitted = `jpeg` (legacy single frame). `webm`/`mp4` request a [clip](#clips) upload. The response's `format` is the **granted** format — clip requests on sessions without clips enabled are silently downgraded to `jpeg`, and the client must upload exactly what was granted (the presigned URL is signed with that content type). |
 
 **Response `200 OK`:**
 ```json
@@ -240,11 +267,14 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
   "minuteBucket": 1,
   "nextExpectedAt": "2024-01-01T12:01:00.000Z",
   "serverTime": "2024-01-01T12:00:00.000Z",
-  "trackingMode": "credit"
+  "trackingMode": "credit",
+  "format": "jpeg",
+  "clipsEnabled": false,
+  "frameIntervalMs": 4000
 }
 ```
 
-`nextExpectedAt` is the server's authoritative target for the **next** capture's `capturedAt` — clients should schedule from it (see Tracking Modes below).
+`nextExpectedAt` is the server's authoritative target for the **next** capture's `capturedAt` — clients should schedule from it (see Tracking Modes below). `format` is the granted payload format (see [Clips](#clips)); `r2Key` carries the matching extension (`.jpg`/`.webm`/`.mp4`).
 
 **Errors:**
 - `400` — `captured_at_future`, `captured_at_too_old`, `captured_at_before_session_start`, `captured_at_not_monotonic`, `captured_at_invalid`, or `credit_mode_requires_captured_at`
@@ -254,9 +284,9 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
 
 **Notes:**
 - Presigned URL expires after 2 minutes
-- Client should PUT the JPEG image directly to `uploadUrl`
+- Client should PUT the image/clip directly to `uploadUrl` with the granted format's content type
 - Max 4320 upload requests per session
-- Pre-0.2.1 binaries that don't send `capturedAt` continue to receive a usable response — additive fields (`serverTime`, `trackingMode`) are gracefully ignored
+- Pre-0.2.1 binaries that don't send `capturedAt` continue to receive a usable response — additive fields (`serverTime`, `trackingMode`, `format`, `clipsEnabled`, `frameIntervalMs`) are gracefully ignored
 
 ---
 
@@ -279,7 +309,8 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
   "screenshotId": "uuid",
   "width": 1920,
   "height": 1080,
-  "fileSize": 125000
+  "fileSize": 125000,
+  "frameCount": 20
 }
 ```
 
@@ -289,6 +320,7 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 | `width` | integer | yes | ≥ 1 |
 | `height` | integer | yes | ≥ 1 |
 | `fileSize` | integer | yes | ≥ 1 |
+| `frameCount` | integer | no | 1–600. Frames inside an uploaded [clip](#clips); informational (the compiler demuxes for the real count). Omit for JPEG captures. |
 
 **Response `200 OK`:**
 ```json
@@ -303,7 +335,7 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 `trackedSeconds` here is the **server's authoritative count after this capture has been credited (or not)**. Use this value to drive your timer display — see the [Tracking Modes](#tracking-modes) section for client display guidance. `nextExpectedAt` is the target for the next capture's `capturedAt`.
 
 **Errors:**
-- `400` — Invalid content type (must be `image/jpeg`), file too large (max 2 MB), or object not found in R2
+- `400` — Content type doesn't match the granted format (`image/jpeg` / `video/webm` / `video/mp4`), file too large (2 MB for JPEG, 8 MB for clips), or object not found in R2
 - `404` — Session or screenshot not found
 - `409` — Session not in `pending` or `active` state
 - `429` — Rate limit exceeded, or max confirmed screenshots reached (720)
@@ -385,22 +417,35 @@ Stops a session and enqueues video compilation if screenshots exist.
 |------|------|-------------|
 | `token` | string | 64-char hex session token |
 
+**Body (optional):**
+```json
+{ "edit": true }
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `edit` | boolean | Hold the timelapse unpublished after it compiles so the owner can cut it first. Opens a lease the client must renew (see [Edits (Cuts)](#edits-cuts)). Omit for today's behavior. |
+
 **Response `200 OK`:**
 ```json
 {
   "status": "stopped",
   "trackedSeconds": 123,
-  "totalActiveSeconds": 300
+  "totalActiveSeconds": 300,
+  "editHoldUntil": "2026-07-26T14:35:00.000Z"
 }
 ```
+
+`editHoldUntil` is present only when the stop requested `edit: true` and the session actually has captures to edit. It is one lease term (~2 min) — keep it alive with `POST /:token/editing` for as long as your editor is open.
 
 **Errors:**
 - `404` — Session not found
 - `409` — Session already in terminal state
 
 **Notes:**
-- Marks session `complete` immediately if no screenshots exist (skips compilation)
+- Marks session `failed` immediately if no screenshots exist (skips compilation), regardless of `edit`
 - Accumulates any remaining active time
+- Only send `edit: true` from a client that will actually open an editing surface and renew the lease. An abandoned hold still publishes on its own, so nothing is lost either way — but a client that asks for a hold and never renews it just makes the user wait a lease for no reason.
 
 ---
 
@@ -435,6 +480,10 @@ When complete:
 }
 ```
 
+Sessions created with a [redirect hook](#create-session) additionally carry
+`redirectUrl` (absent otherwise) — clients watching the compile open it when
+the status flips to `complete`.
+
 ---
 
 ### Get Capture Timings
@@ -445,10 +494,17 @@ GET /api/sessions/:token/timings
 
 Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the session, oldest first. Token-gated public endpoint. Uses each screenshot's `capturedAt` (client-attested capture moment); rows predating the `captured_at` column fall back to `requestedAt` so the array is never sparse.
 
+**Cuts are respected by default.** Captures whose timestamp falls inside the session's [cut list](#edits-cuts) are excluded from `timestamps` (so heartbeat forwarders honor user edits with no code changes) and surfaced separately: `cuts` carries the intervals, `cutCount` the number of removed captures, and `?includeCut=true` adds a `cutTimestamps` array.
+
 **Path Parameters:**
 | Name | Type | Description |
 |------|------|-------------|
 | `token` | string | 64-char hex session token |
+
+**Query Parameters:**
+| Name | Type | Description |
+|------|------|-------------|
+| `includeCut` | boolean | Optional. When `true`, adds `cutTimestamps` (the removed captures) to the response |
 
 **Response `200 OK`:**
 ```json
@@ -473,7 +529,10 @@ Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the
 | `first` | string \| null | Earliest timestamp (= `timestamps[0]`); `null` if no screenshots |
 | `last` | string \| null | Latest timestamp (= last element); `null` if no screenshots |
 | `clientInfo` | string \| null | [Client telemetry string](#client-info) from the session's first screenshot upload; `null` if none recorded |
-| `timestamps` | string[] | ISO-8601 timestamps, ascending |
+| `timestamps` | string[] | ISO-8601 timestamps of KEPT captures, ascending |
+| `cuts` | array | The session's cut list (`[{start, end}]`); `[]` when never edited |
+| `cutCount` | integer | Confirmed captures removed by the cut list |
+| `cutTimestamps` | string[] | Only with `?includeCut=true`: the removed timestamps, ascending |
 
 > **ℹ️ `count` is the number of screenshots, not minutes.** More than one capture can fall within the same minute (retries, resume, clock jitter), so `count` can exceed the number of distinct minutes — it is **not** a count of tracked minutes. For tracked time use `trackedSeconds`.
 
@@ -488,6 +547,140 @@ Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the
 - `429` — Rate limit exceeded
 
 > **Note:** The original screenshot images are only retained for 7 days after a session stops, after which the JPEGs are deleted from storage. The capture timestamps returned by this endpoint — along with the compiled video and thumbnail — are kept.
+
+---
+
+### Edits (Cuts)
+
+When a user stops a recording they can review it before it goes out. An edit is a **cut list** of absolute wall-clock intervals of the session that are removed from every output —
+
+```json
+[
+  { "start": "2026-07-26T14:03:00.000Z", "end": "2026-07-26T14:11:00.000Z" },
+  { "start": "2026-07-26T15:40:00.000Z", "end": "2026-07-26T15:44:00.000Z" }
+]
+```
+
+Cuts are intervals (not video offsets) because Lookout is heartbeat-based — the same list drives all three derived views consistently:
+
+| Consumer | Effect |
+|----------|--------|
+| Published video | Capture units inside a cut are removed (the video gets 1 second shorter per cut minute) |
+| [`GET /timings`](#get-capture-timings) | Removed captures are excluded from `timestamps` by default |
+| `trackedSeconds` | Reported as raw − `cutSeconds` on every endpoint (raw stays available as `uncutTrackedSeconds`) |
+
+**Membership rule:** a capture is cut iff its timestamp ∈ `[start, end)` of any interval. Granularity is effectively whole minutes (one capture unit ≈ one minute ≈ one second of video).
+
+#### Editing happens before publication, never after
+
+`complete` is the status programs act on — forwarding heartbeats to Hackatime, accepting a submission, firing the redirect hook. So a session reaches `complete` **exactly once, with its cuts already applied**. There is no post-publication editing: the data a program reads is final the first time it sees it.
+
+That is what the **edit hold** is for. `POST /stop` with `{"edit": true}` marks the session; it compiles as usual, but the worker leaves it `stopped` with `videoUrl` still null instead of publishing. During the hold the owner previews the built video, sets a cut list, and publishes. The lifecycle programs observe is unchanged — `stopped → compiling → complete`, or `stopped → complete` when there was nothing to cut.
+
+```
+stop {edit:true} ─> stopped (hold, compiling internally)
+                      ├─ PUT /cuts … then POST /compile ─> compiling ─> complete
+                      ├─ POST /compile with no cuts ────────────────────> complete
+                      └─ lease lapses (~2 min unrenewed) ──────────────> complete
+```
+
+**The hold is a lease, not a countdown.** An open editing surface calls `POST /:token/editing` every 30 s; the server holds the session for 120 s past the last renewal. So editing takes exactly as long as it takes — there's no deadline to race on a three-hour recording — and an abandoned session publishes about two minutes later instead of sitting unpublished for half an hour. An absolute ceiling of 120 minutes from the stop bounds the pathological case (an editor left open overnight).
+
+The hold can only **delay** publication, never cancel it. A stop without `{"edit": true}` behaves exactly as it always has, so existing clients are unaffected.
+
+#### Renew the Edit Lease
+
+```
+POST /api/sessions/:token/editing
+```
+
+"An editor is still open." Extends the hold to `now + 120s`. Idempotent and cheap; call it every 30 s while an editing surface is showing. Rate limit: 20 req/min per token.
+
+**Response `200 OK`:** `{ "editHoldUntil": ISO-8601, "held": boolean }`
+
+`held: false` means the session is no longer holdable — it published, failed, or passed the ceiling. Stop renewing and show the published state; the call never resurrects a published session.
+
+**Mechanics:** the compile always produces the **uncut original** and records its unit map. Publishing with cuts is a lossless stream-copy of the kept ranges (seconds, even for 12-hour sessions, no quality loss), after which the uncut original is **deleted immediately** — cut content does not outlive the publish. Publishing without cuts just points the session at the original, with no worker round-trip.
+
+Cutting can only *reduce* tracked time — there is no fraud surface.
+
+Session responses (`GET /:token`, `/status`, internal) carry `cuts`, `cutSeconds`, `uncutTrackedSeconds`, `editable`, and `editHoldUntil`.
+
+#### Get Editor Units
+
+```
+GET /api/sessions/:token/units
+```
+
+Editor metadata. Rate limit: 10 req/min per token.
+
+**Response `200 OK`:**
+```json
+{
+  "units": [ { "capturedAt": "2026-07-26T14:00:12.000Z", "screenshotId": "…" } ],
+  "cuts": [],
+  "editable": true,
+  "editHoldUntil": "2026-07-26T14:35:00.000Z",
+  "expectedUnits": 47,
+  "originalVideoUrl": "https://…presigned, ~1h…",
+  "recompilesRemaining": 5
+}
+```
+
+- `units` — the capture units of the compiled **original** video, in output order. Array index = video second = real-world minute: the exact video-time ↔ wall-clock map. Empty until the preview finishes building.
+- `originalVideoUrl` — presigned GET for the unpublished original (the editor's preview source). Deliberately not the public media URL, which is null until the session publishes. `null` when not editable.
+- `editable` / `editableReason` — `false` with one of:
+
+  | Reason | Meaning | What a client should do |
+  |--------|---------|-------------------------|
+  | `preparing` | Hold is active; the preview video is still compiling (the session reads `stopped` or `compiling`) | **Poll** — this is the normal state right after a stop, not an error. Show progress |
+  | `no_original` | Hold active but no original recorded | Poll; same as above |
+  | `not_ready` | No hold, or it lapsed | Editing isn't on offer |
+  | `published` | Already `complete` | Editing is over — by design |
+  | `failed` | The compile failed | Show the failure; there's nothing to edit |
+  | `recompiles_exhausted` | Publish budget spent | Editing is over |
+
+- `editHoldUntil` — when the session auto-publishes; `null` when no hold is active.
+- `expectedUnits` — confirmed captures ≈ units the finished video will hold. Lets a client waiting on the build size a progress estimate (compile time scales with unit count).
+
+#### Set Cut List
+
+```
+PUT /api/sessions/:token/cuts
+Body: { "cuts": [{ "start": ISO-8601, "end": ISO-8601 }, …] }
+```
+
+Replaces the whole cut list (idempotent; `[]` clears all edits). **Only valid during an active edit hold** — a published session is immutable. The server normalizes (sorts, merges overlaps, clamps to the session envelope, caps at 120 intervals) and rejects a list that would remove **every** unit. The cuts are baked into the video by the publish call below. Rate limit: 20 req/min per token.
+
+**Response `200 OK`:**
+```json
+{
+  "cuts": [ { "start": "…", "end": "…" } ],
+  "unitsTotal": 47,
+  "unitsCut": 8,
+  "trackedSeconds": 2340,
+  "uncutTrackedSeconds": 2820
+}
+```
+
+**Errors:** `400` invalid/entire-timelapse cut list · `409` compiling or not editable · `429` rate limit.
+
+#### Publish (End the Hold)
+
+```
+POST /api/sessions/:token/compile
+```
+
+Ends the edit hold and publishes the timelapse with the current cut list baked in.
+
+- **With cuts:** `stopped → compiling → complete` (poll [`/status`](#poll-compilation-status)); the worker stream-copies the kept ranges, usually in seconds, then deletes the uncut original. Burns one of **5** publishes per session.
+- **Without cuts:** returns `{ "instant": true, "status": "complete" }` immediately — the built original is simply published, no worker involved.
+- **Before the preview finishes building** (`editableReason: "preparing"`): drops the hold and returns `200` with `instant: false`. The in-flight compile publishes normally when it lands, so "publish as recorded" works without waiting for a preview the user just declined.
+
+Rate limit: 5 req/min per token.
+
+**Response `200 OK`:** `{ "status": "compiling" | "complete", "instant": boolean, "recompilesRemaining": number }`
+**Errors:** `202` publish already running (safe to retry/poll) · `409` hold lapsed or not editable · `429` rate limit. Calling it on an already-published session is a no-op `200` with `instant: true`, so a client racing the expiry job never sees a spurious failure.
 
 ---
 
@@ -637,6 +830,8 @@ Creates a new session in `pending` state.
 |-------|------|----------|-------------|
 | `name` | string | no | Session name (1-255 chars) |
 | `metadata` | object | no | Arbitrary JSON metadata to attach to the session (max 50 properties) |
+| `clips` | boolean | no | Whether this session accepts [clip uploads](#clips) (~6 frames/min video). Default **`true`**; pass `false` to opt out and get the legacy 1 JPEG/min payload. **Immutable after creation.** |
+| `redirectUrl` | string | no | Redirect hook: http(s) URL (max 2048 chars) the recording client opens in the user's browser once the timelapse finishes compiling. Fires at most once, only for a live completion (not on re-opening a finished session). **Immutable after creation.** |
 
 **Response `201 Created`:**
 ```json
@@ -677,6 +872,7 @@ Returns full session details including internal fields.
     "lastScreenshotAt": "...",
     "resumedAt": "...",
     "totalActiveSeconds": 123,
+    "clipsEnabled": false,
     "videoUrl": null,
     "thumbnailUrl": null,
     "createdAt": "...",

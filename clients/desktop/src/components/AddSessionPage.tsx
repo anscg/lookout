@@ -13,7 +13,10 @@ import { invoke } from "../logger.js";
 import { extractToken } from "../utils.js";
 import { PageLayout } from "./PageLayout.js";
 
-const API_BASE = "https://lookout.hackclub.com";
+import { getApiBase } from "../serverConfig.js";
+
+// Read once per webview load; Settings → Server reloads the view on change.
+const API_BASE = getApiBase();
 
 interface Program {
   name: string;
@@ -21,6 +24,7 @@ interface Program {
   // unset, so this is always present, but guard anyway for older servers.
   displayName?: string;
   newSessionUrl: string;
+  iconUrl?: string | null;
 }
 
 interface AddSessionPageProps {
@@ -36,7 +40,6 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
   const [link, setLink] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [showLink, setShowLink] = useState(false);
 
   // Fetch the program registry. Failures and empty lists are non-fatal — the
   // paste-a-link backup always remains available.
@@ -61,6 +64,16 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
   }, []);
 
   const programLabel = (p: Program) => p.displayName || p.name;
+
+  // If the deep link never comes back (user closed the browser tab, changed
+  // their mind, the program errored), the buttons used to stay disabled with
+  // a spinner forever. Re-enable them after a grace period so retrying
+  // doesn't require leaving and re-entering the page.
+  useEffect(() => {
+    if (!launched) return;
+    const id = setTimeout(() => setLaunched(null), 15_000);
+    return () => clearTimeout(id);
+  }, [launched]);
 
   const handleOpenProgram = async (program: Program) => {
     setError(null);
@@ -108,64 +121,43 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
             <p style={{ ...note, color: colors.status.danger }}>{error}</p>
           )}
           {/* Backup: paste a lookout:// link, for when the deep link doesn't fire. */}
-          {showLink ? (
-            <>
-              <input
-                autoFocus
-                type="text"
-                value={link}
-                onChange={(e) => {
-                  setLink(e.target.value);
-                  setError(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !loading) handleStart();
-                }}
-                placeholder="Paste a lookout:// link here"
-                disabled={loading}
-                style={{
-                  width: "100%",
-                  padding: `${spacing.md}px ${spacing.lg}px`,
-                  fontSize: fontSize.md,
-                  fontWeight: fontWeight.medium,
-                  color: colors.text.primary,
-                  background: colors.bg.sunken,
-                  border: `1px solid ${error ? colors.status.danger : colors.border.default}`,
-                  borderRadius: radii.lg,
-                  outline: "none",
-                  boxSizing: "border-box",
-                  height: 48,
-                  opacity: loading ? 0.5 : 1,
-                }}
-              />
-              <Button
-                variant="primary"
-                size="lg"
-                fullWidth
-                disabled={!link.trim() || loading}
-                loading={loading}
-                onClick={handleStart}
-              >
-                Start from link
-              </Button>
-            </>
-          ) : (
-            <button
-              onClick={() => setShowLink(true)}
-              style={{
-                background: "none",
-                border: "none",
-                color: colors.text.tertiary,
-                fontSize: fontSize.sm,
-                cursor: "pointer",
-                padding: spacing.xs,
-                textDecoration: "underline",
-                alignSelf: "center",
-              }}
-            >
-              Deep link not working? Paste a link instead
-            </button>
-          )}
+          <input
+            type="text"
+            value={link}
+            onChange={(e) => {
+              setLink(e.target.value);
+              setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !loading) handleStart();
+            }}
+            placeholder="Paste a lookout:// link here"
+            disabled={loading}
+            style={{
+              width: "100%",
+              padding: `${spacing.md}px ${spacing.lg}px`,
+              fontSize: fontSize.md,
+              fontWeight: fontWeight.medium,
+              color: colors.text.primary,
+              background: colors.bg.sunken,
+              border: `1px solid ${error ? colors.status.danger : colors.border.default}`,
+              borderRadius: radii.lg,
+              outline: "none",
+              boxSizing: "border-box",
+              height: 48,
+              opacity: loading ? 0.5 : 1,
+            }}
+          />
+          <Button
+            variant="primary"
+            size="lg"
+            fullWidth
+            disabled={!link.trim() || loading}
+            loading={loading}
+            onClick={handleStart}
+          >
+            Start from link
+          </Button>
         </>
       }
     >
@@ -199,6 +191,19 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
                   disabled={loading || (launched !== null && launched !== programLabel(p))}
                   onClick={() => handleOpenProgram(p)}
                 >
+                  {p.iconUrl && (
+                    <img
+                      src={p.iconUrl}
+                      alt=""
+                      style={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: 5,
+                        marginRight: 8,
+                        verticalAlign: -4,
+                      }}
+                    />
+                  )}
                   {programLabel(p)}
                 </Button>
               ))}

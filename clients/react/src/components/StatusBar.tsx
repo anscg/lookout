@@ -29,7 +29,9 @@ export function StatusBar({ displaySeconds, screenshotCount, uploads }: StatusBa
         {formatTime(displaySeconds)}
       </div>
       <div style={{ display: "flex", gap: spacing.lg, fontSize: fontSize.lg, color: colors.text.secondary }}>
-        <span>{screenshotCount} {screenshotCount === 1 ? "screenshot" : "screenshots"}</span>
+        {/* One capture unit per recorded minute — a JPEG screenshot on
+            legacy sessions, a ~15-frame clip on clips sessions. */}
+        <span>{screenshotCount} {screenshotCount === 1 ? "capture" : "captures"}</span>
         {uploads.pending > 0 && (
           <span style={{ color: colors.status.warning }}>{uploads.pending} uploading...</span>
         )}
