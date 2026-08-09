@@ -4,6 +4,21 @@ export type { LookoutProviderProps } from "./LookoutProvider.js";
 
 // Drop-in widget
 export { LookoutRecorder } from "./components/LookoutRecorder.js";
+export type { LookoutRecorderProps } from "./components/LookoutRecorder.js";
+
+// Cut editor
+export { TimelapseEditor } from "./components/TimelapseEditor.js";
+export type { TimelapseEditorProps } from "./components/TimelapseEditor.js";
+export { StopChoiceModal } from "./components/StopChoiceModal.js";
+export type { StopChoiceModalProps } from "./components/StopChoiceModal.js";
+export { useEditLease } from "./hooks/useEditLease.js";
+export {
+  regionsToCuts,
+  cutsToRegions,
+  normalizeRegions,
+  gapIndices,
+} from "./hooks/editorMath.js";
+export type { UnitRegion } from "./hooks/editorMath.js";
 
 // Sub-components
 export { StatusBar } from "./components/StatusBar.js";
@@ -24,7 +39,7 @@ export { VideoPlayer } from "./components/VideoPlayer.js";
 
 // Gallery components
 export { Gallery } from "./components/Gallery.js";
-export type { GalleryProps } from "./components/Gallery.js";
+export type { GalleryProps, AddAnchor } from "./components/Gallery.js";
 export { SessionCard } from "./components/SessionCard.js";
 export type { SessionCardProps } from "./components/SessionCard.js";
 export { SessionDetail } from "./components/SessionDetail.js";
@@ -35,8 +50,21 @@ export { useLookout } from "./hooks/useLookout.js";
 export { useScreenCapture } from "./hooks/useScreenCapture.js";
 export { useCameraCapture } from "./hooks/useCameraCapture.js";
 export { useUploader } from "./hooks/useUploader.js";
+export type { UploadPayload } from "./hooks/useUploader.js";
+export { ClipRecorder } from "./hooks/clipRecorder.js";
+export type { ClipCaptureResult, ClipRecorderOptions } from "./hooks/clipRecorder.js";
 export { useSession } from "./hooks/useSession.js";
-export { useSessionTimer, formatTime, formatTrackedTime } from "./hooks/useSessionTimer.js";
+export {
+  useSessionTimer,
+  useSessionTimerState,
+  deriveDisplaySeconds,
+  MAX_INTERPOLATION_S,
+  formatTime,
+  formatTrackedTime,
+} from "./hooks/useSessionTimer.js";
+export type { SessionTimerState } from "./hooks/useSessionTimer.js";
+export { computeBestTrackedSeconds } from "./hooks/computeBestTracked.js";
+export type { BestTrackedInputs } from "./hooks/computeBestTracked.js";
 
 // Gallery hooks
 export { useTokenStore } from "./hooks/useTokenStore.js";
@@ -68,8 +96,9 @@ export type {
 } from "./types.js";
 
 // Re-export shared types consumers need
-export type { SessionStatus, SessionSummary } from "@lookout/shared";
+export type { SessionStatus, SessionSummary, CutInterval } from "@lookout/shared";
 export { SESSION_STATUSES } from "@lookout/shared";
 
 // UI primitives
 export * from "./ui/index.js";
+export { setAccentColor } from "./ui/theme.js";

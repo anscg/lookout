@@ -61,7 +61,14 @@ export function App() {
               >
                 &larr; Gallery
               </button>
-              <LookoutRecorder />
+              {/* `?edit=false` on the recorder link lets an embedding
+                  program keep stopping a single click. */}
+              <LookoutRecorder
+                editing={
+                  new URLSearchParams(window.location.search).get("edit") !==
+                  "false"
+                }
+              />
             </div>
           </LookoutProvider>
         );

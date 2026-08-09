@@ -5,11 +5,17 @@ import { Button, Card, colors, spacing, radii, fontSize, fontWeight } from "@loo
 interface NamingModalProps {
   loading: boolean;
   onConfirm: (name: string | null) => void;
+  /** Stop, then open the editor before anything is published. Editing is
+   *  offered HERE, not after the timelapse goes out: `complete` is when
+   *  programs consume a session (heartbeats, tracked time, video), so the
+   *  data has to be final the first time they see it. */
+  onEditAndSave: (name: string | null) => void;
   onResume: () => void;
 }
 
-export function NamingModal({ loading, onConfirm, onResume }: NamingModalProps) {
+export function NamingModal({ loading, onConfirm, onEditAndSave, onResume }: NamingModalProps) {
   const [name, setName] = useState("");
+  const [choice, setChoice] = useState<"stop" | "edit" | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -66,26 +72,44 @@ export function NamingModal({ loading, onConfirm, onResume }: NamingModalProps) 
             opacity: loading ? 0.5 : 1,
           }}
         />
-        <div style={{ display: "flex", gap: spacing.md }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
           <Button
             variant="primary"
             size="lg"
             fullWidth
-            loading={loading}
-            disabled={loading}
-            onClick={() => onConfirm(name)}
+            loading={loading && choice === "edit"}
+            disabled={loading && choice !== "edit"}
+            onClick={() => {
+              setChoice("edit");
+              onEditAndSave(name);
+            }}
           >
-            Save &amp; Stop
+            Edit &amp; Save
           </Button>
-          <Button
-            variant="success"
-            size="lg"
-            fullWidth
-            disabled={loading}
-            onClick={onResume}
-          >
-            Resume
-          </Button>
+          <div style={{ display: "flex", gap: spacing.md }}>
+            <Button
+              variant="secondary"
+              size="lg"
+              fullWidth
+              loading={loading && choice === "stop"}
+              disabled={loading && choice !== "stop"}
+              onClick={() => {
+                setChoice("stop");
+                onConfirm(name);
+              }}
+            >
+              Save &amp; Stop
+            </Button>
+            <Button
+              variant="success"
+              size="lg"
+              fullWidth
+              disabled={loading}
+              onClick={onResume}
+            >
+              Resume
+            </Button>
+          </div>
         </div>
         </Card>
       </motion.div>

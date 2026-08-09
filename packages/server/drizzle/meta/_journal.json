@@ -106,6 +106,62 @@
       "when": 1784770755102,
       "tag": "0014_early_dazzler",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1784956044227,
+      "tag": "0015_clips",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1785057101581,
+      "tag": "0016_redirect_url",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1785059903186,
+      "tag": "0017_program_icon_url",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1785077227872,
+      "tag": "0018_session_edits",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1785080224937,
+      "tag": "0019_edit_hold",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1785090000000,
+      "tag": "0020_compile_progress",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785100000000,
+      "tag": "0021_original_is_preview",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1785110000000,
+      "tag": "0022_clips_default_on",
+      "breakpoints": true
     }
   ]
 }

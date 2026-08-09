@@ -11,6 +11,14 @@ interface SessionState {
   startedAt: string | null;
   createdAt: string | null;
   totalActiveSeconds: number;
+  /** Whether this session accepts clip uploads (~6 frames/min video).
+   *  Known BEFORE the first capture — this fetch is the session-recovery
+   *  load — so the very first upload can already be a clip. False when
+   *  the server predates clips. */
+  clipsEnabled: boolean;
+  /** Server-authoritative clip cadence (ms between frames). Null when the
+   *  server predates clips. */
+  frameIntervalMs: number | null;
   error: string | null;
 }
 
@@ -26,6 +34,8 @@ export function useSession() {
     startedAt: null,
     createdAt: null,
     totalActiveSeconds: 0,
+    clipsEnabled: false,
+    frameIntervalMs: null,
     error: null,
   });
 
@@ -54,6 +64,8 @@ export function useSession() {
         startedAt: data.startedAt,
         createdAt: data.createdAt,
         totalActiveSeconds: data.totalActiveSeconds,
+        clipsEnabled: data.clipsEnabled === true,
+        frameIntervalMs: data.frameIntervalMs ?? null,
         error: null,
       });
 
@@ -130,7 +142,7 @@ export function useSession() {
     }
   }, [client, syncStatus]);
 
-  const stop = useCallback(async (name?: string) => {
+  const stop = useCallback(async (name?: string, opts?: { edit?: boolean }) => {
     // Optionally name the timelapse before stopping (non-fatal if it fails)
     if (name) {
       try {
@@ -144,7 +156,7 @@ export function useSession() {
     const RETRY_DELAYS = [1000, 2000, 4000];
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const data = await client.stop();
+        const data = await client.stop(opts);
         setState((s) => ({
           ...s,
           status: data.status,

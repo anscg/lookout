@@ -12,6 +12,13 @@ type PermissionStatus = "checking" | "granted" | "denied";
 
 type PermissionType = "screen" | "camera";
 
+/**
+ * localStorage key remembering that a permission check passed once, so later
+ * boots skip the gate (and its flicker) and re-verify in the background.
+ * Only a real grant is cached — "Skip" never writes it.
+ */
+export const permCacheKey = (type: PermissionType) => `lookout-perm-${type}`;
+
 const PERMISSION_CONFIG: Record<PermissionType, {
   icon: React.ReactNode;
   title: string;
@@ -76,6 +83,7 @@ export function PermissionScreen({ type, onGranted }: PermissionScreenProps) {
         if (cancelled) return;
         console.log(`[permissions] ${type} permission: ${granted ? "granted" : "denied"}`);
         if (granted) {
+          localStorage.setItem(permCacheKey(type), "1");
           setStatus("granted");
           onGrantedRef.current();
         } else {

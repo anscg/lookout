@@ -8,7 +8,8 @@
     "packages/worker",
     "clients/react",
     "clients/web",
-    "clients/desktop"
+    "clients/desktop",
+    "clients/playground"
   ],
   "scripts": {
     "dev": "concurrently \"npm run dev -w clients/web\" \"npm run dev -w packages/server\"",

@@ -5,6 +5,7 @@ import {
   text,
   timestamp,
   integer,
+  real,
   boolean,
   jsonb,
   index,
@@ -69,6 +70,9 @@ export const programs = pgTable("programs", {
   // https://fallout.hackclub.com/lookout_session/new?desktop=true). NULL means
   // the program isn't listed in the desktop picker.
   newSessionUrl: text("new_session_url"),
+  // URL of a small square logo shown next to the program in pickers (e.g. the
+  // desktop's + menu). NULL means clients fall back to a generic glyph.
+  iconUrl: text("icon_url"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -112,6 +116,23 @@ export const sessions = pgTable(
     trackingMode: text("tracking_mode").notNull().default("bucket"),
     streakAnchorAt: timestamp("streak_anchor_at", { withTimezone: true }),
     streakCreditedCount: integer("streak_credited_count").notNull().default(0),
+    // Whether this session accepts per-minute video clip uploads (~6
+    // frames/min) instead of single JPEGs. Enforced on every upload-url
+    // (disallowed formats are downgraded to jpeg) and immutable thereafter —
+    // a session's capture character never changes mid-recording.
+    //
+    // Defaults TRUE: clips are the normal capture mode, and a program opts
+    // OUT with `clips: false` on the internal create endpoint. Existing rows
+    // were deliberately NOT backfilled when the default flipped — a session's
+    // mode is immutable, so in-flight sessions keep the mode they started
+    // with. Clients that can't record clips are unaffected either way: they
+    // keep uploading JPEGs to the same session, which stays fully valid.
+    clipsEnabled: boolean("clips_enabled").notNull().default(true),
+    // Redirect hook: http(s) URL the recording client sends the user to once
+    // the timelapse finishes compiling. Set at creation by the program's
+    // backend (internal API `redirectUrl`), immutable thereafter. NULL = no
+    // redirect.
+    redirectUrl: text("redirect_url"),
     // Set when the retention job has deleted this session's screenshot R2
     // objects (after SCREENSHOT_RETENTION_DAYS). The screenshot *rows* are
     // kept so capture timings stay queryable; this flag stops the job from
@@ -124,6 +145,66 @@ export const sessions = pgTable(
     thumbnailUrl: text("thumbnail_url"),
     thumbnailR2Key: text("thumbnail_r2_key"),
     compileAttempts: integer("compile_attempts").notNull().default(0),
+    // Real compile progress (0..~0.95), written by the worker's per-unit
+    // download+encode loop so /status can report ground truth instead of the
+    // client's time estimate. NULL when not compiling, when the worker
+    // predates this column, or for cut-apply compiles (no per-unit stage to
+    // meter) — the client falls back to the time estimate in every such case.
+    // Capped below 1: assembly/thumbnail/upload still run after the last
+    // unit, so the ring must never reach 100% while the user is still waiting.
+    compileProgress: real("compile_progress"),
+    // ── Edits (cuts) ──
+    // Normalized cut list: [{start, end}] ISO wall-clock intervals removed
+    // from every output (video, /timings, trackedSeconds). NULL/[] = no
+    // edits. Canonical semantics live in @lookout/shared cuts.ts.
+    cuts: jsonb("cuts").$type<{ start: string; end: string }[]>(),
+    // Credited seconds removed by `cuts`. Reported trackedSeconds is
+    // tracked_seconds − cut_seconds (raw value stays untouched as the audit
+    // trail). Recomputed on every cuts write; authoritative at cut-compile.
+    cutSeconds: integer("cut_seconds"),
+    // Units that actually made it into the compiled ORIGINAL video, in
+    // output order: [{capturedAt, screenshotId}]. Array index = video
+    // second = real-world minute — THE video-time ↔ wall-clock map (sampled
+    // rows alone can't provide it: compile skips undecodable units). NULL
+    // for sessions compiled before edit support (not editable).
+    videoUnits: jsonb("video_units").$type<
+      { capturedAt: string; screenshotId: string }[]
+    >(),
+    // The UNCUT compiled video. Equal to video_r2_key until an edited
+    // compile repoints video_r2_key at edited.mp4. Cut-compiles always
+    // start from this file, so edits never compound quality loss. NULLed by
+    // the retention job once an edited session's edit window closes (the
+    // cut content must eventually be truly gone).
+    originalVideoR2Key: text("original_video_r2_key"),
+    // True when assembly used the stream-copy path, guaranteeing the pinned
+    // 1s closed-GOP grid that makes lossless second-boundary cutting
+    // possible. False → the cut-compile re-encodes instead.
+    videoCopyAligned: boolean("video_copy_aligned"),
+    // True when original_video_r2_key holds a PREVIEW-grade build: reduced
+    // resolution, cheap encoder settings, made only so the editor can open
+    // promptly on a long session. Such a file must never be published — the
+    // publish step re-encodes from the capture units at full quality instead
+    // of stream-copying it.
+    //
+    // NULL/false means the original is publish-grade, which is both the
+    // legacy shape (every session compiled before the two-tier split) and
+    // what a session that never entered the edit flow still builds. That
+    // makes the flag safe to read as "false unless proven otherwise".
+    originalIsPreview: boolean("original_is_preview").notNull().default(false),
+    // User-initiated cut-compiles, capped at MAX_USER_RECOMPILES.
+    recompileCount: integer("recompile_count").notNull().default(0),
+    // When the last cut-compile finished; anchors the EDIT_WINDOW_DAYS
+    // original-video retention backstop for edited sessions.
+    lastEditCompileAt: timestamp("last_edit_compile_at", {
+      withTimezone: true,
+    }),
+    // Edit hold: while set and in the future, a stopped session's compiled
+    // video stays UNPUBLISHED (status remains "stopped", video_r2_key null)
+    // so the owner can cut it before programs ever see `complete`. Set by
+    // POST /stop {edit: true}; cleared by the finalize call or the expiry
+    // job (which auto-publishes uncut). Editing is only possible during
+    // this hold — never after complete, because programs act on complete.
+    editHoldUntil: timestamp("edit_hold_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -154,6 +235,15 @@ export const screenshots = pgTable(
     height: integer("height"),
     fileSizeBytes: integer("file_size_bytes"),
     sampled: boolean("sampled").notNull().default(false),
+    // Payload format of this capture unit: 'jpeg' (legacy single frame) or
+    // 'webm'/'mp4' (per-minute clip of ~6 frames). Decided per upload by the
+    // client's `format` query param, gated by sessions.clips_enabled —
+    // sessions may mix formats (e.g. a clip client falling back to jpeg
+    // mid-session); the compiler handles both per row.
+    format: text("format").notNull().default("jpeg"),
+    // Client-reported frame count inside a clip. Informational/telemetry —
+    // the compiler derives the real count by demuxing. NULL for jpeg rows.
+    frameCount: integer("frame_count"),
     // Client-attested (or server-fallback) capture time. Populated for ALL
     // new rows post-migration 0007 regardless of mode — credit-mode rows use
     // it for streak math, bucket-mode rows store it as debug-only data.

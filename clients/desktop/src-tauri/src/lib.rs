@@ -1,10 +1,64 @@
 mod capture;
+mod clips;
 mod crop;
+mod native_menu;
+#[cfg(target_os = "macos")]
+mod native_tray;
 mod pipewire;
 mod screencast;
 mod tray;
 #[cfg(target_os = "windows")]
 mod windows_permissions;
+
+/// Scoped App Nap / idle-system-sleep suppression (macOS).
+///
+/// The assertion must be held while a session is recording (or paused
+/// mid-session) so macOS never throttles the capture cadence or lets the
+/// machine idle-sleep out from under an active recording. It must NOT be
+/// held for the whole process lifetime — that kept the user's Mac from ever
+/// idle-sleeping just because Lookout sat open on the gallery.
+#[cfg(target_os = "macos")]
+mod power {
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    use std::sync::Mutex;
+
+    struct ActivityToken(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+    // SAFETY: the token is an opaque handle whose only use is being handed
+    // back to `NSProcessInfo::endActivity`, which is documented thread-safe.
+    unsafe impl Send for ActivityToken {}
+
+    static ACTIVITY: Mutex<Option<ActivityToken>> = Mutex::new(None);
+
+    /// Begin the recording assertion. Idempotent — a second call while one
+    /// is already held is a no-op.
+    pub fn begin_recording_assertion() {
+        let mut guard = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            return;
+        }
+        let info = NSProcessInfo::processInfo();
+        let reason = NSString::from_str("Periodic screenshot capture must not be throttled");
+        let opts =
+            NSActivityOptions::LatencyCritical | NSActivityOptions::IdleSystemSleepDisabled;
+        *guard = Some(ActivityToken(
+            info.beginActivityWithOptions_reason(opts, &reason),
+        ));
+        eprintln!("[power] recording sleep/App Nap suppression ON");
+    }
+
+    /// End the recording assertion (no-op if none is held).
+    pub fn end_recording_assertion() {
+        let mut guard = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(token) = guard.take() {
+            // SAFETY: `token.0` came from `beginActivityWithOptions_reason`,
+            // so it is the correct activity type.
+            unsafe { NSProcessInfo::processInfo().endActivity(&token.0) };
+            eprintln!("[power] recording sleep/App Nap suppression OFF");
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFNumberType, CFString, CGRect};
@@ -53,10 +107,20 @@ struct CaptureLoopHandle {
 /// Shared state for the Rust-side tray title timer.
 /// Uses atomics so the capture loop can update tracked_seconds
 /// without acquiring a mutex on every tick.
+///
+/// This mirrors `useSessionTimerState` in @lookout/react. The menu bar,
+/// the tray popup and the main window each tick their own clock (so a
+/// throttled WebView can't stall the menu bar), which only works if all
+/// three apply the *same* rules to the same anchor: ratchet the base
+/// forward, cap interpolation at one capture interval, and drop the
+/// interpolated remainder while paused. Diverge on any of those and the
+/// menu bar visibly disagrees with the main window.
 struct TrayTimerState {
     /// Authoritative tracked seconds from the last server response.
+    /// Ratchets forward only — see `sync_tray_timer`.
     tracked_seconds: AtomicI64,
-    /// Wall-clock instant when tracking started (or last synced).
+    /// Wall-clock instant `tracked_seconds` last advanced (the
+    /// interpolation anchor).
     started_at: Mutex<StdInstant>,
     /// Whether the timer is actively ticking (false = paused).
     is_running: AtomicBool,
@@ -508,6 +572,11 @@ pub struct UploadUrlResponse {
     /// Sticky tracking mode for the session. Absent on pre-credit-mode servers.
     #[serde(rename = "trackingMode", default)]
     pub tracking_mode: Option<String>,
+    /// GRANTED payload format — may differ from the requested one (the
+    /// server downgrades clip formats to "jpeg" on sessions without clips).
+    /// Absent on pre-clips servers.
+    #[serde(rename = "format", default)]
+    pub format: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -560,55 +629,569 @@ fn get_blacklisted_apps(state: State<'_, AppState>) -> Result<Vec<String>, Strin
     Ok(blacklist.clone())
 }
 
-/// List unique app names from all running windows (across all spaces).
-/// Returns a sorted, deduplicated list of app names.
-#[tauri::command]
-fn list_running_apps() -> Vec<String> {
+/// One entry in the app list shown on the Filtered Apps page.
+#[derive(Clone, Serialize)]
+pub struct AppEntry {
+    pub name: String,
+    /// Platform-specific icon lookup key, passed back to `get_app_icon`:
+    /// macOS = .app bundle path, Windows = Start Menu .lnk path,
+    /// Linux = the .desktop entry's Icon= value.
+    pub path: Option<String>,
+    /// Whether the app is currently running (used to sort open apps first).
+    pub running: bool,
+}
+
+/// Read an app bundle's display name (CFBundleDisplayName, falling back to
+/// CFBundleName). These are what `kCGWindowOwnerName` reports for the app's
+/// windows, so blacklist entries created from this list match redaction.
+#[cfg(target_os = "macos")]
+fn bundle_display_name(path: &std::path::Path) -> Option<String> {
+    use objc2_foundation::{NSBundle, NSString};
+
+    let ns_path = NSString::from_str(path.to_str()?);
+    let bundle = NSBundle::bundleWithPath(&ns_path)?;
+    for key in ["CFBundleDisplayName", "CFBundleName"] {
+        let key = NSString::from_str(key);
+        if let Some(value) = bundle.objectForInfoDictionaryKey(&key) {
+            if let Ok(s) = value.downcast::<NSString>() {
+                let s = s.to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Scan the standard application folders for installed .app bundles.
+/// Slow-ish (reads each bundle's Info.plist), so callers cache the result.
+#[cfg(target_os = "macos")]
+fn scan_installed_apps() -> Vec<AppEntry> {
+    let mut queue: Vec<(std::path::PathBuf, u8)> = vec![
+        ("/Applications".into(), 0),
+        ("/System/Applications".into(), 0),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        queue.push((std::path::Path::new(&home).join("Applications"), 0));
+    }
+
+    let mut apps = Vec::new();
+    // Scan one folder level deep: /Applications/Utilities/X.app and vendor
+    // folders like /Applications/Adobe .../X.app are common.
+    while let Some((dir, depth)) = queue.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with('.') {
+                continue;
+            }
+            if file_name.ends_with(".app") {
+                let name = bundle_display_name(&path)
+                    .unwrap_or_else(|| file_name.trim_end_matches(".app").to_string());
+                if name.is_empty() || name == "Lookout" || should_exclude_window(&name, "") {
+                    continue;
+                }
+                apps.push(AppEntry {
+                    name,
+                    path: Some(path.to_string_lossy().into_owned()),
+                    running: false,
+                });
+            } else if depth < 1 && path.is_dir() {
+                queue.push((path, depth + 1));
+            }
+        }
+    }
+    apps
+}
+
+/// Scan Start Menu shortcuts — the canonical "installed apps" on Windows.
+#[cfg(target_os = "windows")]
+fn scan_installed_apps() -> Vec<AppEntry> {
+    let mut queue: Vec<(std::path::PathBuf, u8)> = Vec::new();
+    if let Ok(program_data) = std::env::var("ProgramData") {
+        queue.push((
+            std::path::Path::new(&program_data).join(r"Microsoft\Windows\Start Menu\Programs"),
+            0,
+        ));
+    }
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        queue.push((
+            std::path::Path::new(&app_data).join(r"Microsoft\Windows\Start Menu\Programs"),
+            0,
+        ));
+    }
+
+    let mut apps = Vec::new();
+    while let Some((dir, depth)) = queue.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // `entry.file_type()` reads the attributes the directory
+            // enumeration already returned; `entry.path().is_dir()` would stat
+            // each entry again. On Windows that is a real syscall per shortcut,
+            // through whatever filter drivers and AV hooks are installed, and
+            // the Start Menu tree has hundreds of entries.
+            // ...but file_type() does NOT follow symlinks where is_dir() did,
+            // so a directory junction in the Start Menu would stop being
+            // traversed. Fall back to the stat only for that rare case.
+            let path = entry.path();
+            let is_dir = match entry.file_type() {
+                Ok(t) if t.is_symlink() => path.is_dir(),
+                Ok(t) => t.is_dir(),
+                Err(_) => path.is_dir(),
+            };
+            if is_dir {
+                if depth < 3 {
+                    queue.push((path, depth + 1));
+                }
+                continue;
+            }
+            let is_lnk = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("lnk"));
+            if !is_lnk {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let name = name.to_string();
+            let lower = name.to_lowercase();
+            if name.is_empty()
+                || name == "Lookout"
+                || should_exclude_window(&name, "")
+                || lower.starts_with("uninstall")
+                || lower.contains("uninstaller")
+            {
+                continue;
+            }
+            apps.push(AppEntry {
+                name,
+                path: Some(path.to_string_lossy().into_owned()),
+                running: false,
+            });
+        }
+    }
+    apps
+}
+
+/// Parse the fields we need from a .desktop file's [Desktop Entry] section.
+/// Returns (name, icon) or None if the entry isn't a visible application.
+#[cfg(target_os = "linux")]
+fn parse_desktop_entry(content: &str) -> Option<(String, Option<String>)> {
+    let mut in_section = false;
+    let mut name = None;
+    let mut icon = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            if in_section {
+                break; // end of [Desktop Entry]
+            }
+            in_section = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("NoDisplay=") {
+            if value.trim() == "true" {
+                return None;
+            }
+        } else if let Some(value) = line.strip_prefix("Type=") {
+            if value.trim() != "Application" {
+                return None;
+            }
+        } else if let Some(value) = line.strip_prefix("Name=") {
+            name = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Icon=") {
+            icon = Some(value.trim().to_string());
+        }
+    }
+    Some((name.filter(|n| !n.is_empty())?, icon))
+}
+
+/// Scan .desktop entries — the canonical "installed apps" on Linux.
+#[cfg(target_os = "linux")]
+fn scan_installed_apps() -> Vec<AppEntry> {
+    let mut dirs: Vec<std::path::PathBuf> = vec![
+        "/usr/share/applications".into(),
+        "/usr/local/share/applications".into(),
+        "/var/lib/flatpak/exports/share/applications".into(),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::Path::new(&home);
+        dirs.push(home.join(".local/share/applications"));
+        dirs.push(home.join(".local/share/flatpak/exports/share/applications"));
+    }
+
+    let mut apps = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some((name, icon)) = parse_desktop_entry(&content) else {
+                continue;
+            };
+            if name == "Lookout" || should_exclude_window(&name, "") {
+                continue;
+            }
+            apps.push(AppEntry {
+                name,
+                path: icon,
+                running: false,
+            });
+        }
+    }
+    apps
+}
+
+fn installed_apps_cached() -> &'static [AppEntry] {
+    static CACHE: std::sync::OnceLock<Vec<AppEntry>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(scan_installed_apps)
+}
+
+/// (name, icon-lookup key) pairs for currently running apps. Names come from
+/// the same source redaction matches against (kCGWindowOwnerName on macOS,
+/// xcap `app_name` elsewhere), so a running app always blacklists correctly
+/// even when its installed entry is named differently.
+fn running_apps() -> Vec<(String, Option<String>)> {
     #[cfg(target_os = "macos")]
     {
-        let Some(entries) = CGWindowListCopyWindowInfo(
-            CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements,
-            0,
-        ) else {
-            return Vec::new();
-        };
+        use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
 
-        let mut apps = std::collections::BTreeSet::new();
-        for i in 0..entries.count() {
-            let dict_ref = unsafe { entries.value_at_index(i) } as *const CFDictionary;
-            if dict_ref.is_null() {
-                continue;
-            }
-            let dict = unsafe { &*dict_ref };
-            let app_name = dict_string(dict, "kCGWindowOwnerName").unwrap_or_default();
-            if app_name.is_empty() || app_name == "Lookout" {
-                continue;
-            }
-            let title = dict_string(dict, "kCGWindowName").unwrap_or_default();
-            if should_exclude_window(&app_name, &title) {
-                continue;
-            }
-            apps.insert(app_name);
-        }
-        apps.into_iter().collect()
+        let workspace = NSWorkspace::sharedWorkspace();
+        workspace
+            .runningApplications()
+            .iter()
+            .filter(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular)
+            .filter_map(|app| {
+                let name = app.localizedName()?.to_string();
+                let path = app
+                    .bundleURL()
+                    .and_then(|url| url.path())
+                    .map(|p| p.to_string());
+                Some((name, path))
+            })
+            .collect()
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        // On non-macOS, return window app names from xcap
         use xcap::Window;
-        let mut apps = std::collections::BTreeSet::new();
+        let mut names = std::collections::BTreeSet::new();
         if let Ok(windows) = Window::all() {
             for w in windows {
                 if let Ok(name) = w.app_name() {
-                    if !name.is_empty() && name != "Lookout" && !should_exclude_window(&name, &w.title().unwrap_or_default()) {
-                        apps.insert(name);
+                    if !name.is_empty() && !should_exclude_window(&name, &w.title().unwrap_or_default()) {
+                        names.insert(name);
                     }
                 }
             }
         }
-        apps.into_iter().collect()
+        names.into_iter().map(|name| (name, None)).collect()
     }
+}
+
+/// List apps for the Filtered Apps page, sorted by name: every installed app
+/// (scanned once per process and cached) merged with currently running apps.
+/// Only real applications appear — helper/XPC processes that merely own
+/// windows (e.g. "CursorUIViewService") don't.
+///
+/// The work is BLOCKING — a Start Menu tree walk on the first call, and a
+/// window enumeration on every call — so it runs on the blocking pool rather
+/// than on the async runtime. `async fn` alone was not enough: the body never
+/// yields, so it occupied a tokio worker for its whole duration, and the
+/// capture loop lives on those same workers. A slow enumeration could
+/// therefore delay a capture tick, not just the Settings page.
+#[tauri::command]
+async fn list_installed_apps() -> Vec<AppEntry> {
+    tauri::async_runtime::spawn_blocking(list_installed_apps_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+/// Pre-warm the installed-app cache so the first visit to Filtered Apps doesn't
+/// pay for the app scan while the user waits.
+///
+/// DEFERRED on purpose. The scan is disk-bound — a Start Menu tree walk on
+/// Windows, /Applications on macOS, .desktop files on Linux — and launch is
+/// already the most I/O-contended moment in the process's life: the webview is
+/// loading its own assets at the same time. Starting the scan immediately would
+/// trade a faster Settings page for a slower app open, which is the wrong way
+/// round. A few seconds' delay is still far earlier than anyone navigates to
+/// Filtered Apps, and by then the launch I/O has settled.
+fn prewarm_installed_apps() {
+    std::thread::Builder::new()
+        .name("app-scan-prewarm".into())
+        .spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let _ = installed_apps_cached();
+        })
+        // A failed prewarm is not worth failing startup over: the cache just
+        // fills lazily on first use, exactly as it did before.
+        .ok();
+}
+
+fn list_installed_apps_blocking() -> Vec<AppEntry> {
+    // name -> (path, running); BTreeMap keeps the result sorted by name.
+    let mut apps: std::collections::BTreeMap<String, (Option<String>, bool)> =
+        installed_apps_cached()
+            .iter()
+            .map(|a| (a.name.clone(), (a.path.clone(), false)))
+            .collect();
+
+    for (name, path) in running_apps() {
+        if name.is_empty() || name == "Lookout" || should_exclude_window(&name, "") {
+            continue;
+        }
+        match apps.entry(name) {
+            std::collections::btree_map::Entry::Occupied(mut e) => {
+                let (existing_path, running) = e.get_mut();
+                if existing_path.is_none() {
+                    *existing_path = path;
+                }
+                *running = true;
+            }
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert((path, true));
+            }
+        }
+    }
+
+    apps.into_iter()
+        .map(|(name, (path, running))| AppEntry {
+            name,
+            path,
+            running,
+        })
+        .collect()
+}
+
+/// Return a small PNG (base64) of an app's icon. `path` is the icon lookup
+/// key from `AppEntry.path`. Cached per key; async so lookups run off the
+/// main thread (a sync command here froze the UI while icons rasterized).
+#[tauri::command]
+async fn get_app_icon(path: String) -> Option<String> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&path)
+    {
+        return hit.clone();
+    }
+
+    let result = compute_app_icon(&path);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path, result.clone());
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn compute_app_icon(path: &str) -> Option<String> {
+    use base64::Engine as _;
+    use objc2::AnyThread as _;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+    use objc2_core_foundation::{CGPoint, CGSize};
+    use objc2_foundation::{NSDictionary, NSString};
+
+    let icon = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(path));
+    // Ask for a small rect so IconServices hands back the small icon
+    // representation instead of rasterizing the full 1024px artwork.
+    let mut rect = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: 32.0,
+            height: 32.0,
+        },
+    };
+    unsafe { icon.CGImageForProposedRect_context_hints(&mut rect, None, None) }
+        .and_then(|cg| {
+            let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg);
+            unsafe {
+                rep.representationUsingType_properties(
+                    NSBitmapImageFileType::PNG,
+                    &NSDictionary::new(),
+                )
+            }
+        })
+        .map(|png| base64::engine::general_purpose::STANDARD.encode(png.to_vec()))
+}
+
+/// Windows: shell icon for the Start Menu .lnk (resolves to the target
+/// exe's icon), converted HICON -> RGBA -> PNG.
+#[cfg(target_os = "windows")]
+fn compute_app_icon(path: &str) -> Option<String> {
+    use base64::Engine as _;
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    };
+    use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
+
+    // SHGetFileInfoW needs COM for .lnk resolution; commands run on worker
+    // threads, so initialize per call (no-op if already initialized).
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut info = SHFILEINFOW::default();
+    let ok = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut info),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if ok == 0 || info.hIcon.is_invalid() {
+        return None;
+    }
+
+    let png = (|| {
+        let mut icon_info = ICONINFO::default();
+        unsafe { GetIconInfo(info.hIcon, &mut icon_info) }.ok()?;
+
+        let result = (|| {
+            let mut bmp = BITMAP::default();
+            let got = unsafe {
+                GetObjectW(
+                    icon_info.hbmColor.into(),
+                    std::mem::size_of::<BITMAP>() as i32,
+                    Some(&mut bmp as *mut _ as *mut _),
+                )
+            };
+            if got == 0 || bmp.bmWidth <= 0 || bmp.bmHeight <= 0 {
+                return None;
+            }
+            let (w, h) = (bmp.bmWidth, bmp.bmHeight);
+
+            let mut bmi = BITMAPINFO::default();
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = w;
+            bmi.bmiHeader.biHeight = -h; // negative = top-down rows
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB.0;
+
+            let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+            let hdc = unsafe { GetDC(None) };
+            let lines = unsafe {
+                GetDIBits(
+                    hdc,
+                    icon_info.hbmColor,
+                    0,
+                    h as u32,
+                    Some(buf.as_mut_ptr() as *mut _),
+                    &mut bmi,
+                    DIB_RGB_COLORS,
+                )
+            };
+            unsafe { ReleaseDC(None, hdc) };
+            if lines == 0 {
+                return None;
+            }
+
+            // BGRA -> RGBA; some icons come back with an empty alpha
+            // channel, which would render as fully transparent.
+            for px in buf.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            if buf.chunks_exact(4).all(|px| px[3] == 0) {
+                for px in buf.chunks_exact_mut(4) {
+                    px[3] = 255;
+                }
+            }
+
+            let img = image::RgbaImage::from_raw(w as u32, h as u32, buf)?;
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut out, image::ImageFormat::Png)
+                .ok()?;
+            Some(out.into_inner())
+        })();
+
+        unsafe {
+            let _ = DeleteObject(icon_info.hbmColor.into());
+            let _ = DeleteObject(icon_info.hbmMask.into());
+        }
+        result
+    })();
+
+    unsafe {
+        let _ = DestroyIcon(info.hIcon);
+    }
+    png.map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Linux: resolve the .desktop Icon= value against the hicolor theme and
+/// pixmaps dirs (PNG only) and return the file as-is.
+#[cfg(target_os = "linux")]
+fn compute_app_icon(icon: &str) -> Option<String> {
+    use base64::Engine as _;
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if icon.starts_with('/') {
+        candidates.push(icon.into());
+    } else {
+        let mut base_dirs: Vec<String> = vec![
+            "/usr/share".into(),
+            "/usr/local/share".into(),
+            "/var/lib/flatpak/exports/share".into(),
+        ];
+        if let Ok(home) = std::env::var("HOME") {
+            base_dirs.push(format!("{home}/.local/share"));
+            base_dirs.push(format!("{home}/.local/share/flatpak/exports/share"));
+        }
+        for base in &base_dirs {
+            for size in ["48x48", "64x64", "32x32", "128x128", "256x256"] {
+                candidates.push(format!("{base}/icons/hicolor/{size}/apps/{icon}.png").into());
+            }
+            candidates.push(format!("{base}/pixmaps/{icon}.png").into());
+        }
+    }
+
+    for path in candidates {
+        let is_png = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+        if !is_png {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&path) {
+            return Some(base64::engine::general_purpose::STANDARD.encode(bytes));
+        }
+    }
+    None
 }
 
 /// List available capture sources (monitors + windows).
@@ -816,6 +1399,22 @@ fn take_screenshot(
         pipewire_fds = guard.clone();
     }
     capture::take_screenshot(source, max_width, max_height, jpeg_quality, &pipewire_fds)
+}
+
+/// Shared HTTP client for all server/R2 traffic. Building a `reqwest::Client`
+/// allocates a fresh connection pool + TLS config, so constructing one per
+/// request (as each capture tick used to) both wastes CPU and forces a new
+/// TCP/TLS handshake every 60 seconds. One shared client keeps connections
+/// alive between ticks. Timeouts differ per call site, so they're applied
+/// per-request via `RequestBuilder::timeout` instead of on the client.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
+    })
 }
 
 /// Free-form client telemetry string sent on every upload-url request, e.g.
@@ -1036,24 +1635,65 @@ macro_rules! retry_upload_step {
 /// screenshot was actually taken. Optional — when `None`, the request
 /// matches the legacy bucket-mode payload byte-for-byte. When `Some`, it
 /// opts the session into credit-mode tracking on the first request.
-async fn upload_and_confirm(
-    jpeg_base64: &str,
+///
+/// Takes the JPEG as `bytes::Bytes` (cheap refcounted clones for retries —
+/// no full-buffer copy per attempt) plus its base64 form, which is only
+/// carried through for the JS preview. Callers that capture natively encode
+/// base64 exactly once; nothing here decodes it back.
+/// One capture unit ready for upload: the legacy single JPEG or an H.264
+/// MP4 clip. The content type must match the granted format — the
+/// presigned URL is signed with it.
+struct UploadPayload {
+    bytes: bytes::Bytes,
+    content_type: &'static str,
+    /// `format` query value for upload-url. None = legacy JPEG request.
+    format: Option<&'static str>,
+    /// Frames inside a clip (confirm-body telemetry). None for JPEG.
+    frame_count: Option<u32>,
     width: u32,
     height: u32,
+    /// JPEG preview (base64) of the unit's last frame, for the UI event.
+    preview_base64: String,
+}
+
+impl UploadPayload {
+    fn jpeg(bytes: bytes::Bytes, base64: String, width: u32, height: u32) -> Self {
+        Self {
+            bytes,
+            content_type: "image/jpeg",
+            format: None,
+            frame_count: None,
+            width,
+            height,
+            preview_base64: base64,
+        }
+    }
+
+    fn mp4(clip: clips::FinishedClip, preview_base64: String) -> Self {
+        Self {
+            bytes: bytes::Bytes::from(clip.mp4),
+            content_type: "video/mp4",
+            format: Some("mp4"),
+            frame_count: Some(clip.frame_count),
+            width: clip.width,
+            height: clip.height,
+            preview_base64,
+        }
+    }
+}
+
+async fn upload_and_confirm(
+    payload: UploadPayload,
     captured_at: Option<&str>,
     config: &SessionConfig,
     app: &AppHandle,
 ) -> Result<CaptureUploadResult, String> {
-    let jpeg_bytes = base64_decode(jpeg_base64)?;
-    let size_bytes = jpeg_bytes.len();
+    let size_bytes = payload.bytes.len();
+    const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     // Step 1: Get presigned URL from server
     let _ = app.emit("capture-progress", "getting upload url from server...");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    let client = http_client();
     let upload_url_url = format!(
         "{}/api/sessions/{}/upload-url",
         config.api_base_url, config.token
@@ -1064,11 +1704,15 @@ async fn upload_and_confirm(
     if let Some(c) = captured_at {
         query.push(("capturedAt", c));
     }
+    if let Some(f) = payload.format {
+        query.push(("format", f));
+    }
     // Each attempt re-requests a FRESH presigned URL (it has a 120s expiry).
     let upload_url_resp: UploadUrlResponse = retry_upload_step!("upload-url", {
         let url_response = client
             .get(upload_url_url.as_str())
             .query(&query)
+            .timeout(STEP_TIMEOUT)
             .send()
             .await
             .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?;
@@ -1091,6 +1735,20 @@ async fn upload_and_confirm(
         ),
     );
 
+    // The presigned URL is signed for the GRANTED format's content type —
+    // uploading a clip against a jpeg grant would fail the signature. A
+    // downgrade here (clips disabled server-side, pre-clips server) is a
+    // terminal error for this payload; the capture loop retries the tick
+    // with its JPEG fallback.
+    if let Some(requested) = payload.format {
+        let granted = upload_url_resp.format.as_deref().unwrap_or("jpeg");
+        if granted != requested {
+            return Err(format!(
+                "server granted \"{granted}\" for a \"{requested}\" clip upload"
+            ));
+        }
+    }
+
     // Step 2: Upload JPEG to R2
     let _ = app.emit(
         "capture-progress",
@@ -1107,8 +1765,10 @@ async fn upload_and_confirm(
     retry_upload_step!(r2_label, {
         client
             .put(upload_url_resp.upload_url.as_str())
-            .header("Content-Type", "image/jpeg")
-            .body(jpeg_bytes.clone())
+            .header("Content-Type", payload.content_type)
+            // Bytes::clone is a refcount bump, not a buffer copy.
+            .body(payload.bytes.clone())
+            .timeout(STEP_TIMEOUT)
             .send()
             .await
             .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?
@@ -1120,18 +1780,23 @@ async fn upload_and_confirm(
 
     // Step 3: Confirm upload with server
     let _ = app.emit("capture-progress", "confirming upload with server...");
+    let mut confirm_body = serde_json::json!({
+        "screenshotId": upload_url_resp.screenshot_id,
+        "width": payload.width,
+        "height": payload.height,
+        "fileSize": size_bytes,
+    });
+    if let Some(fc) = payload.frame_count {
+        confirm_body["frameCount"] = fc.into();
+    }
     let confirm_resp: ConfirmResponse = retry_upload_step!("confirm", {
         let confirm_response = client
             .post(format!(
                 "{}/api/sessions/{}/screenshots",
                 config.api_base_url, config.token
             ))
-            .json(&serde_json::json!({
-                "screenshotId": upload_url_resp.screenshot_id,
-                "width": width,
-                "height": height,
-                "fileSize": size_bytes,
-            }))
+            .json(&confirm_body)
+            .timeout(STEP_TIMEOUT)
             .send()
             .await
             .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?;
@@ -1158,9 +1823,9 @@ async fn upload_and_confirm(
         confirmed: confirm_resp.confirmed,
         tracked_seconds: confirm_resp.tracked_seconds,
         next_expected_at: confirm_resp.next_expected_at,
-        preview_base64: jpeg_base64.to_string(),
-        preview_width: width,
-        preview_height: height,
+        preview_base64: payload.preview_base64,
+        preview_width: payload.width,
+        preview_height: payload.height,
     })
 }
 
@@ -1383,21 +2048,27 @@ async fn capture_and_upload(
         pipewire_fds = guard.clone();
     }
 
-    let screenshot = capture::take_stitched_screenshots_with_blacklist(
-        &sources,
-        max_width,
-        max_height,
-        jpeg_quality,
-        &pipewire_fds,
-        &blacklisted,
-    )?;
+    // Screen capture + JPEG encode is heavy blocking work — keep it off the
+    // async runtime's worker threads (same as the Rust capture loop does).
+    let screenshot = tokio::task::spawn_blocking(move || {
+        capture::take_stitched_screenshots_raw_with_blacklist(
+            &sources,
+            max_width,
+            max_height,
+            jpeg_quality,
+            &pipewire_fds,
+            &blacklisted,
+        )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking panicked: {e}"))??;
     let _ = app.emit(
         "capture-progress",
         format!(
             "captured {}x{} ({}KB jpeg)",
             screenshot.width,
             screenshot.height,
-            screenshot.size_bytes / 1024
+            screenshot.data.len() / 1024
         ),
     );
 
@@ -1406,10 +2077,14 @@ async fn capture_and_upload(
     } else {
         None
     };
+    let jpeg_base64 = base64_encode(&screenshot.data);
     upload_and_confirm(
-        &screenshot.base64,
-        screenshot.width,
-        screenshot.height,
+        UploadPayload::jpeg(
+            bytes::Bytes::from(screenshot.data),
+            jpeg_base64,
+            screenshot.width,
+            screenshot.height,
+        ),
         captured_at.as_deref(),
         &config,
         &app,
@@ -1444,7 +2119,14 @@ async fn upload_frame(
     } else {
         None
     };
-    upload_and_confirm(&base64, width, height, captured_at.as_deref(), &config, &app).await
+    let jpeg_bytes = bytes::Bytes::from(base64_decode(&base64)?);
+    upload_and_confirm(
+        UploadPayload::jpeg(jpeg_bytes, base64, width, height),
+        captured_at.as_deref(),
+        &config,
+        &app,
+    )
+    .await
 }
 
 // ── Capture-loop interval (seconds) ─────────────────────────────
@@ -1452,19 +2134,68 @@ const CAPTURE_INTERVAL_SECS: u64 = 60;
 /// If the wall-clock gap between ticks exceeds this, the machine
 /// probably slept (or the WebView was throttled hard).
 const SLEEP_THRESHOLD_SECS: u64 = CAPTURE_INTERVAL_SECS * 2 + 30; // 150s
+/// Fallback frame cadence when the server doesn't advertise one (pre-clips
+/// servers): every 10s = 6 frames/min. Mirrors CLIP_FRAME_INTERVAL_MS in
+/// @lookout/shared. When the server sends `frameIntervalMs` on the session
+/// GET, that value wins — the cadence is server-authoritative. Frames go
+/// through the identical redaction-aware capture path as uploads; in clips
+/// mode they're recorded into the clip, and the JPEG preview side is only
+/// produced while the window is focused.
+const DEFAULT_FRAME_INTERVAL_MS: u64 = 10_000;
 
-/// Format seconds into the same tray title format as the JS side:
-/// >0h: "{h}h {m}m", 0m: "< 1m", else: "{m}m"
+/// Delay from capture start to the FIRST upload tick. Mirrors
+/// CLIP_FIRST_CUT_DELAY_MS in @lookout/shared.
+///
+/// Deliberately not a multiple of the frame cadence: the opening clip is the
+/// session's seed capture, which credits 0 seconds and which the compiler
+/// drops from the video outright, so its frame density doesn't matter. What
+/// this delay does control is how long the user stares at an unstarted
+/// session — and tying it to the cadence turned every slower cadence into a
+/// 20-second-plus wait.
+const CLIP_FIRST_CUT_DELAY_MS: u64 = 8_000;
+
+/// Consecutive clip-encoder failures tolerated before this capture run gives
+/// up on clips and records plain JPEGs for the rest of the session.
+///
+/// A broken encoder is already survivable one interval at a time (each
+/// failure falls back to a JPEG), but "survivable" was not the same as
+/// "quiet": on a machine where the encoder can never initialize, the loop
+/// retried it on every single frame — for hours — each attempt paying the
+/// full cost of constructing and tearing down an OS encoder, and writing a
+/// line to stderr. Latching off after a few consecutive failures keeps the
+/// recording intact and stops the thrash.
+const MAX_CLIP_ENCODER_FAILURES: u32 = 3;
+
+/// Max seconds the menu-bar time may run ahead of the last server-credited
+/// `tracked_seconds`. Must equal `MAX_INTERPOLATION_S` in
+/// @lookout/react's useSessionTimer — one capture interval. Without the cap
+/// the menu bar kept counting through a capture stall while the main window
+/// froze at base + 60, and the two never reconverged.
+const MAX_TRAY_INTERPOLATION_SECS: i64 = CAPTURE_INTERVAL_SECS as i64;
+
+/// The Rust mirror of `deriveDisplaySeconds` in @lookout/react. Keep the two
+/// in step: the menu bar and the main window each tick their own clock, so any
+/// difference here is directly visible as the two showing different times.
+fn tray_display_seconds(base_seconds: i64, elapsed_secs: i64, running: bool) -> i64 {
+    if !running {
+        // Paused drops the interpolated remainder rather than freezing it,
+        // matching the main window's snap-down.
+        return base_seconds;
+    }
+    base_seconds + elapsed_secs.clamp(0, MAX_TRAY_INTERPOLATION_SECS)
+}
+
+/// Format seconds into a clock-style tray title:
+/// >0h: "{h}:{mm:02}:{ss:02}", else: "{mm:02}:{ss:02}"
 fn format_tray_time(total_seconds: i64) -> String {
     let total = total_seconds.max(0) as u64;
     let h = total / 3600;
     let m = (total % 3600) / 60;
+    let s = total % 60;
     if h > 0 {
-        format!("{h}h {m}m")
-    } else if m == 0 {
-        "< 1m".to_string()
+        format!("{h}:{m:02}:{s:02}")
     } else {
-        format!("{m}m")
+        format!("{m:02}:{s:02}")
     }
 }
 
@@ -1480,6 +2211,14 @@ async fn tray_timer_task(
     let mut ticker = interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    // The title only changes at minute granularity, so most 1s ticks would
+    // rewrite the exact same string. Cache the last text and skip redundant
+    // native tray updates. After a paused stretch the JS side may have
+    // overwritten the title (paused indicator), so force one refresh on the
+    // first running tick after a pause even if the text matches.
+    let mut last_title: Option<String> = None;
+    let mut was_paused = false;
+
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
@@ -1489,24 +2228,51 @@ async fn tray_timer_task(
             }
         }
 
-        if !timer_state.is_running.load(Ordering::Relaxed) {
-            continue;
-        }
-
         let base_seconds = timer_state.tracked_seconds.load(Ordering::Relaxed);
+        let running = timer_state.is_running.load(Ordering::Relaxed);
+
         let elapsed = {
             let started = timer_state.started_at.lock().unwrap();
             started.elapsed().as_secs() as i64
         };
-        let display_seconds = base_seconds + elapsed;
+        let display_seconds = tray_display_seconds(base_seconds, elapsed, running);
 
         let time_text = format_tray_time(display_seconds);
-        if let Some(tray) = app.tray_by_id("timelapse_tray") {
-            let _ = tray.set_title(Some(time_text));
+
+        if !running {
+            // Write the frozen value once (a pause snaps the title down by
+            // the dropped remainder), then idle until resume.
+            if last_title.as_deref() != Some(time_text.as_str()) {
+                set_tray_title(&app, &time_text);
+                last_title = Some(time_text);
+            }
+            was_paused = true;
+            continue;
         }
 
-        // Also emit to the tray popup window so it stays in sync
-        let _ = app.emit("tray-timer-tick", display_seconds);
+        if was_paused || last_title.as_deref() != Some(time_text.as_str()) {
+            set_tray_title(&app, &time_text);
+            last_title = Some(time_text);
+        }
+        was_paused = false;
+    }
+}
+
+/// Write the menu-bar time text (and, off macOS, the hover tooltip).
+fn set_tray_title(app: &AppHandle, time_text: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        // None = keep the current pause state; the Swift side renders the
+        // tooltip and the numericText digit roll.
+        let _ = crate::native_tray::update(time_text, None);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(tray) = app.tray_by_id("timelapse_tray") {
+        let _ = tray.set_title(Some(time_text));
+        // Windows doesn't render tray titles — the hover tooltip is the
+        // only way to see the recorded time there.
+        let _ = tray.set_tooltip(Some(format!("Lookout — {time_text} recorded")));
     }
 }
 
@@ -1519,6 +2285,12 @@ fn start_tray_timer(app: &AppHandle, state: &AppState) -> Arc<TrayTimerState> {
     if let Some(ref handle) = *guard {
         return Arc::clone(&handle.state);
     }
+
+    // The tray timer lives exactly as long as a session is being recorded
+    // (screen sessions via start_capture_loop, camera via start_tray_ticker),
+    // so it's the right scope for the keep-awake assertion.
+    #[cfg(target_os = "macos")]
+    power::begin_recording_assertion();
 
     let timer_state = Arc::new(TrayTimerState {
         tracked_seconds: AtomicI64::new(0),
@@ -1553,24 +2325,44 @@ fn stop_tray_timer(state: &AppState) {
         eprintln!("[tray-timer] stopping");
         let _ = handle.cancel_tx.send(true);
         handle.join_handle.abort();
+
+        // Recording is over — let macOS nap/idle-sleep normally again.
+        #[cfg(target_os = "macos")]
+        power::end_recording_assertion();
     }
 }
 
-/// Sync the tray timer to a new authoritative tracked_seconds value
-/// (typically from a capture result). Resets the elapsed counter.
-fn sync_tray_timer(state: &AppState, tracked_seconds: i64) {
-    let guard = state.tray_timer.lock().unwrap();
-    if let Some(ref handle) = *guard {
-        handle
-            .state
-            .tracked_seconds
-            .store(tracked_seconds, Ordering::Relaxed);
-        let mut started = handle.state.started_at.lock().unwrap();
+/// Ratchet `tracked_seconds` to a new authoritative value, re-anchoring the
+/// elapsed counter **only if the value actually advanced**.
+///
+/// Both halves matter for staying in step with the main window:
+///   - Ratchet: an idempotent retry can confirm against a stale read and
+///     return a *lower* `trackedSeconds`. JS keeps the higher value, so
+///     storing the lower one here made the menu bar jump backwards and sit
+///     a minute behind until the next credit.
+///   - Anchor only on advance: a repeated reading must not restart the
+///     interpolation window, or the menu bar loses time the main window keeps.
+fn ratchet_tray_tracked_seconds(timer_state: &TrayTimerState, tracked_seconds: i64) {
+    let prev = timer_state
+        .tracked_seconds
+        .fetch_max(tracked_seconds, Ordering::Relaxed);
+    if tracked_seconds > prev {
+        let mut started = timer_state.started_at.lock().unwrap();
         *started = StdInstant::now();
     }
 }
 
-/// Pause the tray timer (freeze the displayed time).
+/// Sync the tray timer to a new authoritative tracked_seconds value
+/// (typically from a capture result).
+fn sync_tray_timer(state: &AppState, tracked_seconds: i64) {
+    let guard = state.tray_timer.lock().unwrap();
+    if let Some(ref handle) = *guard {
+        ratchet_tray_tracked_seconds(&handle.state, tracked_seconds);
+    }
+}
+
+/// Pause the tray timer. The next tick drops the interpolated remainder and
+/// shows the bare `tracked_seconds`, matching the main window's snap-down.
 fn pause_tray_timer(state: &AppState) {
     let guard = state.tray_timer.lock().unwrap();
     if let Some(ref handle) = *guard {
@@ -1578,7 +2370,7 @@ fn pause_tray_timer(state: &AppState) {
     }
 }
 
-/// Resume the tray timer. Resets the elapsed counter so it continues
+/// Resume the tray timer. Re-anchors the elapsed counter so it continues
 /// from the current tracked_seconds.
 fn resume_tray_timer(state: &AppState) {
     let guard = state.tray_timer.lock().unwrap();
@@ -1620,6 +2412,16 @@ struct CaptureTickError {
     message: String,
 }
 
+/// Event payload for an in-between live-preview frame from the capture
+/// loop (one per frame interval while the window is focused).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapturePreviewFrame {
+    preview_base64: String,
+    preview_width: u32,
+    preview_height: u32,
+}
+
 /// Event payload emitted when the capture loop detects a terminal session state.
 #[derive(Clone, Serialize)]
 struct CaptureSessionTerminated {
@@ -1633,6 +2435,165 @@ struct SessionStatusResponse {
     status: String,
     #[serde(default)]
     tracked_seconds: Option<i64>,
+}
+
+/// What JPEG (if any) a frame grab should produce alongside the raw image.
+#[derive(Clone, Copy, PartialEq)]
+enum GrabJpeg {
+    /// No JPEG — clip frame while the window is unfocused.
+    None,
+    /// Preview-sized (≤854x480, q65) — matches the resolution the live
+    /// preview always used, and keeps the per-frame IPC payload ~5x
+    /// smaller than a full-res frame would be.
+    Preview,
+    /// Full capture resolution at upload quality — the tick frame, which
+    /// doubles as the JPEG upload/fallback payload.
+    Full,
+}
+
+/// Downscale bounds + quality for preview JPEGs (mirrors the values the
+/// dedicated preview protocol always served).
+const PREVIEW_MAX_W: u32 = 854;
+const PREVIEW_MAX_H: u32 = 480;
+const PREVIEW_JPEG_QUALITY: u8 = 65;
+
+/// One frame off the capture pipeline: the raw (redacted, scaled) image
+/// plus, when requested, its JPEG encoding.
+struct FrameGrab {
+    image: image::DynamicImage,
+    jpeg: Option<capture::RawCaptureResult>,
+}
+
+/// Read the current blacklist (+ Linux PipeWire fds) and capture one
+/// redaction-aware stitched frame on the blocking pool. Shared by the
+/// upload tick, the clip frames, and the live preview, so everything goes
+/// through the exact same capture path — Filtered Apps redaction included.
+async fn grab_frame(
+    app: &AppHandle,
+    sources: &[CaptureSource],
+    max_width: u32,
+    max_height: u32,
+    jpeg_quality: u8,
+    jpeg: GrabJpeg,
+) -> Result<FrameGrab, String> {
+    let blacklisted = {
+        let state = app.state::<AppState>();
+        state
+            .blacklisted_apps
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    };
+
+    #[allow(unused_mut, unused_assignments)]
+    let mut pipewire_fds = std::collections::HashMap::new();
+    #[cfg(target_os = "linux")]
+    {
+        let state = app.state::<AppState>();
+        if let Ok(guard) = state.pipewire_fds.lock() {
+            pipewire_fds = guard.clone();
+        };
+    }
+
+    let sources_clone = sources.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let image = capture::take_stitched_screenshots_image_with_blacklist(
+            &sources_clone,
+            max_width,
+            max_height,
+            &pipewire_fds,
+            &blacklisted,
+        )?;
+        let encoded = match jpeg {
+            GrabJpeg::None => None,
+            GrabJpeg::Full => Some(capture::encode_frame_jpeg(&image, jpeg_quality)?),
+            GrabJpeg::Preview => {
+                let (w, h) = (image.width(), image.height());
+                if w > PREVIEW_MAX_W || h > PREVIEW_MAX_H {
+                    let scale =
+                        f64::min(PREVIEW_MAX_W as f64 / w as f64, PREVIEW_MAX_H as f64 / h as f64);
+                    let pw = ((w as f64 * scale).round() as u32).max(2);
+                    let ph = ((h as f64 * scale).round() as u32).max(2);
+                    // Borrowing resize: the full-res frame stays untouched
+                    // for the clip encoder.
+                    image
+                        .as_rgba8()
+                        .and_then(|rgba| capture::fast_resize_buffer(rgba, pw, ph))
+                        .map(|small| {
+                            capture::encode_frame_jpeg(
+                                &image::DynamicImage::ImageRgba8(small),
+                                PREVIEW_JPEG_QUALITY,
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    Some(capture::encode_frame_jpeg(&image, PREVIEW_JPEG_QUALITY)?)
+                }
+            }
+        };
+        Ok(FrameGrab {
+            image,
+            jpeg: encoded,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking panicked: {e}"))
+    .and_then(|r| r)
+}
+
+/// Record one clip-encoder failure, and latch clips off for the rest of the
+/// run once they stop looking transient.
+///
+/// The recording itself is never at risk either way — every clip failure
+/// already falls back to a JPEG for that interval. This is about not
+/// re-attempting a hopeless encoder several times a minute for hours. Any
+/// clip that finalizes successfully resets the counter, so a one-off
+/// hiccup (a display mode change, a busy GPU) never disables clips.
+fn note_clip_failure(failures: &mut u32, clips_mode: &mut bool) {
+    *failures += 1;
+    if *failures >= MAX_CLIP_ENCODER_FAILURES && *clips_mode {
+        *clips_mode = false;
+        eprintln!(
+            "[capture-loop] {} consecutive clip-encoder failures — disabling clips \
+             for this session, continuing with one JPEG per minute",
+            *failures
+        );
+    }
+}
+
+/// Clip capability the server advertises for a session (on the session
+/// GET). Fetched once at capture-loop start; any failure means clips off,
+/// i.e. legacy one-JPEG-per-minute behavior.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SessionClipCapabilities {
+    #[serde(default)]
+    clips_enabled: bool,
+    #[serde(default)]
+    frame_interval_ms: Option<u64>,
+}
+
+async fn fetch_clip_capabilities(config: &SessionConfig) -> SessionClipCapabilities {
+    let url = format!("{}/api/sessions/{}", config.api_base_url, config.token);
+    match http_client()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(res) if res.status().is_success() => res.json().await.unwrap_or_default(),
+        Ok(res) => {
+            eprintln!(
+                "[capture-loop] capability fetch returned HTTP {} — clips off",
+                res.status()
+            );
+            SessionClipCapabilities::default()
+        }
+        Err(e) => {
+            eprintln!("[capture-loop] capability fetch failed ({e}) — clips off");
+            SessionClipCapabilities::default()
+        }
+    }
 }
 
 /// The core capture loop, runs on a tokio task. Captures screenshots at
@@ -1668,12 +2629,10 @@ async fn capture_loop_task(
         app: &AppHandle,
         config: &SessionConfig,
     ) -> Result<bool /* should_continue */, ()> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
+        let client = http_client();
+        let status_timeout = std::time::Duration::from_secs(15);
         let url = format!("{}/api/sessions/{}/status", config.api_base_url, config.token);
-        match client.get(&url).send().await {
+        match client.get(&url).timeout(status_timeout).send().await {
             Ok(res) if res.status().is_success() => {
                 if let Ok(data) = res.json::<SessionStatusResponse>().await {
                     eprintln!("[capture-loop] session status after sleep: {}", data.status);
@@ -1685,7 +2644,7 @@ async fn capture_loop_task(
                             "{}/api/sessions/{}/resume",
                             config.api_base_url, config.token
                         );
-                        let _ = client.post(&resume_url).send().await;
+                        let _ = client.post(&resume_url).timeout(status_timeout).send().await;
                         eprintln!("[capture-loop] session resumed after sleep");
                     } else if data.status != "active" && data.status != "pending" {
                         eprintln!(
@@ -1712,12 +2671,239 @@ async fn capture_loop_task(
         Ok(true)
     }
 
-    loop {
-        // ── First capture fires immediately; subsequent ones wait for the interval tick ──
-        // (We already consumed the first tick above, so this select waits for either
-        // the next 60s tick or cancellation.)
+    /// Apply a finished upload's outcome: sync the tray timer, refine the
+    /// next tick target from the server's `nextExpectedAt`, emit the UI
+    /// events, and run pause/termination recovery on failure. Returns false
+    /// when the capture loop should stop (terminal session state).
+    async fn apply_upload_result(
+        app: &AppHandle,
+        config: &SessionConfig,
+        result: Result<CaptureUploadResult, String>,
+        next_fire: &mut tokio::time::Instant,
+        interval_dur: tokio::time::Duration,
+    ) -> bool {
+        match result {
+            Ok(result) => {
+                // Sync tray timer to authoritative server time
+                {
+                    let state = app.state::<AppState>();
+                    sync_tray_timer(&state, result.tracked_seconds);
+                }
+                // Compute next fire from the server-provided nextExpectedAt.
+                // If parsing fails or the target is in the past, default to
+                // "fire now" (catch-up). Upper-bounded at 2x interval as a
+                // guard against malformed responses.
+                let parsed_target_ms = parse_iso_to_unix_ms(&result.next_expected_at);
+                let now_ms = current_unix_ms();
+                let delay_ms = match parsed_target_ms {
+                    Some(target) => (target - now_ms).max(0) as u64,
+                    None => CAPTURE_INTERVAL_SECS * 1000,
+                };
+                let delay_ms = delay_ms.min(CAPTURE_INTERVAL_SECS * 2 * 1000);
+                *next_fire =
+                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(delay_ms);
+                let _ = app.emit("capture-tick-result", CaptureTickResult::from(result));
+                true
+            }
+            Err(e) => {
+                eprintln!("[capture-loop] upload failed: {e}");
+                let _ = app.emit(
+                    "capture-tick-error",
+                    CaptureTickError { message: e.clone() },
+                );
+                // No server target available — fall back to a full interval.
+                *next_fire = tokio::time::Instant::now() + interval_dur;
+                // Check if the server paused/stopped the session
+                match handle_sleep_recovery(app, config).await {
+                    Ok(true) => true,
+                    Ok(false) => false,
+                    Err(_) => true,
+                }
+            }
+        }
+    }
 
-        // Run one capture tick
+    // Clip capability comes from the server, once per loop run. Any fetch
+    // failure (or clips off) means legacy JPEG mode, bit-for-bit.
+    let initial_config = {
+        let state = app.state::<AppState>();
+        let guard = state.config.lock().unwrap();
+        guard.clone()
+    };
+    let caps = match &initial_config {
+        Some(c) => fetch_clip_capabilities(c).await,
+        None => SessionClipCapabilities::default(),
+    };
+    // Mutable: latches off after MAX_CLIP_ENCODER_FAILURES consecutive
+    // encoder failures, so a machine with a broken encoder settles into
+    // plain JPEG mode instead of retrying forever.
+    let mut clips_mode = caps.clips_enabled;
+    let mut clip_encoder_failures: u32 = 0;
+    // Server-authoritative cadence, clamped defensively against a
+    // misbehaving server so the loop can't spin or stall.
+    let frame_interval_ms = caps
+        .frame_interval_ms
+        .unwrap_or(DEFAULT_FRAME_INTERVAL_MS)
+        .clamp(500, 30_000);
+    let frame_dur = Duration::from_millis(frame_interval_ms);
+    let mut recorder: Option<clips::ClipRecorder> = None;
+    if clips_mode {
+        eprintln!("[capture-loop] clips enabled (frame every {frame_interval_ms}ms)");
+    }
+
+    // Clips: hold the first upload back so the opening clip has a few frames
+    // and the session activates promptly. Fixed delay, NOT a multiple of the
+    // cadence — see CLIP_FIRST_CUT_DELAY_MS. JPEG mode keeps the legacy
+    // immediate first tick.
+    next_fire = TokioInstant::now()
+        + if clips_mode {
+            Duration::from_millis(CLIP_FIRST_CUT_DELAY_MS)
+        } else {
+            Duration::ZERO
+        };
+
+    // The opening window is shorter than one frame interval, so at the normal
+    // cadence the first clip would hold a single frame. Capture it densely
+    // enough to carry a handful; after the first upload the cadence returns
+    // to the server's value.
+    let opening_frame_dur = Duration::from_millis((CLIP_FIRST_CUT_DELAY_MS / 4).max(500));
+    let mut first_upload_done = false;
+
+    // The in-flight upload, if any. Uploads run CONCURRENTLY with frame
+    // capture: a multi-second clip finalize+upload must not punch a hole in
+    // the recording every minute — serially that compounds to minutes of
+    // missing screen time per hour. Strictly one upload at a time: the next
+    // tick settles the previous one before cutting, which preserves
+    // capturedAt monotonicity and the per-session rate-limit assumptions.
+    let mut upload_handle: Option<tokio::task::JoinHandle<Result<CaptureUploadResult, String>>> =
+        None;
+    let mut upload_cfg: Option<SessionConfig> = None;
+
+    'outer: loop {
+        // ── Wait until next_fire, collecting frames along the way ──
+        // Frames run at the clip cadence (server-set, 6/min) through the
+        // SAME redaction-aware capture path as uploads. In clips mode every
+        // frame is recorded into the current clip; the JPEG preview side
+        // is focus-gated either way (nobody can see it unfocused).
+        // sleep_until returns immediately when next_fire is already past
+        // (catch-up), which also skips frame collection.
+        let cadence = if first_upload_done {
+            frame_dur
+        } else {
+            opening_frame_dur
+        };
+        loop {
+            let now = TokioInstant::now();
+            if now >= next_fire {
+                break;
+            }
+            let wake = std::cmp::min(now + cadence, next_fire);
+            // Third arm: the in-flight upload finishing mid-wait. Its body
+            // only records the outcome — applying it (which needs mutable
+            // access to upload_handle/next_fire) happens after the select.
+            let mut upload_outcome: Option<Result<CaptureUploadResult, String>> = None;
+            tokio::select! {
+                _ = sleep_until(wake) => {}
+                _ = cancel_rx.changed() => {
+                    eprintln!("[capture-loop] cancelled");
+                    break 'outer;
+                }
+                res = async {
+                    match upload_handle.as_mut() {
+                        Some(h) => match h.await {
+                            Ok(r) => r,
+                            Err(e) => Err(format!("upload task panicked: {e}")),
+                        },
+                        None => unreachable!("guarded by select condition"),
+                    }
+                }, if upload_handle.is_some() => {
+                    upload_outcome = Some(res);
+                }
+            }
+            if let Some(res) = upload_outcome {
+                upload_handle = None;
+                let cfg = upload_cfg.take().expect("cfg tracks upload_handle");
+                if !apply_upload_result(&app, &cfg, res, &mut next_fire, interval_dur).await {
+                    break 'outer;
+                }
+                // next_fire was just refined by the confirm — recompute the
+                // wake target instead of falling through with a stale one.
+                continue;
+            }
+            // Woke for the upload tick, not a frame.
+            if TokioInstant::now() >= next_fire {
+                break;
+            }
+
+            let focused = app
+                .get_webview_window("main")
+                .map(|w| w.is_focused().unwrap_or(false))
+                .unwrap_or(false);
+            if !clips_mode && !focused {
+                continue;
+            }
+
+            let jpeg_mode = if focused {
+                GrabJpeg::Preview
+            } else {
+                GrabJpeg::None
+            };
+            match grab_frame(&app, &sources, max_width, max_height, jpeg_quality, jpeg_mode).await
+            {
+                Ok(grab) => {
+                    if clips_mode {
+                        if recorder.is_none() {
+                            match clips::ClipRecorder::new(
+                                grab.image.width(),
+                                grab.image.height(),
+                                frame_interval_ms,
+                            ) {
+                                Ok(r) => recorder = Some(r),
+                                Err(e) => {
+                                    eprintln!(
+                                        "[capture-loop] clip encoder init failed: {e} — JPEG fallback this interval"
+                                    );
+                                    note_clip_failure(
+                                        &mut clip_encoder_failures,
+                                        &mut clips_mode,
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(r) = recorder.as_mut() {
+                            if let Err(e) = r.push_frame(&grab.image) {
+                                eprintln!(
+                                    "[capture-loop] clip frame append failed: {e} — dropping clip, JPEG fallback"
+                                );
+                                if let Some(r) = recorder.take() {
+                                    r.discard();
+                                }
+                                note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
+                            }
+                        }
+                    }
+                    if focused {
+                        if let Some(jpeg) = grab.jpeg {
+                            let _ = app.emit(
+                                "capture-preview-frame",
+                                CapturePreviewFrame {
+                                    preview_base64: base64_encode(&jpeg.data),
+                                    preview_width: jpeg.width,
+                                    preview_height: jpeg.height,
+                                },
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Frame-level failure: log and keep going — the upload
+                    // tick has its own error handling and retry cadence.
+                    eprintln!("[capture-loop] frame capture failed: {e}");
+                }
+            }
+        }
+
+        // ── Upload tick ──
         let now = StdInstant::now();
         let elapsed_secs = now.duration_since(last_tick).as_secs();
         last_tick = now;
@@ -1746,6 +2932,11 @@ async fn capture_loop_task(
                 "[capture-loop] detected sleep (gap: {}s), checking session status...",
                 elapsed_secs
             );
+            // A clip spanning a sleep gap would carry an hours-long hole —
+            // drop it and start fresh after recovery.
+            if let Some(r) = recorder.take() {
+                r.discard();
+            }
             match handle_sleep_recovery(&app, &config).await {
                 Ok(true) => { /* continue capturing */ }
                 Ok(false) => break,
@@ -1753,42 +2944,26 @@ async fn capture_loop_task(
             }
         }
 
-        // Take screenshot (blocking I/O via xcap — run on blocking threadpool)
-        let blacklisted = {
-            let state = app.state::<AppState>();
-            state
-                .blacklisted_apps
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default()
-        };
-
-        #[allow(unused_mut, unused_assignments)]
-        let mut pipewire_fds = std::collections::HashMap::new();
-        #[cfg(target_os = "linux")]
-        {
-            let state = app.state::<AppState>();
-            if let Ok(guard) = state.pipewire_fds.lock() {
-                pipewire_fds = guard.clone();
+        // A previous upload still in flight (very slow network): settle it
+        // before cutting the next clip so uploads stay strictly ordered —
+        // capturedAt monotonicity and the per-session rate limits both
+        // assume order.
+        if let Some(handle) = upload_handle.take() {
+            let cfg = upload_cfg.take().expect("cfg tracks upload_handle");
+            let res = match handle.await {
+                Ok(r) => r,
+                Err(e) => Err(format!("upload task panicked: {e}")),
             };
+            if !apply_upload_result(&app, &cfg, res, &mut next_fire, interval_dur).await {
+                break;
+            }
         }
 
-        let sources_clone = sources.clone();
-        let bl = blacklisted;
-        let pw_fds = pipewire_fds;
-        let screenshot_result = tokio::task::spawn_blocking(move || {
-            capture::take_stitched_screenshots_with_blacklist(
-                &sources_clone,
-                max_width,
-                max_height,
-                jpeg_quality,
-                &pw_fds,
-                &bl,
-            )
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking panicked: {e}"))
-        .and_then(|r| r);
+        // Grab the tick frame — the clip's final frame, the UI preview,
+        // and the JPEG fallback, all from one capture. Full-size JPEG:
+        // this one may be uploaded.
+        let grab_result =
+            grab_frame(&app, &sources, max_width, max_height, jpeg_quality, GrabJpeg::Full).await;
 
         // Capture the wall-clock moment NOW — that's the value we'll send
         // as `capturedAt`, not when the upload eventually reaches the server.
@@ -1798,57 +2973,113 @@ async fn capture_loop_task(
             None
         };
 
-        match screenshot_result {
-            Ok(screenshot) => {
-                match upload_and_confirm(
-                    &screenshot.base64,
-                    screenshot.width,
-                    screenshot.height,
-                    captured_at.as_deref(),
-                    &config,
-                    &app,
-                )
-                .await
-                {
-                    Ok(result) => {
-                        // Sync tray timer to authoritative server time
-                        {
-                            let state = app.state::<AppState>();
-                            sync_tray_timer(&state, result.tracked_seconds);
-                        }
-                        // Compute next fire from the server-provided
-                        // nextExpectedAt. If parsing fails or the target is
-                        // in the past, default to "fire now" (catch-up).
-                        let parsed_target_ms = parse_iso_to_unix_ms(&result.next_expected_at);
-                        let now_ms = current_unix_ms();
-                        let delay_ms = match parsed_target_ms {
-                            Some(target) => (target - now_ms).max(0) as u64,
-                            None => CAPTURE_INTERVAL_SECS * 1000,
-                        };
-                        // Safety upper-bound: never sleep longer than 2x interval,
-                        // protects against malformed responses.
-                        let delay_ms = delay_ms.min(CAPTURE_INTERVAL_SECS * 2 * 1000);
-                        next_fire = TokioInstant::now() + Duration::from_millis(delay_ms);
-                        let _ = app.emit("capture-tick-result", CaptureTickResult::from(result));
+        match grab_result {
+            Ok(grab) => {
+                let capture::RawCaptureResult {
+                    data: jpeg_data,
+                    width: jpeg_w,
+                    height: jpeg_h,
+                } = grab.jpeg.expect("tick grab always requests jpeg");
+                let jpeg_base64 = base64_encode(&jpeg_data);
+                let jpeg_bytes = bytes::Bytes::from(jpeg_data);
+
+                // Clips: append the final frame and cut this interval's clip.
+                let clip = if clips_mode {
+                    if recorder.is_none() {
+                        recorder = clips::ClipRecorder::new(
+                            grab.image.width(),
+                            grab.image.height(),
+                            frame_interval_ms,
+                        )
+                        .map_err(|e| {
+                            eprintln!("[capture-loop] clip encoder init failed: {e}");
+                            note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
+                        })
+                        .ok();
                     }
-                    Err(e) => {
-                        eprintln!("[capture-loop] upload failed: {e}");
-                        let _ = app.emit(
-                            "capture-tick-error",
-                            CaptureTickError {
-                                message: e.clone(),
-                            },
-                        );
-                        // No server target available — fall back to interval.
-                        next_fire = TokioInstant::now() + interval_dur;
-                        // Check if server paused the session
-                        match handle_sleep_recovery(&app, &config).await {
-                            Ok(true) => { /* continue */ }
-                            Ok(false) => break,
-                            Err(_) => {}
+                    if let Some(r) = recorder.as_mut() {
+                        if let Err(e) = r.push_frame(&grab.image) {
+                            eprintln!("[capture-loop] clip frame append failed: {e}");
+                            if let Some(r) = recorder.take() {
+                                r.discard();
+                            }
+                            note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
                         }
                     }
-                }
+                    match recorder.take().map(|r| r.finish()) {
+                        Some(Ok(c)) => {
+                            // A clip made it out whole — the encoder works,
+                            // so earlier failures were transient.
+                            clip_encoder_failures = 0;
+                            Some(c)
+                        }
+                        Some(Err(e)) => {
+                            eprintln!(
+                                "[capture-loop] clip finalize failed: {e} — uploading JPEG instead"
+                            );
+                            note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
+                            None
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+
+                // Spawn the upload as a background task — frame capture for
+                // the NEXT clip resumes immediately instead of stalling for
+                // the finalize+upload round trip (which would put a hole in
+                // the recording every minute). Clip first; ANY clip-upload
+                // failure (size cap, server downgrade, transient) retries
+                // the tick as a JPEG so the credit streak never skips a
+                // beat.
+                let task_app = app.clone();
+                let task_config = config.clone();
+                let task_captured_at = captured_at.clone();
+                upload_handle = Some(tokio::spawn(async move {
+                    let jpeg_fallback =
+                        UploadPayload::jpeg(jpeg_bytes, jpeg_base64.clone(), jpeg_w, jpeg_h);
+                    match clip {
+                        Some(c) => {
+                            match upload_and_confirm(
+                                UploadPayload::mp4(c, jpeg_base64),
+                                task_captured_at.as_deref(),
+                                &task_config,
+                                &task_app,
+                            )
+                            .await
+                            {
+                                Ok(r) => Ok(r),
+                                Err(e) => {
+                                    eprintln!(
+                                        "[capture-loop] clip upload failed ({e}) — retrying tick as JPEG"
+                                    );
+                                    upload_and_confirm(
+                                        jpeg_fallback,
+                                        task_captured_at.as_deref(),
+                                        &task_config,
+                                        &task_app,
+                                    )
+                                    .await
+                                }
+                            }
+                        }
+                        None => {
+                            upload_and_confirm(
+                                jpeg_fallback,
+                                task_captured_at.as_deref(),
+                                &task_config,
+                                &task_app,
+                            )
+                            .await
+                        }
+                    }
+                }));
+                upload_cfg = Some(config.clone());
+                // Provisional next tick one interval out; refined to the
+                // server's nextExpectedAt when the confirm lands mid-wait
+                // (see the wait-loop's third select arm).
+                next_fire = TokioInstant::now() + interval_dur;
             }
             Err(e) => {
                 eprintln!("[capture-loop] screenshot failed: {e}");
@@ -1863,15 +3094,16 @@ async fn capture_loop_task(
             }
         }
 
-        // Wait until next_fire or cancellation. sleep_until returns
-        // immediately if next_fire is already in the past (catch-up).
-        tokio::select! {
-            _ = sleep_until(next_fire) => {}
-            _ = cancel_rx.changed() => {
-                eprintln!("[capture-loop] cancelled");
-                break;
-            }
-        }
+        // Whatever happened, the opening window is over — later intervals
+        // are full-length, so the normal cadence applies (a failed first
+        // upload must not run the fast cadence across a 60s retry window).
+        first_upload_done = true;
+    }
+
+    // Never leave a half-recorded clip (or its temp file) behind on
+    // pause/stop/cancel.
+    if let Some(r) = recorder.take() {
+        r.discard();
     }
 
     eprintln!("[capture-loop] stopped");
@@ -2025,9 +3257,14 @@ async fn start_tray_ticker(
     app: AppHandle,
 ) -> Result<(), String> {
     let timer_state = start_tray_timer(&app, &state);
-    timer_state.tracked_seconds.store(tracked_seconds, Ordering::Relaxed);
-    let mut started = timer_state.started_at.lock().unwrap();
-    *started = StdInstant::now();
+    // Ratchet, don't store: `start_tray_timer` returns the *existing* state
+    // if a session is already being tracked, and a re-entrant call with a
+    // stale (or zero) baseline would knock the menu bar backwards.
+    ratchet_tray_tracked_seconds(&timer_state, tracked_seconds);
+    {
+        let mut started = timer_state.started_at.lock().unwrap();
+        *started = StdInstant::now();
+    }
     timer_state.is_running.store(true, Ordering::Relaxed);
     Ok(())
 }
@@ -2045,12 +3282,7 @@ fn resume_tray_ticker(
     tracked_seconds: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    {
-        let guard = state.tray_timer.lock().unwrap();
-        if let Some(ref handle) = *guard {
-            handle.state.tracked_seconds.store(tracked_seconds, Ordering::Relaxed);
-        }
-    }
+    sync_tray_timer(&state, tracked_seconds);
     resume_tray_timer(&state);
     Ok(())
 }
@@ -2077,6 +3309,11 @@ fn base64_decode(b64: &str) -> Result<Vec<u8>, String> {
     ENGINE
         .decode(b64)
         .map_err(|e| format!("Base64 decode failed: {e}"))
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    use base64_engine::*;
+    ENGINE.encode(data)
 }
 
 mod base64_engine {
@@ -2254,11 +3491,14 @@ pub fn run() {
             disable_vibrancy,
             is_wayland,
             open_external_url,
+            native_menu::show_add_menu,
+            native_menu::prefetch_add_menu_icons,
             request_screencast,
             add_screencast,
             set_blacklisted_apps,
             get_blacklisted_apps,
-            list_running_apps,
+            list_installed_apps,
+            get_app_icon,
             tray::show_tray,
             tray::update_tray_time,
             tray::hide_tray,
@@ -2268,25 +3508,15 @@ pub fn run() {
         ])
         .manage(tray::TrayStateMutex(std::sync::Mutex::new(tray::TrayState::default())))
         .setup(|app| {
+            // Warm the installed-app cache off-thread so the first visit to
+            // Filtered Apps is instant rather than paying for the scan.
+            prewarm_installed_apps();
+
             #[cfg(target_os = "macos")]
             {
-                // Disable App Nap so macOS doesn't throttle WebView timers when
-                // the window is occluded or Low Power Mode is on.  The capture
-                // loop runs entirely in JS, so throttled timers = missed screenshots.
-                // The returned activity token is intentionally leaked (never ended)
-                // so the assertion lasts for the lifetime of the process.
-                {
-                    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-                    let info = NSProcessInfo::processInfo();
-                    let reason = NSString::from_str("Periodic screenshot capture must not be throttled");
-                    let opts = NSActivityOptions::LatencyCritical
-                        | NSActivityOptions::IdleSystemSleepDisabled;
-                    let _activity = info.beginActivityWithOptions_reason(opts, &reason);
-                    // Leak the token so the activity assertion persists.
-                    std::mem::forget(_activity);
-                    eprintln!("[power] App Nap suppression enabled");
-                }
-
+                // NOTE: App Nap / idle-sleep suppression is scoped to active
+                // recordings — see the `power` module. It is deliberately NOT
+                // asserted here for the whole process lifetime.
                 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
                 let app_menu = Submenu::with_items(
@@ -2479,15 +3709,17 @@ pub fn run() {
                         eprintln!("[exit] pausing session before exit");
                         let app_handle = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let client = reqwest::Client::builder()
-                                .timeout(std::time::Duration::from_secs(5))
-                                .build()
-                                .unwrap_or_default();
+                            let client = http_client();
                             let url = format!(
                                 "{}/api/sessions/{}/pause",
                                 config.api_base_url, config.token
                             );
-                            match client.post(&url).send().await {
+                            match client
+                                .post(&url)
+                                .timeout(std::time::Duration::from_secs(5))
+                                .send()
+                                .await
+                            {
                                 Ok(res) => eprintln!("[exit] pause response: {}", res.status()),
                                 Err(e) => eprintln!("[exit] pause failed (best-effort): {e}"),
                             }
@@ -2509,6 +3741,93 @@ pub fn run() {
 //      `lib.rs`) still accept the new server's JSON. This is the load-bearing
 //      compat guarantee: an unupgraded user's binary in the wild keeps working.
 // ──────────────────────────────────────────────────────────────────
+
+/// The menu-bar clock must agree with the main window's clock. Both tick
+/// independently, so they only stay together if these rules match
+/// `deriveDisplaySeconds` / `useSessionTimerState` in @lookout/react.
+#[cfg(test)]
+mod tray_timer_tests {
+    use super::{
+        format_tray_time, ratchet_tray_tracked_seconds, tray_display_seconds, TrayTimerState,
+        MAX_TRAY_INTERPOLATION_SECS,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    fn state(tracked: i64) -> TrayTimerState {
+        TrayTimerState {
+            tracked_seconds: AtomicI64::new(tracked),
+            started_at: Mutex::new(Instant::now()),
+            is_running: AtomicBool::new(true),
+        }
+    }
+
+    #[test]
+    fn cap_matches_the_js_side() {
+        // MAX_INTERPOLATION_S in useSessionTimer.ts is
+        // SCREENSHOT_INTERVAL_MS / 1000 = 60.
+        assert_eq!(MAX_TRAY_INTERPOLATION_SECS, 60);
+    }
+
+    #[test]
+    fn interpolates_at_wall_clock_rate() {
+        assert_eq!(tray_display_seconds(120, 0, true), 120);
+        assert_eq!(tray_display_seconds(120, 30, true), 150);
+    }
+
+    #[test]
+    fn interpolation_is_capped_at_one_interval() {
+        // Without the cap the menu bar kept counting through a capture stall
+        // while the main window froze at base + 60, and the two never
+        // reconverged — the reported "menu bar shows a different time".
+        assert_eq!(tray_display_seconds(120, 90, true), 180);
+        assert_eq!(tray_display_seconds(120, 600, true), 180);
+    }
+
+    #[test]
+    fn pause_drops_the_interpolated_remainder() {
+        // The main window snaps down to the base on pause. Freezing at the
+        // interpolated value here left the menu bar up to a minute ahead for
+        // the whole pause.
+        assert_eq!(tray_display_seconds(120, 45, false), 120);
+        // Clock-style title: the paused value is the base, formatted exactly —
+        // 299s is 04:59, not the 4m the minute-granularity title used to show.
+        assert_eq!(
+            format_tray_time(tray_display_seconds(299, 59, false)),
+            "04:59"
+        );
+    }
+
+    #[test]
+    fn ratchet_ignores_a_stale_lower_reading() {
+        // An idempotent retry can confirm against a stale read and return a
+        // lower trackedSeconds. JS keeps the higher value; storing the lower
+        // one here made the menu bar jump backwards and sit behind.
+        let s = state(120);
+        ratchet_tray_tracked_seconds(&s, 60);
+        assert_eq!(s.tracked_seconds.load(Ordering::Relaxed), 120);
+        ratchet_tray_tracked_seconds(&s, 180);
+        assert_eq!(s.tracked_seconds.load(Ordering::Relaxed), 180);
+    }
+
+    #[test]
+    fn ratchet_re_anchors_only_on_advance() {
+        let s = state(120);
+        let before = *s.started_at.lock().unwrap();
+
+        // A repeated reading must not restart the interpolation window, or
+        // the menu bar loses time the main window is still counting.
+        ratchet_tray_tracked_seconds(&s, 120);
+        assert_eq!(*s.started_at.lock().unwrap(), before);
+        ratchet_tray_tracked_seconds(&s, 60);
+        assert_eq!(*s.started_at.lock().unwrap(), before);
+
+        // A real advance re-anchors.
+        ratchet_tray_tracked_seconds(&s, 180);
+        assert!(*s.started_at.lock().unwrap() > before);
+    }
+}
 
 #[cfg(test)]
 mod compat_tests {

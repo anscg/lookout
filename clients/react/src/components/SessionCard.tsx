@@ -10,9 +10,11 @@ export interface SessionCardProps {
   session: SessionSummary;
   onClick?: () => void;
   onArchive?: () => void;
+  /** Right-click on the card. The host decides how to present the menu. */
+  onContextMenu?: (e: React.MouseEvent) => void;
 }
 
-export function SessionCard({ session, onClick, onArchive }: SessionCardProps) {
+export function SessionCard({ session, onClick, onArchive, onContextMenu }: SessionCardProps) {
   const date = new Date(session.createdAt);
   const dateStr = date.toLocaleDateString(undefined, {
     month: "short",
@@ -21,7 +23,11 @@ export function SessionCard({ session, onClick, onArchive }: SessionCardProps) {
   });
 
   return (
-    <Card onClick={onClick} style={{ position: "relative" }}>
+    <Card
+      onClick={onClick}
+      onContextMenu={onContextMenu ? (e) => { e.preventDefault(); onContextMenu(e); } : undefined}
+      style={{ position: "relative" }}
+    >
       {/* Thumbnail */}
       <div style={{ position: "relative", aspectRatio: "16/9", background: colors.bg.sunken, overflow: "hidden" }}>
         {session.thumbnailUrl ? (

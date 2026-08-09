@@ -10,9 +10,8 @@ const LEVEL_COLOR: Record<Announcement["level"], string> = {
 };
 
 /**
- * Gallery banner for an admin-authored announcement. Same shape as
- * UpdateBanner, tinted by level; if a URL is set, an "Open" button launches it
- * in the OS browser.
+ * Gallery banner for an admin-authored announcement, tinted by level; if a
+ * URL is set, an "Open" button launches it in the OS browser.
  */
 export function AnnouncementBanner({ announcement }: { announcement: Announcement }) {
   const color = LEVEL_COLOR[announcement.level] ?? colors.status.info;

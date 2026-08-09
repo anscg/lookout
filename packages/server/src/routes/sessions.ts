@@ -1,27 +1,47 @@
 import type { FastifyInstance } from "fastify";
 import { eq, sql, and, inArray, isNotNull } from "drizzle-orm";
-import { PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
+import {
+  PutObjectCommand,
+  HeadObjectCommand,
+  GetObjectCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
 import { r2Client, R2_BUCKET } from "../config/r2.js";
 import { boss, COMPILE_JOB } from "../lib/queue.js";
+import { publishHeldSession } from "../lib/publish.js";
 import {
   computeMinuteBucket,
   checkRateLimit,
   checkGenericRateLimit,
   creditCapture,
-  validateCapturedAt,
+  adoptedCapturedAt,
 } from "../lib/timing.js";
 import { now } from "../lib/clock.js";
 import { extractJa4 } from "../lib/ja4.js";
 import {
   SCREENSHOT_INTERVAL_MS,
+  CLIP_FRAME_INTERVAL_MS,
   PRESIGNED_URL_EXPIRY_SECONDS,
   MAX_SCREENSHOT_BYTES,
+  MAX_CLIP_BYTES,
   MAX_SCREENSHOTS_PER_SESSION,
   MAX_UPLOAD_REQUESTS_PER_SESSION,
   CLIENT_INFO_MAX_BYTES,
+  CAPTURE_FORMATS,
+  CAPTURE_FORMAT_CONTENT_TYPES,
+  MAX_USER_RECOMPILES,
+  EDIT_LEASE_SECONDS,
+  EDIT_HOLD_MAX_MINUTES,
+  normalizeCuts,
+  isCutAt,
+  countCutUnits,
+  computeCutSeconds,
+  type CaptureFormat,
+  type CaptureRowForCuts,
+  type CutInterval,
+  type VideoUnit,
 } from "@lookout/shared";
 
 /** Tracked-seconds dispatcher. Routes to bucket-count math for legacy
@@ -51,6 +71,112 @@ async function getTrackedSecondsBucket(sessionId: string): Promise<number> {
       ),
     );
   return Math.max(0, (Number(count) - 1) * 60);
+}
+
+/** Reported tracked seconds: raw minus what the session's cut list removed.
+ *  Cuts are user edits — they can only shrink the number, and /timings
+ *  excludes the same captures, so every consumer tells one story. The raw
+ *  value stays untouched in the DB (and is surfaced as
+ *  uncutTrackedSeconds). */
+function reportedTrackedSeconds(
+  rawTrackedSeconds: number,
+  session: { cutSeconds: number | null },
+): number {
+  return Math.max(0, rawTrackedSeconds - (session.cutSeconds ?? 0));
+}
+
+/** The session's cut list, always as an array. */
+function sessionCuts(session: { cuts: unknown }): CutInterval[] {
+  return Array.isArray(session.cuts) ? (session.cuts as CutInterval[]) : [];
+}
+
+/** Is the session's edit hold currently active? */
+function holdActive(session: { editHoldUntil: Date | null }): boolean {
+  return (
+    session.editHoldUntil !== null && session.editHoldUntil.getTime() > Date.now()
+  );
+}
+
+/**
+ * Whether the session is CURRENTLY editable, and why not. Editing exists
+ * only inside the stop-time edit hold — never after `complete`. `complete`
+ * is the signal programs act on (forwarding heartbeats to Hackatime,
+ * accepting submissions, firing the redirect hook), so the data they read
+ * must already be final; a post-publish edit would mutate numbers someone
+ * already consumed.
+ */
+function sessionEditability(session: {
+  status: string;
+  videoUnits: unknown;
+  originalVideoR2Key: string | null;
+  recompileCount: number;
+  editHoldUntil: Date | null;
+}): {
+  editable: boolean;
+  reason?:
+    | "preparing"
+    | "no_original"
+    | "recompiles_exhausted"
+    | "not_ready"
+    | "failed"
+    | "published";
+} {
+  if (session.status === "complete") {
+    return { editable: false, reason: "published" };
+  }
+  if (session.status === "failed") {
+    return { editable: false, reason: "failed" };
+  }
+  if (!holdActive(session)) {
+    return { editable: false, reason: "not_ready" };
+  }
+  // A held session is "compiling" for most of the wait — the worker claims
+  // the job within a second of the stop and only returns the session to
+  // "stopped" once the preview is built. Both states are legitimate
+  // waiting room; anything else means the recording isn't finished.
+  if (session.status !== "stopped" && session.status !== "compiling") {
+    return { editable: false, reason: "not_ready" };
+  }
+  // Hold is active but the preview build hasn't landed yet (the compile
+  // job writes videoUnits + the original when it finishes).
+  if (
+    session.status === "compiling" ||
+    !Array.isArray(session.videoUnits) ||
+    session.videoUnits.length === 0 ||
+    !session.originalVideoR2Key
+  ) {
+    return { editable: false, reason: "preparing" };
+  }
+  if (session.recompileCount >= MAX_USER_RECOMPILES) {
+    return { editable: false, reason: "recompiles_exhausted" };
+  }
+  return { editable: true };
+}
+
+/** Confirmed capture rows in the shape the shared cut math expects —
+ *  the same coalesce and rows the worker uses, so PUT /cuts previews are
+ *  exactly what the cut-compile persists. */
+async function getCaptureRowsForCuts(
+  sessionId: string,
+): Promise<CaptureRowForCuts[]> {
+  const rows = await db
+    .select({
+      ts: sql<Date | string>`coalesce(${schema.screenshots.capturedAt}, ${schema.screenshots.requestedAt})`,
+      creditedSeconds: schema.screenshots.creditedSeconds,
+      minuteBucket: schema.screenshots.minuteBucket,
+    })
+    .from(schema.screenshots)
+    .where(
+      and(
+        eq(schema.screenshots.sessionId, sessionId),
+        eq(schema.screenshots.confirmed, true),
+      ),
+    );
+  return rows.map((r) => ({
+    timeMs: (r.ts instanceof Date ? r.ts : new Date(r.ts)).getTime(),
+    creditedSeconds: r.creditedSeconds,
+    minuteBucket: r.minuteBucket,
+  }));
 }
 
 // ── Shared schema fragments ─────────────────────────────────
@@ -166,16 +292,24 @@ export async function sessionRoutes(app: FastifyInstance) {
       const ja4 = await getFirstJa4(session.id);
       // Prefer stored value (survives screenshot cleanup), fall back to live count.
       // For credit mode, both paths read sessions.tracked_seconds so they match.
-      const trackedSeconds =
+      const rawTrackedSeconds =
         session.trackingMode === "credit"
           ? liveTrackedSeconds
           : session.trackedSeconds ?? liveTrackedSeconds;
+      const trackedSeconds = reportedTrackedSeconds(rawTrackedSeconds, session);
 
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
       return {
         name: session.name,
         status: session.status,
         trackedSeconds,
+        cuts: sessionCuts(session),
+        cutSeconds: session.cutSeconds ?? 0,
+        uncutTrackedSeconds: rawTrackedSeconds,
+        editable: sessionEditability(session).editable,
+        editHoldUntil: holdActive(session)
+          ? session.editHoldUntil!.toISOString()
+          : undefined,
         screenshotCount,
         clientInfo,
         ja4,
@@ -191,6 +325,13 @@ export async function sessionRoutes(app: FastifyInstance) {
         // Backwards compat: legacy clients keyed off this. Points at a static
         // "please update" video when the session is otherwise playable.
         videoWebmUrl: session.videoR2Key ? `${baseUrl}/please-update.webm` : null,
+        // Clip capability, surfaced on the session-recovery fetch so clients
+        // know BEFORE their first capture whether to record clips — the very
+        // first upload of a clips session is already a clip (no static
+        // opening frame in the timelapse). Old clients ignore these.
+        clipsEnabled: session.clipsEnabled,
+        frameIntervalMs: CLIP_FRAME_INTERVAL_MS,
+        redirectUrl: session.redirectUrl,
         metadata: session.metadata ?? {},
       };
     },
@@ -243,7 +384,7 @@ export async function sessionRoutes(app: FastifyInstance) {
   // is sticky thereafter. See plan doc for details.
   app.get<{
     Params: { token: string };
-    Querystring: { capturedAt?: string; clientInfo?: string };
+    Querystring: { capturedAt?: string; clientInfo?: string; format?: CaptureFormat };
   }>(
     "/api/sessions/:token/upload-url",
     {
@@ -257,6 +398,12 @@ export async function sessionRoutes(app: FastifyInstance) {
             // Intentionally NOT length-capped here — schema validation failure
             // would 400 the whole upload. Best-effort: truncated in the handler.
             clientInfo: { type: "string" as const },
+            // Payload format. Omitted = 'jpeg' (legacy single frame). Clip
+            // clients pass 'webm'/'mp4' for per-minute video clips. The
+            // response echoes back the GRANTED format — requests for clip
+            // formats on sessions without clips enabled are silently
+            // downgraded to 'jpeg', and clients must upload what was granted.
+            format: { type: "string" as const, enum: CAPTURE_FORMATS },
           },
           additionalProperties: false,
         },
@@ -294,7 +441,9 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const serverNow = now();
       const clientCapturedAtRaw = request.query.capturedAt;
-      const clientCapturedAt = clientCapturedAtRaw
+      // `let`: an out-of-envelope value is replaced with server time below
+      // rather than rejected, so a wrong client clock can't cost a recording.
+      let clientCapturedAt = clientCapturedAtRaw
         ? new Date(clientCapturedAtRaw)
         : null;
       if (clientCapturedAt && Number.isNaN(clientCapturedAt.getTime())) {
@@ -397,11 +546,10 @@ export async function sessionRoutes(app: FastifyInstance) {
         startedAt = session.startedAt!;
       }
 
-      // Resolve the row's `captured_at` value — populated in both modes for
-      // debugging. In bucket mode it's never read for math.
-      const rowCapturedAt = clientCapturedAt ?? serverNow;
-
       // Credit-mode: capturedAt is required and must pass the envelope.
+      // Set when the client's clock was too far off to trust and server time
+      // was substituted — reported back so the client can correct itself.
+      let capturedAtAdopted = false;
       let nextExpectedAt: Date;
       if (trackingMode === "credit") {
         if (!clientCapturedAt) {
@@ -418,15 +566,31 @@ export async function sessionRoutes(app: FastifyInstance) {
           .orderBy(sql`${schema.screenshots.capturedAt} DESC NULLS LAST`)
           .limit(1);
 
-        const validation = validateCapturedAt(
+        // A wrong system clock must not cost the user their recording. An
+        // out-of-envelope timestamp is adopted as server time rather than
+        // 400'd; anything else (non-monotonic, pre-session) is still refused.
+        const resolved = adoptedCapturedAt(
           clientCapturedAt,
           serverNow,
           startedAt,
           latest?.capturedAt ?? null,
         );
-        if (!validation.ok) {
-          return reply.code(400).send({ error: validation.code });
+        if (!resolved.ok) {
+          return reply.code(400).send({ error: resolved.code });
         }
+        if (resolved.adopted) {
+          capturedAtAdopted = true;
+          request.log.warn(
+            {
+              sessionId: session.id,
+              clientCapturedAt: clientCapturedAt.toISOString(),
+              serverNow: serverNow.toISOString(),
+              skewMs: clientCapturedAt.getTime() - serverNow.getTime(),
+            },
+            "client clock outside the trust envelope — stamping capture with server time",
+          );
+        }
+        clientCapturedAt = resolved.capturedAt;
 
         // Predict nextExpectedAt assuming this capture will credit. The
         // confirm response returns the authoritative post-credit value.
@@ -451,7 +615,20 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const minuteBucket = computeMinuteBucket(serverNow, startedAt);
       const screenshotId = randomUUID();
-      const r2Key = `screenshots/${session.id}/${screenshotId}.jpg`;
+      // Payload format for this capture unit. A clip is still ONE unit per
+      // minute — identical cadence, credit math, and rate limits as jpeg.
+      // The clips gate is enforced HERE, per upload: sessions without
+      // clips_enabled get clip-format requests silently downgraded to jpeg
+      // (the presign + granted-format echo both say jpeg, so a conforming
+      // client falls back without an error round-trip).
+      const requestedFormat: CaptureFormat = request.query.format ?? "jpeg";
+      const format: CaptureFormat =
+        requestedFormat !== "jpeg" && !session.clipsEnabled
+          ? "jpeg"
+          : requestedFormat;
+      const contentType = CAPTURE_FORMAT_CONTENT_TYPES[format];
+      const ext = format === "jpeg" ? "jpg" : format;
+      const r2Key = `screenshots/${session.id}/${screenshotId}.${ext}`;
 
       // Optional client telemetry from the query param. Stored opaquely and
       // never parsed. Truncate (don't reject) so a malformed/oversized value
@@ -465,6 +642,11 @@ export async function sessionRoutes(app: FastifyInstance) {
       // app layer. NULL when the edge didn't set it (local dev, etc).
       const ja4 = extractJa4(request);
 
+      // Resolve the row's `captured_at` value — populated in both modes for
+      // debugging. In bucket mode it's never read for math. Read AFTER the
+      // credit block so it picks up an adopted server timestamp.
+      const rowCapturedAt = clientCapturedAt ?? serverNow;
+
       // Create screenshot record (unconfirmed)
       await db.insert(schema.screenshots).values({
         id: screenshotId,
@@ -476,6 +658,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         capturedAt: rowCapturedAt,
         clientInfo,
         ja4,
+        format,
       });
 
       // Generate presigned PUT URL
@@ -485,7 +668,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       const command = new PutObjectCommand({
         Bucket: R2_BUCKET,
         Key: r2Key,
-        ContentType: "image/jpeg",
+        ContentType: contentType,
       });
 
       const uploadUrl = await getSignedUrl(r2Client, command, {
@@ -499,7 +682,15 @@ export async function sessionRoutes(app: FastifyInstance) {
         minuteBucket,
         nextExpectedAt: nextExpectedAt.toISOString(),
         serverTime: serverNow.toISOString(),
+        // True when this capture's timestamp was replaced with server time
+        // because the client's clock was outside the trust envelope. The
+        // upload still succeeded; a client seeing this should re-derive its
+        // offset from `serverTime` so later captures are stamped accurately.
+        ...(capturedAtAdopted ? { capturedAtAdopted: true } : {}),
         trackingMode,
+        format,
+        clipsEnabled: session.clipsEnabled,
+        frameIntervalMs: CLIP_FRAME_INTERVAL_MS,
       };
     },
   );
@@ -512,6 +703,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       width: number;
       height: number;
       fileSize: number;
+      frameCount?: number;
     };
   }>(
     "/api/sessions/:token/screenshots",
@@ -526,6 +718,9 @@ export async function sessionRoutes(app: FastifyInstance) {
             width: { type: "integer" as const, minimum: 1 },
             height: { type: "integer" as const, minimum: 1 },
             fileSize: { type: "integer" as const, minimum: 1 },
+            // Frames inside an uploaded clip. Informational (the worker
+            // demuxes for the real count); omitted for jpeg captures.
+            frameCount: { type: "integer" as const, minimum: 1, maximum: 600 },
           },
           additionalProperties: false,
         },
@@ -558,7 +753,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           .send({ error: `Session is ${session.status}, cannot confirm` });
       }
 
-      const { screenshotId, width, height, fileSize } = request.body;
+      const { screenshotId, width, height, fileSize, frameCount } = request.body;
 
       // Validate screenshot belongs to this session and isn't already confirmed
       const screenshot = await db.query.screenshots.findFirst({
@@ -604,15 +799,22 @@ export async function sessionRoutes(app: FastifyInstance) {
           new HeadObjectCommand({ Bucket: R2_BUCKET, Key: screenshot.r2Key }),
         );
 
-        // Validate ContentType is image/jpeg
-        if (head.ContentType !== "image/jpeg") {
+        // Validate ContentType matches the format the upload-url granted.
+        // The presigned PUT was signed with this content type, so a mismatch
+        // means the object was not uploaded through the granted URL.
+        const rowFormat = (screenshot.format ?? "jpeg") as CaptureFormat;
+        const expectedContentType = CAPTURE_FORMAT_CONTENT_TYPES[rowFormat];
+        if (head.ContentType !== expectedContentType) {
           return reply
             .code(400)
-            .send({ error: "Invalid content type — expected image/jpeg" });
+            .send({ error: `Invalid content type — expected ${expectedContentType}` });
         }
 
-        // Validate file size is within limits
-        if (head.ContentLength && head.ContentLength > MAX_SCREENSHOT_BYTES) {
+        // Validate file size is within the per-format limit. Clips get a
+        // larger budget than single frames, bounded by the client bitrate cap.
+        const maxBytes =
+          rowFormat === "jpeg" ? MAX_SCREENSHOT_BYTES : MAX_CLIP_BYTES;
+        if (head.ContentLength && head.ContentLength > maxBytes) {
           return reply.code(400).send({ error: "Uploaded object is too large" });
         }
       } catch {
@@ -675,6 +877,7 @@ export async function sessionRoutes(app: FastifyInstance) {
               width,
               height,
               fileSizeBytes: fileSize,
+              frameCount: frameCount ?? null,
               creditedSeconds: decision.credit,
               expectedAt: decision.expectedAt,
             })
@@ -720,6 +923,7 @@ export async function sessionRoutes(app: FastifyInstance) {
             width,
             height,
             fileSizeBytes: fileSize,
+            frameCount: frameCount ?? null,
           })
           .where(eq(schema.screenshots.id, screenshotId));
 
@@ -877,11 +1081,27 @@ export async function sessionRoutes(app: FastifyInstance) {
     },
   );
 
-  // Stop session
-  app.post<{ Params: { token: string } }>(
+  // Stop session.
+  // Optional body { edit: true } holds the session UNPUBLISHED after its
+  // compile so the owner can cut it before programs ever observe
+  // `complete`. The hold auto-publishes after EDIT_HOLD_MINUTES. Old
+  // clients send no body and get today's behavior byte-for-byte.
+  app.post<{ Params: { token: string }; Body: { edit?: boolean } | null }>(
     "/api/sessions/:token/stop",
     {
-      schema: { params: tokenParamSchema },
+      schema: {
+        params: tokenParamSchema,
+        body: {
+          type: ["object", "null"] as const,
+          properties: {
+            edit: { type: "boolean" as const },
+          },
+          // Deliberately permissive. This route accepted (and ignored) any
+          // body before `edit` existed, so rejecting unknown fields would
+          // turn a working custom client into a 400 for no benefit.
+          additionalProperties: true,
+        },
+      },
     },
     async (request, reply) => {
       // Rate limit: 10 req/min per token (actions)
@@ -922,6 +1142,16 @@ export async function sessionRoutes(app: FastifyInstance) {
       // Compute tracked seconds before stopping (screenshots may be cleaned up later)
       const trackedSeconds = await getTrackedSecondsForSession(session);
 
+      // Edit hold: only meaningful when there will be a video to edit.
+      // This is the first lease term — the editor renews it as soon as it
+      // opens, so a client that promises an editor and never shows one
+      // publishes a lease later rather than stranding the session.
+      const screenshotCount = await getScreenshotCount(session.id);
+      const wantsEdit = request.body?.edit === true && screenshotCount > 0;
+      const editHoldUntil = wantsEdit
+        ? new Date(stopNow.getTime() + EDIT_LEASE_SECONDS * 1000)
+        : null;
+
       const [updated] = await db
         .update(schema.sessions)
         .set({
@@ -929,6 +1159,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           stoppedAt: stopNow,
           totalActiveSeconds,
           trackedSeconds,
+          editHoldUntil,
           updatedAt: stopNow,
         })
         .where(and(
@@ -942,7 +1173,6 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       // Enqueue compilation
-      const screenshotCount = await getScreenshotCount(session.id);
       if (screenshotCount > 0) {
         await boss.send(COMPILE_JOB, { sessionId: session.id });
       } else {
@@ -957,6 +1187,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         status: "stopped" as const,
         trackedSeconds,
         totalActiveSeconds,
+        ...(editHoldUntil
+          ? { editHoldUntil: editHoldUntil.toISOString() }
+          : {}),
       };
     },
   );
@@ -983,7 +1216,7 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const liveTrackedSeconds = await getTrackedSecondsForSession(session);
       // For credit mode, dispatcher already reads from session.trackedSeconds.
-      const trackedSeconds =
+      const rawTrackedSeconds =
         session.trackingMode === "credit"
           ? liveTrackedSeconds
           : session.trackedSeconds ?? liveTrackedSeconds;
@@ -991,6 +1224,10 @@ export async function sessionRoutes(app: FastifyInstance) {
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
       return {
         status: session.status,
+        // Real compile progress (0..~0.95) when the worker is metering an
+        // original build; absent for cut-apply compiles and pre-column
+        // workers, where the client falls back to its time estimate.
+        progress: session.compileProgress ?? undefined,
         videoUrl: session.videoR2Key
           ? `${baseUrl}/api/media/${session.id}/video.mp4`
           : undefined,
@@ -998,7 +1235,16 @@ export async function sessionRoutes(app: FastifyInstance) {
         videoWebmUrl: session.videoR2Key
           ? `${baseUrl}/please-update.webm`
           : undefined,
-        trackedSeconds,
+        trackedSeconds: reportedTrackedSeconds(rawTrackedSeconds, session),
+        // Redirect hook — clients watching the compile open this once the
+        // status flips to "complete". Absent when the session has none.
+        redirectUrl: session.redirectUrl ?? undefined,
+        // Edit hold. `editable` flips true when the preview build lands;
+        // until then a set `editHoldUntil` means "still preparing".
+        editable: sessionEditability(session).editable,
+        editHoldUntil: holdActive(session)
+          ? session.editHoldUntil!.toISOString()
+          : undefined,
       };
     },
   );
@@ -1008,10 +1254,23 @@ export async function sessionRoutes(app: FastifyInstance) {
   // the session, oldest first. Uses captured_at (client-attested capture
   // moment); pre-migration rows that predate captured_at fall back to
   // requested_at so the array is never sparse.
-  app.get<{ Params: { token: string } }>(
+  //
+  // Captures inside the session's cut list are EXCLUDED from `timestamps` by
+  // default, so heartbeat forwarders (→ Hackatime) respect user edits with
+  // no code changes. The removed points are available via ?includeCut=true.
+  app.get<{ Params: { token: string }; Querystring: { includeCut?: boolean } }>(
     "/api/sessions/:token/timings",
     {
-      schema: { params: tokenParamSchema },
+      schema: {
+        params: tokenParamSchema,
+        querystring: {
+          type: "object" as const,
+          properties: {
+            includeCut: { type: "boolean" as const },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request, reply) => {
       // Rate limit: 30 req/min per token (read-only, potentially large body)
@@ -1043,9 +1302,21 @@ export async function sessionRoutes(app: FastifyInstance) {
         );
 
       // node-postgres may hand timestamps back as strings; coerce before toISOString.
-      const timestamps = rows.map((r) =>
+      const allTimestamps = rows.map((r) =>
         (r.ts instanceof Date ? r.ts : new Date(r.ts)).toISOString(),
       );
+
+      // Partition by the cut list (kept is the default view).
+      const cuts = sessionCuts(session);
+      const timestamps: string[] = [];
+      const cutTimestamps: string[] = [];
+      for (const iso of allTimestamps) {
+        if (cuts.length > 0 && isCutAt(Date.parse(iso), cuts)) {
+          cutTimestamps.push(iso);
+        } else {
+          timestamps.push(iso);
+        }
+      }
 
       const clientInfo = await getFirstClientInfo(session.id);
       const ja4 = await getFirstJa4(session.id);
@@ -1061,6 +1332,415 @@ export async function sessionRoutes(app: FastifyInstance) {
         clientInfo,
         ja4,
         timestamps,
+        cuts,
+        cutCount: cutTimestamps.length,
+        ...(request.query.includeCut ? { cutTimestamps } : {}),
+      };
+    },
+  );
+
+  // ── Edits (cuts) ─────────────────────────────────────────────
+  // An edit is a cut list of absolute wall-clock intervals removed from
+  // every output: the published video, /timings, and trackedSeconds. See
+  // @lookout/shared cuts.ts for the canonical semantics and
+  // docs/edit-feature-plan.md for the architecture.
+
+  // Editor metadata: the original video's unit map (video second i ↔ wall
+  // clock), current cuts, and a presigned URL for the UNCUT original.
+  // Deliberately NOT the public media URL — after an edit, cut content
+  // exists only in the original, which must stay reachable through the
+  // secret token alone.
+  app.get<{ Params: { token: string } }>(
+    "/api/sessions/:token/units",
+    {
+      schema: { params: tokenParamSchema },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-units", request.params.token, 10);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      const { editable, reason } = sessionEditability(session);
+
+      let originalVideoUrl: string | null = null;
+      if (editable) {
+        originalVideoUrl = await getSignedUrl(
+          r2Client,
+          new GetObjectCommand({
+            Bucket: R2_BUCKET,
+            Key: session.originalVideoR2Key!,
+          }),
+          { expiresIn: 3600 },
+        );
+      }
+
+      return {
+        units: (session.videoUnits as VideoUnit[] | null) ?? [],
+        cuts: sessionCuts(session),
+        editable,
+        ...(editable ? {} : { editableReason: reason }),
+        editHoldUntil: holdActive(session)
+          ? session.editHoldUntil!.toISOString()
+          : null,
+        // Roughly how many units the finished video will hold. Lets a
+        // client waiting on the build size its progress estimate — compile
+        // time scales with unit count. Minus the seed capture, which the
+        // compiler excludes from the video (see dropSeedUnit): counting it
+        // would make the waiting-room copy promise one minute more than
+        // the finished timelapse holds.
+        expectedUnits: Math.max(0, (await getScreenshotCount(session.id)) - 1),
+        originalVideoUrl,
+        recompilesRemaining: Math.max(
+          0,
+          MAX_USER_RECOMPILES - session.recompileCount,
+        ),
+      };
+    },
+  );
+
+  // Renew the edit lease: "someone still has this open".
+  //
+  // The hold is a lease rather than a countdown, so an open editor keeps
+  // the session unpublished for as long as it's genuinely being used, and
+  // an abandoned one publishes about a lease later. Cheap and idempotent —
+  // clients call it every EDIT_HEARTBEAT_SECONDS.
+  app.post<{ Params: { token: string } }>(
+    "/api/sessions/:token/editing",
+    {
+      schema: { params: tokenParamSchema },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-editing", request.params.token, 20);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      // Already out the door — tell the caller to stop renewing.
+      if (session.status === "complete" || session.status === "failed") {
+        return { editHoldUntil: new Date().toISOString(), held: false };
+      }
+      if (session.editHoldUntil === null) {
+        return { editHoldUntil: new Date().toISOString(), held: false };
+      }
+
+      // The absolute ceiling is measured from the stop, so an editor left
+      // open indefinitely can't keep a program waiting forever.
+      const ceiling = session.stoppedAt
+        ? session.stoppedAt.getTime() + EDIT_HOLD_MAX_MINUTES * 60_000
+        : Number.POSITIVE_INFINITY;
+      if (Date.now() >= ceiling) {
+        return { editHoldUntil: session.editHoldUntil.toISOString(), held: false };
+      }
+
+      const next = new Date(
+        Math.min(ceiling, Date.now() + EDIT_LEASE_SECONDS * 1000),
+      );
+      // Renew even if the previous term lapsed moments ago but the expiry
+      // job hasn't run: a brief network stall shouldn't end someone's edit.
+      // The status guard is what makes that safe — a published session
+      // can't be pulled back.
+      const [updated] = await db
+        .update(schema.sessions)
+        .set({ editHoldUntil: next, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            sql`${schema.sessions.status} IN ('stopped', 'compiling')`,
+            isNotNull(schema.sessions.editHoldUntil),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+
+      return updated
+        ? { editHoldUntil: next.toISOString(), held: true }
+        : { editHoldUntil: new Date().toISOString(), held: false };
+    },
+  );
+
+  // Replace the session's cut list. Idempotent full replace — no patch
+  // semantics (the list is small). `[]` clears all edits. Only valid during
+  // an active edit hold; the cuts are baked in by POST /compile, which also
+  // publishes the session.
+  app.put<{
+    Params: { token: string };
+    Body: { cuts: Array<{ start: string; end: string }> };
+  }>(
+    "/api/sessions/:token/cuts",
+    {
+      schema: {
+        params: tokenParamSchema,
+        body: {
+          type: "object" as const,
+          required: ["cuts"] as const,
+          properties: {
+            cuts: {
+              type: "array" as const,
+              maxItems: 200,
+              items: {
+                type: "object" as const,
+                required: ["start", "end"] as const,
+                properties: {
+                  start: { type: "string" as const },
+                  end: { type: "string" as const },
+                },
+                additionalProperties: false,
+              },
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-cuts", request.params.token, 20);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      if (session.status === "compiling") {
+        return reply
+          .code(409)
+          .send({ error: "Session is compiling — retry once it completes" });
+      }
+      const { editable, reason } = sessionEditability(session);
+      if (!editable) {
+        return reply
+          .code(409)
+          .send({ error: `Session is not editable (${reason})` });
+      }
+
+      const boundsMin = session.startedAt?.getTime();
+      const boundsMax = (session.stoppedAt ?? session.updatedAt)?.getTime();
+      const normalized = normalizeCuts(
+        request.body.cuts,
+        boundsMin !== undefined && boundsMax !== undefined
+          ? { minMs: boundsMin, maxMs: boundsMax }
+          : undefined,
+      );
+      if (!normalized.ok) {
+        return reply.code(400).send({ error: normalized.error });
+      }
+
+      const videoUnits = session.videoUnits as VideoUnit[];
+      const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
+      const unitsCut = countCutUnits(unitTimesMs, normalized.cuts);
+      if (normalized.cuts.length > 0 && unitsCut >= videoUnits.length) {
+        return reply
+          .code(400)
+          .send({ error: "Cut list would remove the entire timelapse" });
+      }
+
+      // Same rows + same pure function as the worker's authoritative
+      // cut-compile write, so this preview is exactly what lands.
+      const liveTrackedSeconds = await getTrackedSecondsForSession(session);
+      const rawTrackedSeconds =
+        session.trackingMode === "credit"
+          ? liveTrackedSeconds
+          : session.trackedSeconds ?? liveTrackedSeconds;
+      const cutSeconds = computeCutSeconds(
+        await getCaptureRowsForCuts(session.id),
+        session.trackingMode === "credit" ? "credit" : "bucket",
+        rawTrackedSeconds,
+        normalized.cuts,
+      );
+
+      // Guard on `stopped` + a live hold: the expiry job could have
+      // published this session between our read and this write, and a
+      // published session's numbers must never move.
+      const [updated] = await db
+        .update(schema.sessions)
+        .set({
+          cuts: normalized.cuts,
+          cutSeconds,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            eq(schema.sessions.status, "stopped"),
+            sql`${schema.sessions.editHoldUntil} > now()`,
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      if (!updated) {
+        return reply
+          .code(409)
+          .send({ error: "Edit window closed — the timelapse was already published" });
+      }
+
+      return {
+        cuts: normalized.cuts,
+        unitsTotal: videoUnits.length,
+        unitsCut,
+        trackedSeconds: Math.max(0, rawTrackedSeconds - cutSeconds),
+        uncutTrackedSeconds: rawTrackedSeconds,
+      };
+    },
+  );
+
+  // Publish a held session, baking in its current cut list.
+  //
+  // This ENDS the edit hold: the session goes `complete` and programs read
+  // its final numbers. With cuts, the worker slices the kept ranges out of
+  // the built original (usually a lossless stream copy — seconds) and then
+  // deletes the uncut original. With no cuts, the already-built original is
+  // published as-is with no compile job at all ("instant").
+  app.post<{ Params: { token: string } }>(
+    "/api/sessions/:token/compile",
+    {
+      schema: { params: tokenParamSchema },
+    },
+    async (request, reply) => {
+      const rl = checkGenericRateLimit("session-compile", request.params.token, 5);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      const recompilesRemaining = Math.max(
+        0,
+        MAX_USER_RECOMPILES - session.recompileCount,
+      );
+
+      // Already publishing — treat as success so client retries are safe.
+      //
+      // "compiling" covers two different runs, and only one of them is a
+      // publish. With an original already built, the in-flight job is the
+      // cut-compile that publishes, so a repeat request is a duplicate: 202.
+      // With no original yet, the in-flight job is the PREVIEW build, and
+      // this request means "don't bother, publish as recorded" — which the
+      // hold-drop branch below handles. Without the originalVideoR2Key
+      // guard this shadowed that branch, so a user who declined editing
+      // mid-preview got a cheerful 202 while their session stayed held, then
+      // waited for the very preview they had just declined.
+      if (session.status === "compiling" && session.originalVideoR2Key) {
+        return reply
+          .code(202)
+          .send({
+            status: "compiling" as const,
+            instant: false,
+            recompilesRemaining,
+            redirectUrl: session.redirectUrl,
+          });
+      }
+      if (session.status === "complete") {
+        // Someone (usually the hold-expiry job) published first. Idempotent
+        // from the client's point of view: the timelapse is out.
+        return {
+          status: "complete" as const,
+          instant: true,
+          recompilesRemaining,
+          redirectUrl: session.redirectUrl,
+        };
+      }
+
+      const { editable, reason } = sessionEditability(session);
+
+      // "Publish as recorded" while the preview is still building: just
+      // drop the hold. The build re-reads it when it finishes and
+      // publishes normally, so the user never has to wait for a preview
+      // they said they don't want.
+      if (!editable && reason === "preparing") {
+        await db
+          .update(schema.sessions)
+          .set({ editHoldUntil: null, updatedAt: new Date() })
+          .where(eq(schema.sessions.id, session.id));
+        return {
+          status: session.status as "stopped" | "compiling",
+          instant: false,
+          recompilesRemaining,
+          redirectUrl: session.redirectUrl,
+        };
+      }
+
+      if (!editable) {
+        return reply
+          .code(409)
+          .send({ error: `Session is not editable (${reason})` });
+      }
+
+      const cuts = sessionCuts(session);
+
+      if (cuts.length === 0) {
+        // No cuts: publish the already-built original directly. No worker
+        // round-trip, so "Save without edits" is instant.
+        const published = await publishHeldSession(session.id);
+        if (!published) {
+          return reply
+            .code(409)
+            .send({ error: "Session state changed concurrently, please retry" });
+        }
+        return {
+          status: "complete" as const,
+          instant: true,
+          recompilesRemaining,
+          redirectUrl: session.redirectUrl,
+        };
+      }
+
+      // Cuts to bake in: claim stopped → compiling and hand off to the
+      // worker (whose claim accepts re-entry from 'compiling' on retry).
+      const [updated] = await db
+        .update(schema.sessions)
+        .set({
+          status: "compiling",
+          recompileCount: session.recompileCount + 1,
+          // Clear the hold: this session is being published now, so the
+          // expiry job must not race in behind us.
+          editHoldUntil: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            eq(schema.sessions.status, "stopped"),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      if (!updated) {
+        return reply
+          .code(409)
+          .send({ error: "Session state changed concurrently, please retry" });
+      }
+
+      await boss.send(COMPILE_JOB, { sessionId: session.id });
+
+      return {
+        status: "compiling" as const,
+        instant: false,
+        recompilesRemaining: Math.max(
+          0,
+          MAX_USER_RECOMPILES - (session.recompileCount + 1),
+        ),
+        redirectUrl: session.redirectUrl,
       };
     },
   );
@@ -1230,7 +1910,7 @@ export async function sessionRoutes(app: FastifyInstance) {
           // Credit-mode: trust sessions.tracked_seconds (maintained per-credit).
           // Bucket-mode: prefer stored value (survives screenshot cleanup),
           // fall back to live screenshot bucket count for active sessions.
-          const trackedSeconds =
+          const rawTrackedSeconds =
             s.trackingMode === "credit"
               ? s.trackedSeconds ?? 0
               : s.trackedSeconds ?? c.bucketTrackedSeconds;
@@ -1238,7 +1918,7 @@ export async function sessionRoutes(app: FastifyInstance) {
             token: s.token,
             name: s.name,
             status: s.status,
-            trackedSeconds,
+            trackedSeconds: reportedTrackedSeconds(rawTrackedSeconds, s),
             screenshotCount: c.screenshotCount,
             startedAt: s.startedAt?.toISOString() ?? null,
             createdAt: s.createdAt.toISOString(),
@@ -1284,14 +1964,40 @@ export async function sessionRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Thumbnail not available" });
       }
 
+      // Stream the bytes instead of redirecting to a presigned URL: the
+      // presigned URL changes on every request, which defeats the browser
+      // HTTP cache entirely. Thumbnails are the session's first frame, so
+      // they almost never change — a stable URL + ETag makes repeat app
+      // opens a disk-cache hit or a 304.
+      const cacheControl = "public, max-age=86400, stale-while-revalidate=604800";
       const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-      const url = await getSignedUrl(r2Client, new GetObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: session.thumbnailR2Key,
-      }), { expiresIn: 3600 });
-
-      reply.header("Cache-Control", "public, max-age=1800");
-      return reply.redirect(url);
+      const ifNoneMatch = request.headers["if-none-match"];
+      try {
+        const obj = await r2Client.send(new GetObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: session.thumbnailR2Key,
+          IfNoneMatch: ifNoneMatch,
+        }));
+        reply.header("Cache-Control", cacheControl);
+        reply.header("Content-Type", "image/jpeg");
+        if (obj.ETag) reply.header("ETag", obj.ETag);
+        if (obj.ContentLength !== undefined) {
+          reply.header("Content-Length", String(obj.ContentLength));
+        }
+        return reply.send(obj.Body);
+      } catch (err) {
+        const status = (err as { $metadata?: { httpStatusCode?: number } })
+          .$metadata?.httpStatusCode;
+        if (status === 304) {
+          reply.header("Cache-Control", cacheControl);
+          if (ifNoneMatch) reply.header("ETag", ifNoneMatch);
+          return reply.code(304).send();
+        }
+        if (status === 404) {
+          return reply.code(404).send({ error: "Thumbnail not available" });
+        }
+        throw err;
+      }
     },
   );
 

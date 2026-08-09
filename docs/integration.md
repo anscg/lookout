@@ -62,6 +62,68 @@ Response:
 - `sessionId` — the server-side ID.
 - `sessionUrl` — a convenience URL you can redirect the user to.
 - `metadata` — any JSON you want to associate with the session (user info, project, etc.)
+- `clips` — set `false` to opt this session OUT of [clips](#clips-6-frames-per-minute) and back to 1 JPEG/min. Default `true` (~6 frames/min video → 6× smoother timelapses); immutable after creation.
+- `redirectUrl` — optional [redirect hook](#redirect-hook): an http(s) URL the recording client sends the user to once their timelapse finishes compiling. Immutable after creation.
+
+### Redirect hook
+
+Pass `redirectUrl` when creating a session to send the user somewhere when
+their timelapse is done — e.g. back to your submission form:
+
+```bash
+curl -X POST https://lookout.hackclub.com/api/internal/sessions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"metadata": {"userId": "user_123"}, "redirectUrl": "https://yourprogram.example/submit?step=timelapse-done"}'
+```
+
+How it behaves:
+
+- The URL must be `http(s)` (max 2048 chars) — anything else is rejected with
+  a 400 at creation time.
+- The desktop app opens the URL in the user's default browser the moment it
+  sees the session flip to `complete` while the user is watching the compile
+  (i.e. right after they stop recording). It fires at most once per session,
+  and does **not** fire when someone later re-opens an already-completed
+  session from their gallery.
+- The URL is surfaced to clients on `GET /api/sessions/:token` and
+  `GET /api/sessions/:token/status` as `redirectUrl`, so custom clients can
+  implement the same behavior.
+- Older desktop clients ignore the field — treat the redirect as a
+  convenience, not a guaranteed callback. For server-side certainty, poll
+  [session status](#get-session-info) instead.
+
+### Clips (6 frames per minute)
+
+Sessions record **clips** by default: instead of one JPEG per minute, the
+recording client uploads one ~60s video file per minute containing ~6 frames
+captured 10s apart. The compiled timelapse has the same length but is 6×
+smoother, with motion from the very first second. Pass `"clips": false` at
+creation to opt out.
+
+What this means for your program:
+
+- **Nothing in your integration changes.** A clip is still one capture unit
+  per minute — `trackedSeconds`, `screenshotCount`, `/timings` (still one
+  timestamp per minute → Hackatime forwarding unchanged), `videoUrl`, and
+  every response shape are identical between clips and non-clips sessions.
+- **Clients negotiate automatically.** The hosted web recorder and React SDK
+  (≥0.4) detect the flag on the session and record clips; older clients and
+  the desktop app keep uploading JPEGs to the same session, which stays fully
+  valid (formats can even mix within one session).
+- **Network:** a clip is capped at 8 MB/min server-side. At 6 frames/min a
+  typical screen measures ~1.1 MB/min and a deliberately incompressible one
+  ~1.4 MB/min — under half of what the same content cost at 15 frames/min,
+  since bandwidth scales with the frame count and the per-frame quality
+  budget is held constant.
+- **Frame quality:** clip frames are bitrate-capped rather than encoded
+  independently, but the budget is sized per frame to hold q0.85-JPEG-class
+  detail at 1080p even on busy screens, and it is rescaled whenever the
+  cadence changes — so frames stay legible at any frame rate. For review
+  purposes you get 6× more moments per minute.
+- The flag is per session, so you can disable it for a fraction of new
+  sessions and compare, or turn it off entirely for a program that needs the
+  legacy payload.
 
 ### Get session info
 
@@ -388,6 +450,61 @@ Notes:
 - Run this once per session (after `complete`). If you must re-run, Hackatime de-dupes identical heartbeats by `time` + `entity`, but don't rely on it — track which sessions you've already forwarded.
 
 > **Note:** The original screenshot images are only retained for 7 days after a session stops, after which the JPEGs are deleted from storage. The capture timestamps (and the compiled video and thumbnail) are kept.
+
+## Edits and cuts
+
+When a user stops a recording, the official clients offer three choices:
+keep recording, save as recorded, or **review and cut first**. If they
+choose to edit, they mark wall-clock stretches to remove and Lookout drops
+those minutes from the video, the `/timings` heartbeats, and
+`trackedSeconds` — all from one stored list of `{start, end}` intervals.
+
+**You get this for free.** It ships inside the recorder, so any program
+that redirects users to the hosted recorder, or embeds
+`<LookoutRecorder>`, already has it: the stop button opens the choice
+dialog, and picking "Edit & save" opens the editor as a modal over your
+page. No code change, no new version to adopt, nothing to call. Both
+dialogs render into `document.body`, so they aren't constrained by the
+width of the container you put the recorder in.
+
+The exception is a program driving the headless `useLookout()` hook with
+its own recording UI. That UI owns its own stop button, so it opts in by
+passing `actions.stop({ edit: true })` and rendering `<TimelapseEditor>`
+(see the [SDK reference](../clients/react/API.md)).
+
+What this means for your program:
+
+- **Nothing in your integration changes, and nothing you read ever changes
+  underneath you.** Editing happens *before* the session reaches
+  `complete`: a session being edited stays `stopped`, and only flips to
+  `complete` once the user's cuts are baked in. So the first time you see a
+  finished session, its video, `trackedSeconds`, and `/timings` are final.
+  There is no post-publication editing.
+- **The lifecycle you observe is unchanged.** `stopped → compiling →
+  complete` (or `stopped → complete`), exactly as before — an edit just
+  means the session sits in `stopped` a little longer. The redirect hook
+  still fires when the session completes, which is now also the moment the
+  edits are in.
+- **An abandoned edit can't strand a timelapse.** The hold is a lease the
+  open editor renews, not a fixed deadline: editing takes as long as it
+  takes, and once nothing is renewing it (window closed, app quit) the
+  session publishes as recorded within about two minutes. It can delay
+  publication, never cancel it. If you poll, treat a slightly longer
+  `stopped` exactly as you always have.
+- **Cuts only ever shrink the numbers.** A user cannot gain time by
+  editing — removing footage removes its credit. The pre-edit value is
+  available as `uncutTrackedSeconds` and the intervals as `cuts` on
+  `GET /api/sessions/:token`; `?includeCut=true` on `/timings` returns the
+  removed timestamps, if you want to audit or display them.
+- **Cut footage is deleted immediately** once the edited timelapse
+  publishes — the point of a cut is usually "I didn't mean to record that."
+- **Opting out of the review step:** add `?edit=false` to the hosted
+  recorder URL, or pass `<LookoutRecorder editing={false} />` in the React
+  SDK. Stopping is then a single click, as before.
+- **Matching your brand:** SDK embedders can pass
+  `<LookoutProvider accentColor="#16a34a">` to replace Lookout's blue on
+  primary buttons, focus rings, and progress. See the
+  [SDK reference](../clients/react/API.md).
 
 ## Client telemetry
 

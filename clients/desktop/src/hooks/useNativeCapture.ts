@@ -55,6 +55,11 @@ export function useNativeCapture(
   cameraCapture?: CameraFrameCapture,
   /** Called when the capture loop discovers the server moved the session to a terminal state. */
   onSessionTerminated?: (status: string) => void,
+  /** The session's server-known tracked seconds, used to seed a freshly
+   *  started Rust tray timer. Needed because `trackedSeconds` below is
+   *  hook-local state that starts at 0 — on a session that already has
+   *  recorded time it can't seed anything until the first confirm lands. */
+  sessionTrackedSeconds = 0,
 ) {
   const [isCapturing, setIsCapturing] = useState(false);
   const [trackedSeconds, setTrackedSeconds] = useState(0);
@@ -70,6 +75,12 @@ export function useNativeCapture(
   // Track whether we're actively capturing so in-flight requests can
   // check if the user intentionally stopped (avoids auto-resume race).
   const capturingRef = useRef(false);
+
+  // Best known tracked seconds, for seeding a freshly started Rust tray timer.
+  // Both inputs are server-derived; take the higher one so neither a
+  // not-yet-confirmed capture nor a lagging session poll seeds a low baseline.
+  const trackedSecondsRef = useRef(0);
+  trackedSecondsRef.current = Math.max(trackedSeconds, sessionTrackedSeconds);
 
   // Track blob URL for cleanup
   const blobUrlRef = useRef<string | null>(null);
@@ -253,6 +264,13 @@ export function useNativeCapture(
       maxWidth: MAX_WIDTH,
       maxHeight: MAX_HEIGHT,
       jpegQuality: Math.round(JPEG_QUALITY * 100),
+    }).then(() => {
+      // A freshly started Rust tray timer counts from 0 — seed it with the
+      // last known tracked seconds so the menu-bar time doesn't reset while
+      // waiting for the first confirm (visible on pause → resume).
+      if (trackedSecondsRef.current > 0) {
+        invoke("sync_tray_tracked_seconds", { trackedSeconds: trackedSecondsRef.current }).catch(console.error);
+      }
     }).catch((err) => {
       console.error("[capture] failed to start Rust capture loop:", err);
       setError(String(err));
@@ -274,6 +292,16 @@ export function useNativeCapture(
         setError(null);
         updatePreview(result.previewBase64);
       }),
+      // In-between live-preview frames from the capture loop (20/min while
+      // the window is focused). Same redaction-aware capture path as the
+      // uploads, delivered through the same preview pipeline — so
+      // lastScreenshotUrl is simply live whenever someone's looking.
+      listen<{ previewBase64: string; previewWidth: number; previewHeight: number }>(
+        "capture-preview-frame",
+        (event) => {
+          updatePreview(event.payload.previewBase64);
+        },
+      ),
       listen<{ message: string }>("capture-tick-error", (event) => {
         console.error(`[capture] Rust capture error: ${event.payload.message}`);
         setError(event.payload.message);

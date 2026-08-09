@@ -9,6 +9,7 @@ import {
   text,
   timestamp,
   integer,
+  real,
   boolean,
   jsonb,
   index,
@@ -39,11 +40,35 @@ export const sessions = pgTable(
     resumedAt: timestamp("resumed_at", { withTimezone: true }),
     totalActiveSeconds: integer("total_active_seconds").notNull().default(0),
     trackedSeconds: integer("tracked_seconds"),
+    // 'bucket' (legacy distinct-minute count) or 'credit' (per-capture
+    // acceptance window). Needed for cut-seconds math at cut-compile.
+    trackingMode: text("tracking_mode").notNull().default("bucket"),
     videoUrl: text("video_url"),
     videoR2Key: text("video_r2_key"),
     thumbnailUrl: text("thumbnail_url"),
     thumbnailR2Key: text("thumbnail_r2_key"),
     compileAttempts: integer("compile_attempts").notNull().default(0),
+    // Real per-unit compile progress (0..~0.95). See the server schema for
+    // full docs; the worker's compile loop writes it, /status reports it.
+    compileProgress: real("compile_progress"),
+    // ── Edits (cuts) — see the server schema for full docs ──
+    cuts: jsonb("cuts").$type<{ start: string; end: string }[]>(),
+    cutSeconds: integer("cut_seconds"),
+    videoUnits: jsonb("video_units").$type<
+      { capturedAt: string; screenshotId: string }[]
+    >(),
+    originalVideoR2Key: text("original_video_r2_key"),
+    videoCopyAligned: boolean("video_copy_aligned"),
+    // True when original_video_r2_key is a throwaway PREVIEW build (reduced
+    // resolution, cheap encoder settings) made only so the editor opens
+    // promptly. Such a file must never be published — publishing re-encodes
+    // from the capture units instead. Mirrors the server schema.
+    originalIsPreview: boolean("original_is_preview").notNull().default(false),
+    recompileCount: integer("recompile_count").notNull().default(0),
+    lastEditCompileAt: timestamp("last_edit_compile_at", {
+      withTimezone: true,
+    }),
+    editHoldUntil: timestamp("edit_hold_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -74,6 +99,15 @@ export const screenshots = pgTable(
     height: integer("height"),
     fileSizeBytes: integer("file_size_bytes"),
     sampled: boolean("sampled").notNull().default(false),
+    // 'jpeg' (legacy single frame) or 'webm'/'mp4' (per-minute clip).
+    format: text("format").notNull().default("jpeg"),
+    // Client-reported frames per clip; the compiler demuxes for the truth.
+    frameCount: integer("frame_count"),
+    // Client-attested capture time; NULL for pre-migration rows (fall back
+    // to requestedAt — same coalesce the timings endpoint uses).
+    capturedAt: timestamp("captured_at", { withTimezone: true }),
+    // Credit-mode only: 0 or 60. NULL for bucket-mode rows.
+    creditedSeconds: integer("credited_seconds"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

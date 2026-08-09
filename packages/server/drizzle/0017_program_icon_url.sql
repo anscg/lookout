@@ -1,0 +1,1 @@
+ALTER TABLE "programs" ADD COLUMN "icon_url" text;

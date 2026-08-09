@@ -10,6 +10,7 @@ import {
   CLEANUP_SCREENSHOTS_JOB,
 } from "./queue.js";
 import { cleanupRateLimits } from "./timing.js";
+import { publishHeldSession } from "./publish.js";
 import {
   AUTO_PAUSE_AFTER_MINUTES,
   AUTO_STOP_AFTER_MINUTES,
@@ -17,6 +18,8 @@ import {
   STUCK_COMPILING_TIMEOUT_MINUTES,
   MAX_COMPILE_ATTEMPTS,
   SCREENSHOT_RETENTION_DAYS,
+  EDIT_WINDOW_DAYS,
+  EDIT_HOLD_MAX_MINUTES,
 } from "@lookout/shared";
 
 /**
@@ -49,8 +52,61 @@ export async function registerTimeoutJobs() {
   });
 }
 
+/**
+ * Publish sessions whose edit lease lapsed — nothing has said "still
+ * editing" for a lease term — or that hit the absolute ceiling.
+ *
+ * This is the promise that makes "Edit & Save" safe to offer: a user who
+ * closes the app mid-edit still gets their timelapse, uncut, about a lease
+ * later. The hold can delay publication, never cancel it.
+ */
+async function publishExpiredHolds() {
+  const now = new Date();
+  const ceilingCutoff = new Date(
+    now.getTime() - EDIT_HOLD_MAX_MINUTES * 60_000,
+  );
+
+  const expired = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.status, "stopped"),
+        isNotNull(schema.sessions.editHoldUntil),
+        sql`(${schema.sessions.editHoldUntil} < ${now}
+             OR ${schema.sessions.stoppedAt} < ${ceilingCutoff})`,
+      ),
+    );
+
+  for (const session of expired) {
+    // The original exists once the build lands; if the compile is still
+    // running (or failed), leave the row alone — the build path publishes
+    // directly when it finds no live hold, and the stuck-compiling timeout
+    // covers genuine failures.
+    const published = await publishHeldSession(session.id);
+    if (published) {
+      console.log(`[edit-hold] auto-published ${session.id} (hold expired)`);
+    } else {
+      // No original yet: drop the hold so the next compile publishes
+      // normally instead of the session sitting in limbo.
+      await db
+        .update(schema.sessions)
+        .set({ editHoldUntil: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            eq(schema.sessions.status, "stopped"),
+            isNull(schema.sessions.originalVideoR2Key),
+          ),
+        );
+    }
+  }
+}
+
 async function checkTimeouts() {
   const now = new Date();
+
+  await publishExpiredHolds();
 
   // Auto-pause: active sessions with no screenshots for AUTO_PAUSE_AFTER_MINUTES
   const autoPauseThreshold = new Date(
@@ -306,6 +362,59 @@ async function cleanupCompletedScreenshots() {
     await db
       .update(schema.sessions)
       .set({ screenshotsPurgedAt: new Date() })
+      .where(eq(schema.sessions.id, session.id));
+  }
+
+  await purgeEditedOriginals();
+}
+
+/**
+ * Privacy backstop for the edit feature: cut minutes vanish from the
+ * published video but survive inside the (token-gated) uncut original. Once
+ * an EDITED session's re-edit window closes, delete the original so the cut
+ * content is truly gone; nulling original_video_r2_key freezes further
+ * editing. Sessions whose published video IS the original (never edited, or
+ * edits cleared) keep their single video file forever, as always.
+ */
+async function purgeEditedOriginals() {
+  const threshold = new Date(
+    Date.now() - EDIT_WINDOW_DAYS * 24 * 60 * 60_000,
+  );
+
+  const editedSessions = await db
+    .select({
+      id: schema.sessions.id,
+      originalVideoR2Key: schema.sessions.originalVideoR2Key,
+    })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.status, "complete"),
+        isNotNull(schema.sessions.originalVideoR2Key),
+        isNotNull(schema.sessions.videoR2Key),
+        sql`${schema.sessions.videoR2Key} <> ${schema.sessions.originalVideoR2Key}`,
+        lt(schema.sessions.lastEditCompileAt, threshold),
+      ),
+    );
+
+  for (const session of editedSessions) {
+    try {
+      await r2Client.send(
+        new DeleteObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: session.originalVideoR2Key!,
+        }),
+      );
+    } catch {
+      console.warn(
+        `Failed to delete original video for session ${session.id}, will retry next run`,
+      );
+      continue;
+    }
+
+    await db
+      .update(schema.sessions)
+      .set({ originalVideoR2Key: null, updatedAt: new Date() })
       .where(eq(schema.sessions.id, session.id));
   }
 }

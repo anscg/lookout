@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 
-const API_BASE = "https://lookout.hackclub.com";
+import { getApiBase } from "../serverConfig.js";
+
+// Read once per webview load; Settings → Server reloads the view on change.
+const API_BASE = getApiBase();
 // Re-check for a new/cleared announcement while the app stays open.
 const CHECK_INTERVAL_MS = 15 * 60_000; // 15 minutes
 

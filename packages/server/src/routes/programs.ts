@@ -16,6 +16,7 @@ export async function programRoutes(app: FastifyInstance) {
         // older programs without one still render sensibly.
         displayName: sql<string>`coalesce(${schema.programs.displayName}, ${schema.programs.name})`,
         newSessionUrl: schema.programs.newSessionUrl,
+        iconUrl: schema.programs.iconUrl,
       })
       .from(schema.programs)
       .where(isNotNull(schema.programs.newSessionUrl))

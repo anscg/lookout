@@ -19,7 +19,12 @@ export async function internalRoutes(app: FastifyInstance) {
 
   // Create a new session
   app.post<{
-    Body: { name?: string; metadata?: Record<string, unknown> };
+    Body: {
+      name?: string;
+      metadata?: Record<string, unknown>;
+      clips?: boolean;
+      redirectUrl?: string;
+    };
   }>(
     "/api/internal/sessions",
     {
@@ -29,19 +34,36 @@ export async function internalRoutes(app: FastifyInstance) {
           properties: {
             name: { type: "string" as const, minLength: 1, maxLength: 255 },
             metadata: { type: "object" as const, maxProperties: 50 },
+            // Opt OUT of clip uploads (per-minute videos of ~6 frames).
+            // Defaults TRUE; pass false to pin this session to the legacy
+            // 1 JPEG/min payload. Immutable after creation — a session's
+            // capture character never changes.
+            clips: { type: "boolean" as const },
+            // Redirect hook: once the timelapse finishes compiling, the
+            // recording client sends the user here (desktop opens it in the
+            // default browser). Immutable after creation.
+            redirectUrl: {
+              type: "string" as const,
+              pattern: "^https?://",
+              maxLength: 2048,
+            },
           },
           additionalProperties: false,
         },
       },
     },
     async (request, reply) => {
-      const { name, metadata } = request.body || {};
+      const { name, metadata, clips, redirectUrl } = request.body || {};
 
       const [session] = await db
         .insert(schema.sessions)
         .values({
           ...(name ? { name } : {}),
           metadata: metadata ?? {},
+          // Opt-OUT: clips are the default capture mode. `clips: false`
+          // pins a session to the legacy one-JPEG-per-minute payload.
+          clipsEnabled: clips ?? true,
+          redirectUrl: redirectUrl ?? null,
           // Attribution: tag with the creating program (null for global key).
           // `program` (name) is dual-written for backward compatibility;
           // `programId` is the canonical attribution.
@@ -91,16 +113,29 @@ export async function internalRoutes(app: FastifyInstance) {
           ),
         );
 
-      // Exclude internal R2 storage keys and build proper media URLs
+      // Exclude internal R2 storage keys (and the editor's unit map, which
+      // is bulky plumbing) and build proper media URLs
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
-      const { videoR2Key, thumbnailR2Key, ...sessionData } = session;
+      const {
+        videoR2Key,
+        thumbnailR2Key,
+        originalVideoR2Key: _originalVideoR2Key,
+        videoUnits: _videoUnits,
+        ...sessionData
+      } = session;
       // Bucket-mode: tracked = (distinct buckets - 1) * 60.
       // Credit-mode: read session.trackedSeconds directly (maintained per-credit).
       const liveBucketTracked = Math.max(0, (Number(count) - 1) * 60);
-      const trackedSeconds =
+      const uncutTrackedSeconds =
         session.trackingMode === "credit"
           ? session.trackedSeconds ?? 0
           : session.trackedSeconds ?? liveBucketTracked;
+      // Reported tracked time honors the session's cut list (user edits can
+      // only shrink it); the raw value is surfaced alongside.
+      const trackedSeconds = Math.max(
+        0,
+        uncutTrackedSeconds - (session.cutSeconds ?? 0),
+      );
       const [{ confirmedCount }] = await db
         .select({ confirmedCount: sql<number>`count(*)::int` })
         .from(schema.screenshots)
@@ -147,6 +182,7 @@ export async function internalRoutes(app: FastifyInstance) {
             : null,
         },
         trackedSeconds,
+        uncutTrackedSeconds,
         screenshotCount: Number(confirmedCount),
         clientInfo: firstClient?.clientInfo ?? null,
         ja4: firstJa4?.ja4 ?? null,

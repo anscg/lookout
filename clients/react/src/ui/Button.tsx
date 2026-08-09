@@ -13,7 +13,7 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 }
 
 const variantStyles: Record<string, React.CSSProperties> = {
-  primary: { background: colors.status.info, color: "#fff", border: "1px solid transparent" },
+  primary: { background: colors.accent.base, color: colors.accent.on, border: "1px solid transparent" },
   success: { background: colors.status.success, color: "#fff", border: "1px solid transparent" },
   danger: { background: colors.status.danger, color: "#fff", border: "1px solid transparent" },
   warning: { background: colors.status.warning, color: "#000", border: "1px solid transparent" },
@@ -44,7 +44,17 @@ export function Button({
   const idleBackground = background ?? variantStyles[variant].background;
   const idleBorder = border ?? variantStyles[variant].border;
   const hoverBackground =
-    background ?? (variant === "ghost" ? colors.bg.selected : variant === "secondary" ? colors.bg.surface : variantStyles[variant].background);
+    background ??
+    (variant === "ghost"
+      ? colors.bg.selected
+      : variant === "secondary"
+        ? colors.bg.surface
+        : // The accent darkens on hover. Derived with color-mix so a
+          // brand colour supplied by an embedder gets a matching hover
+          // state without them having to provide a second shade.
+          variant === "primary"
+          ? colors.accent.hover
+          : variantStyles[variant].background);
   const hoverBorder =
     border ?? (variant === "ghost" ? "1px solid transparent" : variantStyles[variant].border);
 

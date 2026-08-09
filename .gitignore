@@ -12,6 +12,15 @@ dist/
 # Rust / Tauri
 clients/desktop/src-tauri/target/
 clients/desktop/src-tauri/gen/
+# SwiftPM build output for the native tray. Its index database is a 64MB file
+# that was committed once already; keep it out for good.
+clients/desktop/src-tauri/swift/*/.build/
+
+# Env files, including the editor/tooling backups that are easy to commit by
+# accident (.env itself is covered above).
+.env.bak
+.env.*.bak
+*.env.bak
 
 # Drizzle generated migrations are committed, but the meta folder is not needed
 # (optional — remove this line if you want to commit migration metadata)
