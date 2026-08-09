@@ -13,7 +13,7 @@
  * The bar is only ever rendered on Linux. macOS keeps its overlay titlebar
  * and traffic lights; Windows keeps its own decorations.
  */
-import React, { useEffect } from "react";
+import React from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { colors, spacing, fontSize, fontWeight } from "@lookout/react";
 import { HEADER_BAR_HEIGHT, type DesktopAppearance } from "../linuxChrome.js";
@@ -84,14 +84,15 @@ const HEADER_BAR_CSS = `
   }
 `;
 
-function useHeaderBarStyles(): void {
-  useEffect(() => {
-    if (document.querySelector("style[data-lookout-headerbar]")) return;
-    const style = document.createElement("style");
-    style.setAttribute("data-lookout-headerbar", "");
-    style.textContent = HEADER_BAR_CSS;
-    document.head.appendChild(style);
-  }, []);
+// Injected on import, not from an effect. Effects run after the first paint,
+// so an effect-injected sheet leaves one frame where these are unstyled
+// <button> elements wearing the UA stylesheet — grey, rectangular, bordered.
+// On a dark header that reads as the buttons flashing white on every launch.
+if (typeof document !== "undefined" && !document.querySelector("style[data-lookout-headerbar]")) {
+  const style = document.createElement("style");
+  style.setAttribute("data-lookout-headerbar", "");
+  style.textContent = HEADER_BAR_CSS;
+  document.head.appendChild(style);
 }
 
 function BackIcon() {
@@ -142,8 +143,6 @@ export interface HeaderBarProps {
 }
 
 export function HeaderBar({ title, subtitle, appearance, actions, onBack, onClose, maximizable = false }: HeaderBarProps) {
-  useHeaderBarStyles();
-
   // One button, no minimize and no maximize. That's what GNOME ships now:
   // the window menu and the keyboard still do everything else, and a row of
   // three controls is the look this was meant to get away from.

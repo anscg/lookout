@@ -331,7 +331,7 @@ function MainWindowApp() {
               fallbackIcon: <ArrowSquareOutIcon size={15} weight="bold" />,
             })),
             { separator: true },
-            { id: "create-new", label: "Create new timelapse", fallbackIcon: <PlusIcon size={15} weight="bold" /> },
+            { id: "create-new", label: "Start from link", fallbackIcon: <PlusIcon size={15} weight="bold" /> },
           ],
           anchor,
         });

@@ -37,6 +37,31 @@
       }
       body.os-windows { transform: rotate(0.001deg); }
 
+      /* First-paint background.
+
+         `body` above resolves its colour from --color-bg-body, and that
+         variable does not exist until the bundle runs and theme.ts injects
+         its sheet — so the frame before that fell through to `transparent`
+         and showed the webview's own white. A flash of white on a dark
+         desktop, every launch.
+
+         Painted on `html` rather than `body` on purpose: `body` must keep
+         its var-based rule, and a second declaration for it here would win
+         on source order and pin the background forever. These values shadow
+         theme.ts's and want updating with it. */
+      html { background: #242424; }
+      html[data-theme="light"] { background: #fafafa; }
+      @media (prefers-color-scheme: light) {
+        html:not([data-theme="dark"]) { background: #fafafa; }
+      }
+
+      /* Linux draws its own rounded window, and the class lands synchronously
+         in the script below — so the first frame can be the right shape too
+         rather than a square that rounds off a moment later. */
+      html.os-linux { background: transparent; }
+      html.os-linux #root { background: #242424; border-radius: 12px; }
+      html.os-linux[data-theme="light"] #root { background: #fafafa; }
+
       /* Linux: prefer the desktop's own UI font over the bundled one, so the
          app reads as part of the session rather than a page inside it. The
          exact family the user configured is applied from linuxChrome.ts once
