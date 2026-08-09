@@ -3323,17 +3323,39 @@ mod base64_engine {
     pub use base64::Engine;
 }
 
+/// Whether NVIDIA's proprietary driver is loaded.
+///
+/// Both paths are created by that driver and by nothing else, so their
+/// absence is a reliable "not NVIDIA" — nouveau, AMD and Intel never
+/// produce them. Reading a path rather than shelling out keeps this cheap
+/// enough to run on the startup path before the webview exists.
+#[cfg(target_os = "linux")]
+fn nvidia_proprietary_driver_loaded() -> bool {
+    std::path::Path::new("/proc/driver/nvidia/version").exists()
+        || std::path::Path::new("/sys/module/nvidia/version").exists()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // WebKitGTK's accelerated compositing crashes on launch under Wayland with
     // some drivers (notably NVIDIA), bailing out with
     // "Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display."
-    // Disabling compositing avoids the crash. Scope it to Wayland sessions so
-    // X11 users keep GPU acceleration, set it before the webview is created,
-    // and only when the user hasn't already chosen a value.
+    // Disabling compositing avoids the crash.
+    //
+    // It is not free, though: without accelerated compositing WebKitGTK
+    // falls back to a software path, and video goes through it too — which
+    // is why a finished timelapse played back blocky and smeared on Linux
+    // while every other surface looked fine. So this is narrowed to the
+    // drivers that actually need it rather than all of Wayland; everyone
+    // else keeps GPU compositing and gets video that looks like video.
+    //
+    // Anyone who does hit the crash on another driver still has the escape
+    // hatch, since a value the user set is always left alone:
+    //     WEBKIT_DISABLE_COMPOSITING_MODE=1 lookout
     #[cfg(target_os = "linux")]
     if std::env::var_os("WAYLAND_DISPLAY").is_some()
         && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none()
+        && nvidia_proprietary_driver_loaded()
     {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
     }
