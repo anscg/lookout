@@ -4,11 +4,20 @@ import {
   JPEG_QUALITY,
   CLIP_WEB_VIDEO_BITS_PER_SECOND,
   CLIP_WEB_MIN_BITS_PER_SECOND,
+  CLIP_WEBCODECS_QP,
+  CLIP_WEBCODECS_QP_STEP,
+  CLIP_WEBCODECS_QP_MAX,
   MAX_CLIP_FRAME_OVERRUN,
   MAX_CLIP_BYTES,
   SCREENSHOT_INTERVAL_MS,
   type CaptureFormat,
 } from "@lookout/shared";
+import { drawScaledHQ } from "./hqScale.js";
+import {
+  WebCodecsClipEngine,
+  type ClipEngine,
+  type ClipEngineOutput,
+} from "./webCodecsClipEngine.js";
 
 /** One finalized per-minute clip, ready for the upload pipeline. */
 export interface ClipCaptureResult {
@@ -35,8 +44,8 @@ interface MimeCandidate {
   format: Exclude<CaptureFormat, "jpeg">;
 }
 
-/** Preference order: H.264/MP4 first, WebM only as a fallback for engines
- *  that cannot record MP4 (Firefox).
+/** MediaRecorder preference order: H.264/MP4 first, WebM only as a fallback
+ *  for engines that cannot record MP4 (Firefox).
  *
  *  This is the opposite of what raw compression efficiency suggests, and
  *  it is deliberate. Our content is sparse 1080p screen frames, which is
@@ -78,9 +87,120 @@ function pickMimeCandidate(): MimeCandidate | null {
   return null;
 }
 
-/** Per-recorder display knobs. Cadence and bitrate are deliberately NOT
- *  options: the frame interval is server-authoritative (constructor arg,
- *  from the session response) and the bitrate is the shared constant. */
+function canvasCaptureSupported(): boolean {
+  return (
+    typeof HTMLCanvasElement !== "undefined" &&
+    typeof HTMLCanvasElement.prototype.captureStream === "function"
+  );
+}
+
+/**
+ * The legacy encode sink: canvas.captureStream() into a bitrate-capped
+ * MediaRecorder. Still the path for engines without WebCodecs H.264
+ * support (notably Firefox), and the fallback whenever the WebCodecs
+ * engine fails. Its known quality ceiling — realtime rate control that
+ * ignores wall-clock frame spacing — is documented at
+ * CLIP_WEB_VIDEO_BITS_PER_SECOND.
+ */
+class MediaRecorderClipEngine implements ClipEngine {
+  readonly kind = "mediarecorder" as const;
+  private stream: MediaStream;
+  private recorder: MediaRecorder;
+  private parts: Blob[] = [];
+  private format: Exclude<CaptureFormat, "jpeg">;
+  private contentType: string;
+
+  constructor(canvas: HTMLCanvasElement, mime: MimeCandidate, bitrate: number) {
+    // captureStream(0) = frames only on explicit requestFrame(), keeping
+    // encode work at exactly our cadence. Some engines put requestFrame on
+    // the track (spec), others on the stream (older Firefox), some lack it
+    // entirely — fall back to auto-capture on canvas change.
+    let stream: MediaStream;
+    try {
+      stream = canvas.captureStream(0);
+      if (!this.streamHasRequestFrame(stream)) {
+        stream.getTracks().forEach((t) => t.stop());
+        stream = canvas.captureStream();
+      }
+    } catch {
+      stream = canvas.captureStream();
+    }
+    this.stream = stream;
+    this.format = mime.format;
+    this.contentType = mime.mime.split(";")[0];
+    this.recorder = new MediaRecorder(stream, {
+      mimeType: mime.mime,
+      videoBitsPerSecond: bitrate,
+    });
+    this.recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) this.parts.push(e.data);
+    };
+    this.recorder.start();
+  }
+
+  private streamHasRequestFrame(stream: MediaStream): boolean {
+    const track = stream.getVideoTracks()[0] as MediaStreamTrack & {
+      requestFrame?: () => void;
+    };
+    const s = stream as MediaStream & { requestFrame?: () => void };
+    return (
+      typeof track?.requestFrame === "function" ||
+      typeof s.requestFrame === "function"
+    );
+  }
+
+  addFrame(): void {
+    const track = this.stream.getVideoTracks()[0] as
+      | (MediaStreamTrack & { requestFrame?: () => void })
+      | undefined;
+    if (typeof track?.requestFrame === "function") {
+      track.requestFrame();
+    } else {
+      (
+        this.stream as MediaStream & { requestFrame?: () => void }
+      ).requestFrame?.();
+    }
+  }
+
+  async finish(): Promise<ClipEngineOutput | null> {
+    const recorder = this.recorder;
+    const stopped = new Promise<void>((resolve) => {
+      recorder.onstop = () => resolve();
+      recorder.onerror = () => resolve();
+    });
+    try {
+      recorder.stop();
+    } catch {
+      // stop() throws if already inactive — treat as stopped
+    }
+    // Never let a wedged encoder stall the capture loop.
+    await Promise.race([
+      stopped,
+      new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+    ]);
+    this.stream.getTracks().forEach((t) => t.stop());
+    if (this.parts.length === 0) return null;
+    return {
+      blob: new Blob(this.parts, { type: this.contentType }),
+      format: this.format,
+    };
+  }
+
+  cancel(): void {
+    try {
+      if (this.recorder.state !== "inactive") this.recorder.stop();
+    } catch {
+      // already inactive
+    }
+    this.stream.getTracks().forEach((t) => t.stop());
+    this.parts = [];
+  }
+}
+
+/** Per-recorder display knobs. Cadence and rate control are deliberately
+ *  NOT options: the frame interval is server-authoritative (constructor
+ *  arg, from the session response) and the quality dials are the shared
+ *  constants. */
 export interface ClipRecorderOptions {
   maxWidth?: number;
   maxHeight?: number;
@@ -99,32 +219,44 @@ export interface ClipRecorderOptions {
  * Records the shared screen into per-minute video clips.
  *
  * Owns an offscreen canvas fed from the caller's `<video>` (the
- * getDisplayMedia sink) every `frameIntervalMs`, streamed through
- * `canvas.captureStream()` into a bitrate-capped MediaRecorder. `cut()`
- * finalizes the current clip and immediately starts the next one, so the
- * serial per-minute upload pipeline stays exactly as it is for JPEGs — a
- * clip is one capture unit.
+ * getDisplayMedia sink) every `frameIntervalMs`, sunk into an encode
+ * engine. `cut()` finalizes the current clip and immediately starts the
+ * next one, so the serial per-minute upload pipeline stays exactly as it
+ * is for JPEGs — a clip is one capture unit.
+ *
+ * Engine preference: WebCodecs (VideoEncoder + MP4 mux — desktop-class
+ * quality, see webCodecsClipEngine.ts) when the browser supports H.264
+ * encoding there, else canvas.captureStream + MediaRecorder. Any WebCodecs
+ * failure permanently downgrades the session to MediaRecorder, and any
+ * unusable cut falls back to a single JPEG for that tick — clips are an
+ * enhancement, a capture a minute is the contract.
  *
  * Clips are VFR: on a static screen the encoder legitimately emits few
  * frames. That's fine — the worker demuxes and normalizes each clip to
  * one second of output video regardless of frame count.
  */
 export class ClipRecorder {
+  /** Session-wide latch: once the WebCodecs engine fails, stop offering it.
+   *  Static so every recorder (and every restart) sees the verdict. */
+  static webCodecsDisabled = false;
+
   private video: HTMLVideoElement;
   private frameIntervalMs: number;
   private openingFrameIntervalMs: number | null;
   private canvas: HTMLCanvasElement | null = null;
-  private stream: MediaStream | null = null;
-  private recorder: MediaRecorder | null = null;
-  private parts: Blob[] = [];
+  private engine: ClipEngine | null = null;
   private frameCount = 0;
   private frameTimer: ReturnType<typeof setInterval> | null = null;
-  private mime: MimeCandidate;
-  /** Live encoder bitrate. Starts at the measured-optimal web rate and
-   *  halves whenever a finished clip overruns MAX_CLIP_BYTES — see
+  private mime: MimeCandidate | null;
+  /** Live MediaRecorder-engine bitrate. Starts at the measured-optimal web
+   *  rate and halves whenever a finished clip overruns MAX_CLIP_BYTES — see
    *  `cut()`. Browsers whose rate control does honour real frame spacing
    *  would otherwise blow the cap on every single clip. */
   private bitrate = CLIP_WEB_VIDEO_BITS_PER_SECOND;
+  /** Live WebCodecs-engine quantizer (H.264 QP). Coarsens when a finished
+   *  clip overruns MAX_CLIP_BYTES — the constant-quality analogue of the
+   *  bitrate backoff above. */
+  private quantizer = CLIP_WEBCODECS_QP;
   /** Hard frame cap for one clip — see MAX_CLIP_FRAME_OVERRUN. Derived from
    *  the SERVER's cadence, not the default constant, so a server that
    *  dictates a different frameIntervalMs still gets a correct cap. */
@@ -135,9 +267,8 @@ export class ClipRecorder {
 
   static isSupported(): boolean {
     return (
-      typeof HTMLCanvasElement !== "undefined" &&
-      typeof HTMLCanvasElement.prototype.captureStream === "function" &&
-      pickMimeCandidate() !== null
+      WebCodecsClipEngine.isSupported() ||
+      (canvasCaptureSupported() && pickMimeCandidate() !== null)
     );
   }
 
@@ -147,7 +278,9 @@ export class ClipRecorder {
     opts?: ClipRecorderOptions,
   ) {
     const mime = pickMimeCandidate();
-    if (!mime) throw new Error("Clip recording not supported in this browser");
+    if (!mime && !WebCodecsClipEngine.isSupported()) {
+      throw new Error("Clip recording not supported in this browser");
+    }
     this.video = video;
     this.frameIntervalMs = frameIntervalMs;
     this.openingFrameIntervalMs = opts?.openingFrameIntervalMs ?? null;
@@ -164,7 +297,7 @@ export class ClipRecorder {
 
   /** Start recording a fresh clip. No-op if already recording. */
   start(): void {
-    if (this.recorder) return;
+    if (this.engine) return;
     if (this.video.videoWidth === 0 || this.video.videoHeight === 0) {
       throw new Error("Video not ready — cannot start clip recorder");
     }
@@ -176,53 +309,29 @@ export class ClipRecorder {
     );
     const canvas = document.createElement("canvas");
     // Encoder-friendly even dimensions; the size is fixed for the clip's
-    // life (MediaRecorder requires a constant stream resolution).
+    // life (both engines require a constant stream resolution).
     canvas.width = Math.max(2, Math.round((this.video.videoWidth * scale) / 2) * 2);
     canvas.height = Math.max(2, Math.round((this.video.videoHeight * scale) / 2) * 2);
     this.canvas = canvas;
-
-    // captureStream(0) = frames only on explicit requestFrame(), keeping
-    // encode work at exactly our cadence. Some engines put requestFrame on
-    // the track (spec), others on the stream (older Firefox), some lack it
-    // entirely — fall back to auto-capture on canvas change.
-    let stream: MediaStream;
-    try {
-      stream = canvas.captureStream(0);
-      if (!this.streamHasRequestFrame(stream)) {
-        stream.getTracks().forEach((t) => t.stop());
-        stream = canvas.captureStream();
-      }
-    } catch {
-      stream = canvas.captureStream();
-    }
-    this.stream = stream;
-
-    this.parts = [];
     this.frameCount = 0;
-    const recorder = new MediaRecorder(stream, {
-      mimeType: this.mime.mime,
-      videoBitsPerSecond: this.bitrate,
-    });
-    recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) this.parts.push(e.data);
-    };
-    this.recorder = recorder;
-    recorder.start();
+
+    if (!ClipRecorder.webCodecsDisabled && WebCodecsClipEngine.isSupported()) {
+      this.engine = new WebCodecsClipEngine(
+        canvas.width,
+        canvas.height,
+        this.frameIntervalMs,
+        this.quantizer,
+      );
+    } else if (this.mime && canvasCaptureSupported()) {
+      this.engine = new MediaRecorderClipEngine(canvas, this.mime, this.bitrate);
+    } else {
+      this.canvas = null;
+      throw new Error("No clip encoder available");
+    }
 
     this.drawFrame();
     const cadence = this.openingFrameIntervalMs ?? this.frameIntervalMs;
     this.frameTimer = setInterval(() => this.drawFrame(), cadence);
-  }
-
-  private streamHasRequestFrame(stream: MediaStream): boolean {
-    const track = stream.getVideoTracks()[0] as MediaStreamTrack & {
-      requestFrame?: () => void;
-    };
-    const s = stream as MediaStream & { requestFrame?: () => void };
-    return (
-      typeof track?.requestFrame === "function" ||
-      typeof s.requestFrame === "function"
-    );
   }
 
   private drawFrame(): void {
@@ -242,23 +351,18 @@ export class ClipRecorder {
       }
       return;
     }
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    // Only matters when the source is larger than the clip canvas, but a
-    // bilinear-ish downscale of 1080p+ UI text aliases badly. The desktop
-    // client area-averages for the same reason.
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(this.video, 0, 0, canvas.width, canvas.height);
-    const track = this.stream?.getVideoTracks()[0] as
-      | (MediaStreamTrack & { requestFrame?: () => void })
-      | undefined;
-    if (typeof track?.requestFrame === "function") {
-      track.requestFrame();
-    } else {
-      (
-        this.stream as (MediaStream & { requestFrame?: () => void }) | null
-      )?.requestFrame?.();
-    }
+    // Stepped high-quality downscale — the video is native resolution now
+    // (a Retina display hands us 4-5K), and a single bilinear drawImage of
+    // that aliases UI text badly. The desktop client area-averages for the
+    // same reason.
+    drawScaledHQ(this.video, this.video.videoWidth, this.video.videoHeight, canvas);
+    // Media time mirrors the desktop encoders: frame index × nominal
+    // cadence, independent of wall clock.
+    this.engine?.addFrame(
+      canvas,
+      this.frameCount * this.frameIntervalMs,
+      this.frameCount === 0,
+    );
     this.frameCount++;
   }
 
@@ -268,9 +372,9 @@ export class ClipRecorder {
    * callers should fall back to a single-JPEG capture for that tick.
    */
   async cut(): Promise<ClipCaptureResult | null> {
-    const recorder = this.recorder;
+    const engine = this.engine;
     const canvas = this.canvas;
-    if (!recorder || !canvas) return null;
+    if (!engine || !canvas) return null;
 
     // Final frame + timestamp: capturedAt is the moment the clip is cut,
     // which is what keeps the per-minute credit cadence monotonic.
@@ -283,22 +387,19 @@ export class ClipRecorder {
       this.frameTimer = null;
     }
 
-    const stopped = new Promise<void>((resolve) => {
-      recorder.onstop = () => resolve();
-      recorder.onerror = () => resolve();
-    });
-    try {
-      recorder.stop();
-    } catch {
-      // stop() throws if already inactive — treat as stopped
-    }
     // Never let a wedged encoder stall the capture loop.
-    await Promise.race([
-      stopped,
-      new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+    const TIMED_OUT = Symbol("finish timeout");
+    let out = await Promise.race([
+      engine.finish(),
+      new Promise<typeof TIMED_OUT>((resolve) =>
+        setTimeout(() => resolve(TIMED_OUT), 10_000),
+      ),
     ]);
+    if (out === TIMED_OUT) {
+      engine.cancel();
+      out = null;
+    }
 
-    const parts = this.parts;
     const width = canvas.width;
     const height = canvas.height;
     const previewBlob = await new Promise<Blob | null>((resolve) => {
@@ -306,42 +407,62 @@ export class ClipRecorder {
       setTimeout(() => resolve(null), 5_000);
     });
 
-    const blob =
-      parts.length > 0 && frameCount > 0
-        ? new Blob(parts, { type: this.mime.mime.split(";")[0] })
-        : null;
+    // A WebCodecs engine that ate frames and produced nothing is broken
+    // for this browser — downgrade the session to MediaRecorder rather
+    // than losing a capture a minute to the same failure.
+    if (!out && frameCount > 0 && engine.kind === "webcodecs") {
+      ClipRecorder.webCodecsDisabled = true;
+      console.warn(
+        "[lookout] WebCodecs clip engine produced no output — falling back " +
+          "to MediaRecorder for the rest of this session.",
+      );
+    }
+
+    const blob = out && frameCount > 0 && out.blob.size > 0 ? out.blob : null;
 
     // Oversize clips are rejected server-side (HeadObject vs
-    // MAX_CLIP_BYTES), which would cost the whole minute. We tune the
-    // bitrate for the rate-control behaviour browsers actually have, so
-    // this should never fire — but an engine that instead budgets over
-    // the clip's real 60s wall clock would overshoot every time. Halve
-    // and carry on rather than upload a clip we know will be refused;
-    // the floor is the coarsest setting worth uploading.
+    // MAX_CLIP_BYTES), which would cost the whole minute. Back the active
+    // engine's quality dial off rather than upload a clip we know will be
+    // refused; the floor/ceiling is the coarsest setting worth uploading.
     let oversize = false;
     if (blob && blob.size > MAX_CLIP_BYTES) {
       oversize = true;
       // ...but only when the clip was a NORMAL one. A truncated clip is
       // oversize because the network stalled and it covers several minutes,
       // not because the encoder is mis-tuned. The backoff is permanent
-      // (bitrate never ratchets back up), so blaming the encoder for a
-      // network event would leave the rest of the session soft — the exact
+      // (it never ratchets back), so blaming the encoder for a network
+      // event would leave the rest of the session soft — the exact
       // failure mode where a user on bad wifi ends up with a worse
       // timelapse than one on no wifi at all.
-      const reduced = truncated
-        ? this.bitrate
-        : Math.max(CLIP_WEB_MIN_BITS_PER_SECOND, Math.round(this.bitrate / 2));
-      if (reduced !== this.bitrate) {
-        console.warn(
-          `[lookout] clip was ${blob.size} bytes (cap ${MAX_CLIP_BYTES}) — ` +
-            `dropping encoder bitrate ${this.bitrate} -> ${reduced}`,
-        );
-        this.bitrate = reduced;
-      } else if (truncated) {
+      if (truncated) {
         console.warn(
           `[lookout] clip was ${blob.size} bytes (cap ${MAX_CLIP_BYTES}) after ` +
-            `running long on a slow upload — keeping bitrate at ${this.bitrate}`,
+            `running long on a slow upload — keeping encoder settings`,
         );
+      } else if (engine.kind === "webcodecs") {
+        const coarser = Math.min(
+          CLIP_WEBCODECS_QP_MAX,
+          this.quantizer + CLIP_WEBCODECS_QP_STEP,
+        );
+        if (coarser !== this.quantizer) {
+          console.warn(
+            `[lookout] clip was ${blob.size} bytes (cap ${MAX_CLIP_BYTES}) — ` +
+              `coarsening encoder QP ${this.quantizer} -> ${coarser}`,
+          );
+          this.quantizer = coarser;
+        }
+      } else {
+        const reduced = Math.max(
+          CLIP_WEB_MIN_BITS_PER_SECOND,
+          Math.round(this.bitrate / 2),
+        );
+        if (reduced !== this.bitrate) {
+          console.warn(
+            `[lookout] clip was ${blob.size} bytes (cap ${MAX_CLIP_BYTES}) — ` +
+              `dropping encoder bitrate ${this.bitrate} -> ${reduced}`,
+          );
+          this.bitrate = reduced;
+        }
       }
     }
 
@@ -360,11 +481,11 @@ export class ClipRecorder {
 
     // A null/empty/oversize clip falls back to a single JPEG for this
     // tick, so the capture cadence and credit streak never skip.
-    if (!blob || blob.size === 0 || oversize) return null;
+    if (!blob || !out || oversize) return null;
 
     return {
       blob,
-      format: this.mime.format,
+      format: out.format,
       width,
       height,
       frameCount,
@@ -376,13 +497,7 @@ export class ClipRecorder {
 
   /** Stop and discard the in-progress clip (pause/stop/unmount). */
   stop(): void {
-    try {
-      if (this.recorder && this.recorder.state !== "inactive") {
-        this.recorder.stop();
-      }
-    } catch {
-      // already inactive
-    }
+    this.engine?.cancel();
     this.teardown();
   }
 
@@ -391,11 +506,8 @@ export class ClipRecorder {
       clearInterval(this.frameTimer);
       this.frameTimer = null;
     }
-    this.recorder = null;
-    this.stream?.getTracks().forEach((t) => t.stop());
-    this.stream = null;
+    this.engine = null;
     this.canvas = null;
-    this.parts = [];
     this.frameCount = 0;
   }
 }

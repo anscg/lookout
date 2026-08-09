@@ -183,6 +183,25 @@ export const CLIP_VIDEO_BITS_PER_SECOND = nativeClipBitsPerSecond(
   CLIP_FRAME_INTERVAL_MS,
 );
 
+/** H.264 quantizer (QP, 0–51) for browser clips encoded through WebCodecs
+ *  in per-frame-quantizer mode — the browser path that actually matches the
+ *  desktop's quality, where the engine supports it (Chromium).
+ *
+ *  Constant-quality is the right dial for this workload: clips are a handful
+ *  of near-still 1080p screen frames, so "spend whatever these frames need"
+ *  beats any bitrate target. QP 24 lands dense-text 1080p keyframes in the
+ *  ~200–400 KB range — the same class as CLIP_FRAME_BYTE_BUDGET — and delta
+ *  frames on a static screen cost almost nothing.
+ *  Default: 24 */
+export const CLIP_WEBCODECS_QP = 24;
+
+/** How much the WebCodecs quantizer coarsens when a finished clip overruns
+ *  MAX_CLIP_BYTES (+6 QP roughly halves H.264 output), and the coarsest QP
+ *  worth uploading at all. Mirrors the MediaRecorder path's halve-with-floor
+ *  backoff. */
+export const CLIP_WEBCODECS_QP_STEP = 6;
+export const CLIP_WEBCODECS_QP_MAX = 44;
+
 /** Floor for the browser recorder's adaptive bitrate backoff. NOT derived
  *  from the native figure: the two are denominated in different things (see
  *  CLIP_WEB_VIDEO_BITS_PER_SECOND), this is just the coarsest setting worth

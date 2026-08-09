@@ -6,6 +6,7 @@ import {
   CANVAS_TO_BLOB_TIMEOUT_MS,
   VIDEO_READY_TIMEOUT_MS,
 } from "@lookout/shared";
+import { drawScaledHQ } from "@lookout/react";
 
 export interface CaptureResult {
   blob: Blob;
@@ -43,10 +44,12 @@ export function useScreenCapture() {
     // Try full constraints first; Safari <16 throws TypeError on frameRate/nested constraints
     let stream: MediaStream;
     try {
+      // No width/height constraint — take native pixels and downscale
+      // ourselves with a proper filter (see @lookout/react's hqScale);
+      // a constrained track is pre-scaled by the browser with an
+      // uncontrollable filter, which is where Retina text goes soft.
       stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          width: { ideal: MAX_WIDTH, max: MAX_WIDTH },
-          height: { ideal: MAX_HEIGHT, max: MAX_HEIGHT },
           frameRate: { ideal: 1, max: 5 },
         },
         audio: false,
@@ -107,12 +110,12 @@ export function useScreenCapture() {
     canvas.width = Math.round(video.videoWidth * scale);
     canvas.height = Math.round(video.videoHeight * scale);
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
+    if (!canvas.getContext("2d")) {
       return Promise.resolve(null);
     }
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // Stepped high-quality downscale from the native-resolution track.
+    drawScaledHQ(video, video.videoWidth, video.videoHeight, canvas);
 
     // Stamp client-clock time at the moment the frame was grabbed.
     const capturedAtMs = Date.now();
