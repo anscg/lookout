@@ -1124,21 +1124,31 @@ mod platform {
         appsrc: AppSrc,
         width: u32,
         height: u32,
+        frame_interval_ms: u64,
     }
 
     unsafe impl Send for Encoder {}
 
     impl Encoder {
-        /// `frame_interval_ms` is unused here: the pipeline declares
-        /// `framerate=0/1` (variable) and carries timing per-buffer, and the
-        /// bitrate the caller passes is already scaled for the cadence.
+        /// The cadence must be declared, not just carried per-buffer.
+        ///
+        /// `bitrate` is bits per second of MEDIA time, scaled by the caller
+        /// so that bitrate x interval lands CLIP_FRAME_BYTE_BUDGET in every
+        /// frame. An encoder can only honour that if it knows how long a
+        /// frame lasts: told `framerate=0/1`, x264enc assumes a normal video
+        /// cadence and divides the budget across ~30 frames a second, so a
+        /// clip at one frame per 4s got about 3 KB a frame instead of 400 KB
+        /// — which is why Linux clips came out blocky and smeared while the
+        /// same code looked right on macOS and Windows. Both of those pass
+        /// the real frame rate to their encoders; this now does too.
         pub fn new(
             path: &Path,
             width: u32,
             height: u32,
             bitrate: u32,
-            _frame_interval_ms: u64,
+            frame_interval_ms: u64,
         ) -> Result<Self, String> {
+            let interval_ms = frame_interval_ms.max(1);
             gst::init().map_err(|e| format!("gst init failed: {e}"))?;
 
             let encoder_name = ENCODER_CANDIDATES
@@ -1161,7 +1171,7 @@ mod platform {
 
             let desc = format!(
                 "appsrc name=src is-live=false format=time \
-                 caps=video/x-raw,format=BGRA,width={width},height={height},framerate=0/1 \
+                 caps=video/x-raw,format=BGRA,width={width},height={height},framerate=1000/{interval_ms} \
                  ! videoconvert ! {encoder_name} {encoder_props} \
                  ! h264parse ! mp4mux ! filesink location=\"{}\"",
                 path.to_string_lossy()
@@ -1186,6 +1196,7 @@ mod platform {
                 appsrc,
                 width,
                 height,
+                frame_interval_ms: interval_ms,
             })
         }
 
@@ -1202,6 +1213,10 @@ mod platform {
             {
                 let buffer_mut = buffer.get_mut().ok_or("buffer not writable")?;
                 buffer_mut.set_pts(gst::ClockTime::from_mseconds(pts_ms));
+                // Without a duration mp4mux has to infer each sample's
+                // length from the next frame's timestamp, which leaves the
+                // final frame zero-length.
+                buffer_mut.set_duration(gst::ClockTime::from_mseconds(self.frame_interval_ms));
                 let mut map = buffer_mut
                     .map_writable()
                     .map_err(|e| format!("gst buffer map failed: {e}"))?;
