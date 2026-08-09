@@ -184,6 +184,33 @@ fn handle_deep_link_urls(app: &AppHandle, urls: Vec<String>) {
     }
 }
 
+/// Earlier releases called `register_all()` on every Linux launch, which
+/// wrote a `lookout-desktop-handler.desktop` into the user's applications
+/// dir. On deb/rpm installs that duplicated the packaged desktop file, so
+/// the "Open with" chooser offered two Lookouts. Delete the leftover so
+/// only the packaged entry claims lookout://.
+#[cfg(target_os = "linux")]
+fn remove_stale_deep_link_handler(app: &AppHandle) {
+    let Ok(exe) = tauri::utils::platform::current_exe() else {
+        return;
+    };
+    let Some(exe_name) = exe.file_name() else {
+        return;
+    };
+    let Ok(data_dir) = app.path().data_dir() else {
+        return;
+    };
+    let applications_dir = data_dir.join("applications");
+    let handler_file =
+        applications_dir.join(format!("{}-handler.desktop", exe_name.to_string_lossy()));
+    if handler_file.exists() && std::fs::remove_file(&handler_file).is_ok() {
+        eprintln!("[deep-link] removed stale handler {}", handler_file.display());
+        let _ = std::process::Command::new("update-desktop-database")
+            .arg(&applications_dir)
+            .status();
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
     pub token: String,
@@ -3651,13 +3678,30 @@ pub fn run() {
 
             }
 
-            // On Windows/Linux, ensure the lookout:// protocol handler is
+            // On Windows, ensure the lookout:// protocol handler is
             // registered even if the installer didn't do it (dev builds,
-            // portable installs, AppImages).
-            #[cfg(desktop)]
+            // portable installs). Registry writes are idempotent.
+            #[cfg(windows)]
             {
                 let _ = app.deep_link().register_all();
                 eprintln!("[deep-link] registered protocol handler");
+            }
+
+            // On Linux, deb/rpm installs already ship a desktop file that
+            // claims lookout://. Registering again at runtime writes a
+            // second lookout-desktop-handler.desktop, and the system's
+            // "Open with" chooser then lists two Lookouts — one of which
+            // launches the app without passing the URL along. Only
+            // AppImages and dev builds, which install no desktop file,
+            // need runtime registration.
+            #[cfg(target_os = "linux")]
+            {
+                if app.env().appimage.is_some() || cfg!(debug_assertions) {
+                    let _ = app.deep_link().register_all();
+                    eprintln!("[deep-link] registered protocol handler");
+                } else {
+                    remove_stale_deep_link_handler(app.handle());
+                }
             }
 
             // Cold start: check if the app was launched via a deep link
