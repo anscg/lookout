@@ -784,8 +784,13 @@ function MainWindowApp() {
     onBack: pageNav?.nav.onBack ?? routeHeader.onBack,
   };
 
-  const headerActions =
-    route.page === "gallery" && screenPermGranted && cameraPermGranted && !editorWindowToken ? (
+  // The gallery is the app's home, and the only place chrome that talks
+  // about the app as a whole — its actions, its update state — belongs. A
+  // permission gate or an open editor isn't it, even at the gallery route.
+  const onMainPage =
+    route.page === "gallery" && screenPermGranted && cameraPermGranted && !editorWindowToken;
+
+  const galleryActions = onMainPage ? (
       <>
         <button
           type="button"
@@ -810,6 +815,16 @@ function MainWindowApp() {
         </button>
       </>
     ) : undefined;
+
+  // The pill belongs in the titlebar — that's what it was built for, and on
+  // Linux the header bar is the titlebar. It rides ahead of the page actions
+  // so it doesn't push the close button around as it changes width.
+  const headerActions = (
+    <>
+      {onMainPage && <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} />}
+      {galleryActions}
+    </>
+  );
 
   const prevRouteRef = React.useRef(route);
   const routeDirection = React.useMemo(() => {
@@ -857,12 +872,14 @@ function MainWindowApp() {
           className="titlebar"
           style={{ height: 32, flexShrink: 0, width: "100%", zIndex: 9999, background: "transparent", cursor: "default", display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 6, boxSizing: "border-box" }}
         >
-          <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} />
+          {onMainPage && <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} />}
         </div>
-      ) : (
-        /* No overlay titlebar on Windows/Linux — float the pill bottom-left. */
+      ) : isLinux ? null : (
+        /* Windows has no overlay titlebar to put it in — float it instead.
+           Linux used to land here too, but its pill now lives in the header
+           bar above, which is a real titlebar. */
         <div style={{ position: "absolute", bottom: 8, left: 8, zIndex: 9999 }}>
-          <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} origin="bottom" />
+          {onMainPage && <UpdatePill phase={appUpdate.phase} onRestart={appUpdate.restart} origin="bottom" />}
         </div>
       )}
       {/* Windows/Linux + menu. Rendered here, outside the route transition's
