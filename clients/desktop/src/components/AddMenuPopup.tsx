@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { colors, fontWeight } from "@lookout/react";
+import { isLinux } from "../platform.js";
 
 /**
  * DOM replica of the macOS native add menu (AddMenu.swift) for Windows/Linux,
@@ -8,6 +9,11 @@ import { colors, fontWeight } from "@lookout/react";
  * panel anchored under the + button, fling-in spring scaled from the top-right,
  * hover/arrow-key selection, Escape or click-away to dismiss. The visual
  * constants mirror the Swift file — update both together.
+ *
+ * Linux dresses differently. GTK popovers are a solid panel with a quiet
+ * shadow and 6px item rows — no blur, no saturation boost, and none of the
+ * spring overshoot, which is a macOS mannerism. Behaviour is identical; only
+ * the material changes.
  */
 
 export interface AddMenuPopupItem {
@@ -56,8 +62,8 @@ function Row({ item, highlighted, onHover, onLeave, onActivate }: {
         display: "flex",
         alignItems: "center",
         gap: 9,
-        padding: "7px 9px",
-        borderRadius: 9,
+        padding: isLinux ? "8px 10px" : "7px 9px",
+        borderRadius: isLinux ? 6 : 9,
         background: highlighted
           ? `color-mix(in srgb, ${colors.text.primary} 9%, transparent)`
           : "transparent",
@@ -80,7 +86,7 @@ function Row({ item, highlighted, onHover, onLeave, onActivate }: {
           item.fallbackIcon
         )}
       </span>
-      <span style={{ fontSize: 13.5, fontWeight: fontWeight.medium, color: colors.text.primary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+      <span style={{ fontSize: 13.5, fontWeight: isLinux ? fontWeight.normal : fontWeight.medium, color: colors.text.primary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
         {item.label}
       </span>
     </div>
@@ -171,14 +177,19 @@ export function AddMenuPopup({ items, anchor, onSelect }: AddMenuPopupProps) {
     <motion.div
       ref={ref}
       role="menu"
-      initial={{ opacity: 0, scale: 0.92 }}
+      initial={{ opacity: 0, scale: isLinux ? 0.96 : 0.92 }}
       animate={{ opacity: 1, scale: 1 }}
       // Exit is a plain quick fade — no scale change.
       exit={{ opacity: 0, transition: { duration: 0.1, ease: "easeOut" } }}
-      transition={{
-        scale: { type: "spring", stiffness: 1800, damping: 56 },
-        opacity: { duration: 0.1 },
-      }}
+      transition={
+        isLinux
+          // GTK popovers settle rather than overshoot.
+          ? { scale: { duration: 0.14, ease: [0.2, 0, 0, 1] }, opacity: { duration: 0.1 } }
+          : {
+              scale: { type: "spring", stiffness: 1800, damping: 56 },
+              opacity: { duration: 0.1 },
+            }
+      }
       style={{
         position: "fixed",
         right,
@@ -190,14 +201,26 @@ export function AddMenuPopup({ items, anchor, onSelect }: AddMenuPopupProps) {
         maxWidth: Math.min(320, window.innerWidth - right - EDGE),
         padding: 6,
         boxSizing: "border-box",
-        borderRadius: 14,
-        border: `1px solid color-mix(in srgb, ${colors.text.primary} 12%, transparent)`,
-        // Opaque enough that content behind never ghosts through — the
-        // backdrop blur only reads as a soft material at the edges.
-        background: `color-mix(in srgb, ${colors.bg.panel} 86%, transparent)`,
-        backdropFilter: "blur(32px) saturate(1.7)",
-        WebkitBackdropFilter: "blur(32px) saturate(1.7)",
-        boxShadow: "0 6px 32px rgba(0, 0, 0, 0.28)",
+        ...(isLinux
+          ? {
+              // Adwaita's popover: solid, 12px, a quiet two-stop shadow.
+              // Blur and a saturation boost are a macOS material and read as
+              // borrowed here.
+              borderRadius: 12,
+              border: `1px solid ${colors.border.default}`,
+              background: colors.bg.panel,
+              boxShadow: "0 1px 4px rgba(0, 0, 0, 0.15), 0 6px 20px rgba(0, 0, 0, 0.25)",
+            }
+          : {
+              borderRadius: 14,
+              border: `1px solid color-mix(in srgb, ${colors.text.primary} 12%, transparent)`,
+              // Opaque enough that content behind never ghosts through — the
+              // backdrop blur only reads as a soft material at the edges.
+              background: `color-mix(in srgb, ${colors.bg.panel} 86%, transparent)`,
+              backdropFilter: "blur(32px) saturate(1.7)",
+              WebkitBackdropFilter: "blur(32px) saturate(1.7)",
+              boxShadow: "0 6px 32px rgba(0, 0, 0, 0.28)",
+            }),
         transformOrigin: flipped ? "bottom right" : "top right",
         display: "flex",
         flexDirection: "column",
