@@ -82,6 +82,26 @@ const ADWAITA_CSS = `
     --color-headerbar-control: rgba(0, 0, 0, 0.08);
     --color-headerbar-control-hover: rgba(0, 0, 0, 0.16);
   }
+  /* GTK never swaps in a hand cursor over a button — the pointer is a web
+     convention, and having it follow every control around is one of the
+     small constant reminders that this is a web view.
+
+     !important because the app sets cursor:pointer inline in a couple of
+     dozen components, and forking each of them per platform would be a far
+     worse trade than one scoped override. The selector deliberately does
+     NOT match everything: the resize handles and the editor's scrub cursors
+     carry real information, and they set their own values. */
+  html.os-linux button,
+  html.os-linux a,
+  html.os-linux [role="button"],
+  html.os-linux [style*="cursor: pointer"] {
+    cursor: default !important;
+  }
+  html.os-linux input,
+  html.os-linux textarea,
+  html.os-linux [contenteditable="true"] {
+    cursor: text !important;
+  }
   /* Undecorated windows draw their own corners. They're clipped on #root
      rather than the body because the body has to stay transparent for the
      rounding to show anything but a square. Opt in per window, since a
