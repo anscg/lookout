@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import { invoke } from "../logger.js";
+import { invoke, getReport } from "../logger.js";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import {
   Button,
@@ -11,6 +11,8 @@ import {
   fontSize,
   fontWeight,
 } from "@lookout/react";
+import { CaptureErrorDialog } from "./CaptureErrorDialog.js";
+import { isCancelledCaptureError } from "../captureDiagnosis.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
 import { enumerateCameras } from "../hooks/useCameraCapture.js";
@@ -135,6 +137,9 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
   const [sources, setSources] = useState<CaptureSourceList | null>(null);
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
+  /** Capture failure currently being explained in the modal. Separate from
+   *  `error`, which is the card the picker falls back to once it's closed. */
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>("screens");
   const [selected, setSelected] = useState<CaptureSource[]>([]);
   const [hoveredWindow, setHoveredWindow] = useState<CaptureSource | null>(null);
@@ -295,6 +300,7 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[sources] failed to list sources: ${msg}`);
       setError(msg);
+      setDialogError(msg);
     }
   }, [selected.length, handleScroll, tab]);
 
@@ -327,6 +333,18 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
     }
   };
 
+  /** Portal failures are their own thing: they aren't a failure to detect
+   *  displays, and dismissing the portal's picker isn't a failure at all. */
+  const handleCastError = (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (isCancelledCaptureError(msg)) {
+      console.log(`[sources] screencast dismissed by user: ${msg}`);
+      return;
+    }
+    console.error(`[sources] screencast failed: ${msg}`);
+    setDialogError(msg);
+  };
+
   const handleAddCast = async () => {
     try {
       const streams = await invoke<{ node_id: number }[]>("request_screencast");
@@ -334,8 +352,7 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
         setSelected(streams.map(s => ({ type: "pipewire", id: s.node_id })));
       }
     } catch (e) {
-      console.error("Failed to request screencast", e);
-      setError(e instanceof Error ? e.message : String(e));
+      handleCastError(e);
     }
   };
 
@@ -351,10 +368,19 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
         });
       }
     } catch (e) {
-      console.error("Failed to add screencast", e);
-      setError(e instanceof Error ? e.message : String(e));
+      handleCastError(e);
     }
   };
+
+  // Portals to the body, so it rides along with whichever state renders.
+  const errorDialog = dialogError ? (
+    <CaptureErrorDialog
+      error={dialogError}
+      fallbackTitle={error ? "Couldn't detect your displays" : "Couldn't start the capture"}
+      onRetry={() => { setDialogError(null); refresh(); }}
+      onDismiss={() => setDialogError(null)}
+    />
+  ) : null;
 
   if (error) {
     return (
@@ -367,7 +393,14 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
           title="Failed to detect displays"
           error={error}
           action={{ label: "Retry", onClick: refresh }}
+          onCopy={() => navigator.clipboard.writeText(getReport(error))}
         />
+        <div style={{ marginTop: spacing.md }}>
+          <Button variant="ghost" size="sm" onClick={() => setDialogError(error)}>
+            Troubleshoot
+          </Button>
+        </div>
+        {errorDialog}
       </div>
     );
   }
@@ -382,6 +415,7 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
         <p style={{ fontSize: fontSize.lg, color: colors.text.secondary, textAlign: "center" }}>
           Detecting displays...
         </p>
+        {errorDialog}
       </div>
     );
   }
@@ -850,6 +884,8 @@ export function SourcePicker({ onSelect, submitLabel = "Start Capture" }: Source
           </Button>
         )}
       </div>
+
+      {errorDialog}
     </div>
   );
 }

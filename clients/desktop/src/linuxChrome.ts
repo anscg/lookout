@@ -43,8 +43,14 @@ export const WINDOW_RADIUS = 12;
  * The native side grows each window by twice this (lib.rs for the main
  * window, EditorWindow.tsx for the editor), so the content keeps its
  * intended size.
+ *
+ * IT MUST BE AT LEAST AS LARGE AS THE SHADOW REACHES. A box-shadow extends
+ * `offset + blur` past its box, and anything past the frame is off the
+ * window and clipped away — a shadow that looks generous in a browser gets
+ * a hard straight edge on the desktop. The shadows below are sized against
+ * this number; raising one means raising the other.
  */
-export const WINDOW_MARGIN = 20;
+export const WINDOW_MARGIN = 40;
 
 /**
  * How much of that frame still accepts pointer input, measured inward from
@@ -160,10 +166,11 @@ const ADWAITA_CSS = `
        mostly a large, very soft falloff — reading the alpha off a dark
        screenshot tempts you into something far heavier than GNOME's, which
        then looks like a drop shadow on a web card. */
+    /* Reach is 8 + 28 = 36, inside the 40px frame. */
     box-shadow:
       0 0 0 1px var(--color-window-border),
-      0 4px 12px rgba(0, 0, 0, 0.1),
-      0 14px 40px rgba(0, 0, 0, 0.14);
+      0 2px 8px rgba(0, 0, 0, 0.1),
+      0 8px 28px rgba(0, 0, 0, 0.14);
     transition: box-shadow 160ms ease-out;
   }
   /* Unfocused windows cast less. GTK pulls its shadow back in :backdrop so
@@ -171,8 +178,8 @@ const ADWAITA_CSS = `
   html.os-linux.lookout-csd.lookout-backdrop #root {
     box-shadow:
       0 0 0 1px var(--color-window-border),
-      0 2px 8px rgba(0, 0, 0, 0.06),
-      0 8px 24px rgba(0, 0, 0, 0.09);
+      0 1px 4px rgba(0, 0, 0, 0.06),
+      0 4px 16px rgba(0, 0, 0, 0.09);
   }
   /* Snapped or maximized: the frame collapses so the content fills the
      screen edge to edge, and the outline and shadow have nothing to
@@ -247,19 +254,28 @@ if (isLinux && typeof document !== "undefined" && !document.querySelector("style
 }
 
 /**
- * Ask the native side to pass pointer input through the outer frame.
+ * Reconcile the window's frame with how the compositor is treating it.
  *
- * `inset` is how far in from the window's real edge input starts being
- * accepted — 0 while snapped, when there is no frame to pass through.
+ * Applies the input shape and answers whether the frame is collapsed —
+ * true when the window manager is sizing this window (tiled, maximized,
+ * fullscreen), which is read from the compositor rather than inferred.
+ *
+ * That distinction is the whole point under a tiling WM: every window there
+ * is WM-sized, and a frame kept in that state is not a shadow but a band of
+ * desktop wedged between neighbours.
+ *
+ * Returns null if the native side couldn't answer, so callers can fall back
+ * rather than treat "unknown" as "floating".
  */
-export async function setShadowPassthrough(inset: number): Promise<void> {
-  if (!isLinux) return;
+export async function syncWindowFrame(inset: number): Promise<boolean | null> {
+  if (!isLinux) return null;
   try {
-    await invoke("set_window_shadow_inset", { inset });
+    return await invoke<boolean>("sync_window_frame", { inset });
   } catch (e) {
-    // Worth knowing about, not worth breaking over: the window simply keeps
+    // Worth knowing about, not worth breaking over: the window keeps
     // catching clicks on its own shadow.
-    console.warn("[csd] could not set the window input shape:", e);
+    console.warn("[csd] could not sync the window frame:", e);
+    return null;
   }
 }
 
@@ -334,10 +350,10 @@ export async function applyLinuxChrome(
   // that actually had their decorations taken away may claim it.
   if (undecorated) {
     document.documentElement.classList.add("lookout-csd");
-    // Stop the shadow from catching clicks. Windows that can snap re-apply
-    // this as their frame collapses (useSquareCornersWhenSnapped); a
-    // fixed-size window is done after this one call.
-    void setShadowPassthrough(SHADOW_PASSTHROUGH);
+    // Stop the shadow catching clicks, and collapse the frame straight away
+    // if we opened into a tile. Re-checked on every resize by
+    // useWindowFrameState.
+    void syncWindowFrame(SHADOW_PASSTHROUGH);
   }
 
   let appearance = DEFAULT_APPEARANCE;

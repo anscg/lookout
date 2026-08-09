@@ -45,6 +45,7 @@ import { HeaderBar } from "./components/HeaderBar.js";
 import { applyLinuxChrome, useBackdropState, DEFAULT_APPEARANCE, type DesktopAppearance } from "./linuxChrome.js";
 import { isLinux } from "./platform.js";
 import { HeaderNavProvider, type HeaderNav } from "./headerNav.js";
+import { useWindowFrameState } from "./components/WindowResizeHandles.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -564,6 +565,9 @@ function MainWindowApp() {
   // Resolves to the defaults untouched on every other platform.
   const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
   useBackdropState();
+  // Fixed size hints don't stop a tiling WM sizing this window, so its frame
+  // has to collapse under one just as the editor's does.
+  useWindowFrameState();
   useEffect(() => {
     // The main window is undecorated on Linux (lib.rs), so it owns its
     // corners and its header bar.
@@ -671,6 +675,10 @@ function MainWindowApp() {
             // bar instead, so stating them again here would be a second
             // title row directly under the first.
             showHeader={!isLinux}
+            // The list ends against the window's own rounded edge and
+            // border here, and a fade into that reads as the content
+            // dissolving rather than running under chrome.
+            showBottomFade={!isLinux}
           />
         );
       case "settings":

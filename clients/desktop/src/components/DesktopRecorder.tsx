@@ -19,6 +19,7 @@ import {
 } from "@lookout/react";
 import { getReport } from "../logger.js";
 import { NamingModal } from "./NamingModal.js";
+import { CaptureErrorDialog } from "./CaptureErrorDialog.js";
 import { openEditorWindow } from "./EditorWindow.js";
 import { useNativeCapture } from "../hooks/useNativeCapture.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
@@ -146,6 +147,10 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
   // while the app is visible (ignore sleep/background since that's expected).
   const STALE_CAPTURE_MS = 3 * 60_000;
   const [captureStale, setCaptureStale] = useState(false);
+  /** Capture error the user asked to see explained. The banner stays put —
+   *  a recording in progress shouldn't be buried under a modal unless the
+   *  user opens one. */
+  const [captureErrorDetail, setCaptureErrorDetail] = useState<string | null>(null);
   useEffect(() => {
     if (!capture.isCapturing || !capture.lastCaptureAt) {
       setCaptureStale(false);
@@ -651,7 +656,16 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
           variant="banner"
           error={capture.error}
           reassurance="Your earlier progress is saved. Restart the app if this keeps happening."
+          action={{ label: "Details", onClick: () => setCaptureErrorDetail(capture.error) }}
           onCopy={() => navigator.clipboard.writeText(getReport(capture.error ?? undefined))}
+        />
+      )}
+
+      {captureErrorDetail && (
+        <CaptureErrorDialog
+          error={captureErrorDetail}
+          fallbackTitle="The recording hit a capture error"
+          onDismiss={() => setCaptureErrorDetail(null)}
         />
       )}
 
