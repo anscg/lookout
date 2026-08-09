@@ -299,6 +299,200 @@ mod tests {
         );
     }
 
+    /// Resident-set size of this process, in KB, via `ps`. Crude on purpose —
+    /// good enough to tell a leak from steady state, and needs no dependency.
+    #[cfg(test)]
+    fn rss_kb() -> u64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p"])
+            .arg(std::process::id().to_string())
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    }
+
+    /// Leak check for the encode cycle: many recorders, many frames each, all
+    /// finished properly. The capture loop runs one of these per minute for as
+    /// long as a session lasts (up to 12 hours = 720 cycles), so a per-cycle
+    /// leak in the CVPixelBuffer / AVAssetWriter handling would accumulate into
+    /// something a user notices.
+    ///
+    /// Ignored by default: it's a few seconds of real encoding and it shells
+    /// out to `ps`. Run with `cargo test --release -- --ignored leak`.
+    #[test]
+    #[ignore = "stress test — run explicitly"]
+    fn encode_cycle_does_not_leak() {
+        let frame = |i: u32| {
+            let mut img = image::RgbaImage::from_pixel(1280, 720, image::Rgba([30, 30, 40, 255]));
+            for x in 0..120u32 {
+                for y in 0..120u32 {
+                    img.put_pixel((x + i * 37) % 1280, (y + i * 11) % 720,
+                                  image::Rgba([200, 80, 40, 255]));
+                }
+            }
+            DynamicImage::ImageRgba8(img)
+        };
+
+        // Warm up so one-time allocations (framework init, codec tables) don't
+        // read as growth.
+        for _ in 0..3 {
+            let mut r = ClipRecorder::new(1280, 720, 10_000).expect("init");
+            for i in 0..7 { r.push_frame(&frame(i)).expect("push"); }
+            r.finish().expect("finish");
+        }
+
+        let before = rss_kb();
+        let cycles: u32 = std::env::var("LEAK_CYCLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40);
+        for c in 0..cycles {
+            let mut r = ClipRecorder::new(1280, 720, 10_000).expect("init");
+            for i in 0..7 { r.push_frame(&frame(c * 7 + i)).expect("push"); }
+            let clip = r.finish().expect("finish");
+            assert!(!clip.mp4.is_empty());
+        }
+        let after = rss_kb();
+
+        let growth = after.saturating_sub(before);
+        eprintln!(
+            "RSS {before} -> {after} KB over {cycles} encode cycles ({} KB/cycle)",
+            growth / u64::from(cycles)
+        );
+        // A genuine per-cycle leak of a 1280x720 BGRA buffer would be ~3.6MB
+        // each, i.e. ~144MB over this run. Allow generous headroom for
+        // allocator behaviour and VideoToolbox's own caches while still
+        // catching anything of that order.
+        // Scale the budget with the run so a deeper LEAK_CYCLES run stays a
+        // real assertion rather than a formality.
+        let budget = 20_000 + 500 * u64::from(cycles);
+        assert!(
+            growth < budget,
+            "RSS grew {growth} KB over {cycles} cycles (budget {budget}) — suspected leak"
+        );
+    }
+
+    /// Discarding a recorder mid-clip must release just as cleanly as
+    /// finishing one. This is the pause/stop path, and on Windows it is also
+    /// the path that has to balance MFStartup.
+    #[test]
+    #[ignore = "stress test — run explicitly"]
+    fn discard_path_does_not_leak() {
+        let img = || {
+            DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                1280, 720, image::Rgba([10, 20, 30, 255]),
+            ))
+        };
+        for _ in 0..3 {
+            let mut r = ClipRecorder::new(1280, 720, 10_000).expect("init");
+            r.push_frame(&img()).expect("push");
+            r.discard();
+        }
+        let before = rss_kb();
+        let cycles: u32 = std::env::var("LEAK_CYCLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40);
+        for _ in 0..cycles {
+            let mut r = ClipRecorder::new(1280, 720, 10_000).expect("init");
+            for _ in 0..4 { r.push_frame(&img()).expect("push"); }
+            r.discard();
+        }
+        let growth = rss_kb().saturating_sub(before);
+        eprintln!("RSS growth over {cycles} discard cycles: {growth} KB");
+        let budget = 20_000 + 500 * u64::from(cycles);
+        assert!(
+            growth < budget,
+            "RSS grew {growth} KB over {cycles} cycles (budget {budget}) — suspected leak on discard"
+        );
+    }
+
+    /// Encode cost at real capture resolution. The capture loop does this on a
+    /// tokio worker while the user works, so the number that matters is CPU per
+    /// captured frame — at 6 frames/min a millisecond here is nothing, but a
+    /// regression into hundreds would be felt on an old laptop.
+    ///
+    /// Run with `cargo test --release -- --ignored perf --nocapture`.
+    #[test]
+    #[ignore = "benchmark — run explicitly"]
+    fn encode_cost_at_1080p() {
+        let frame = |i: u32| {
+            // Dense detail so the encoder can't cheat: this is the worst case,
+            // a screen full of text and edges.
+            let mut img = image::RgbaImage::new(1920, 1080);
+            for (x, y, px) in img.enumerate_pixels_mut() {
+                let v = ((x * 7 + y * 13 + i * 29) % 256) as u8;
+                *px = image::Rgba([v, v.wrapping_mul(3), v.wrapping_add(90), 255]);
+            }
+            DynamicImage::ImageRgba8(img)
+        };
+        let frames: Vec<_> = (0..7).map(frame).collect();
+
+        // Warm up the codec.
+        {
+            let mut r = ClipRecorder::new(1920, 1080, 10_000).expect("init");
+            for f in &frames { r.push_frame(f).expect("push"); }
+            r.finish().expect("finish");
+        }
+
+        const CLIPS: u32 = 10;
+        let t0 = std::time::Instant::now();
+        let mut bytes = 0usize;
+        for _ in 0..CLIPS {
+            let mut r = ClipRecorder::new(1920, 1080, 10_000).expect("init");
+            for f in &frames { r.push_frame(f).expect("push"); }
+            bytes += r.finish().expect("finish").mp4.len();
+        }
+        let per_clip = t0.elapsed().as_secs_f64() * 1000.0 / f64::from(CLIPS);
+        let per_frame = per_clip / frames.len() as f64;
+        eprintln!(
+            "1080p worst-case: {per_clip:.1} ms/clip, {per_frame:.1} ms/frame, \
+{} KB/clip avg",
+            bytes / CLIPS as usize / 1024
+        );
+
+        // One clip a minute: even 2s/clip would be 3% of a core. This ceiling
+        // is loose on purpose — it exists to catch an order-of-magnitude
+        // regression, not to police jitter on a shared CI box.
+        assert!(per_clip < 2_000.0, "encode cost regressed: {per_clip:.0} ms/clip");
+    }
+
+    /// Temp files must not accumulate. Each clip writes a container to the OS
+    /// temp dir and is supposed to remove it on both finish and discard; a
+    /// session leaking one per minute would fill a small disk.
+    #[test]
+    fn clip_temp_files_are_always_removed() {
+        let count = || {
+            std::fs::read_dir(std::env::temp_dir())
+                .map(|d| {
+                    d.filter_map(Result::ok)
+                        .filter(|e| {
+                            e.file_name().to_string_lossy().starts_with("lookout-clip-")
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let before = count();
+
+        let img = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            320, 240, image::Rgba([1, 2, 3, 255]),
+        ));
+        // finish path
+        let mut r = ClipRecorder::new(320, 240, 10_000).expect("init");
+        r.push_frame(&img).expect("push");
+        r.finish().expect("finish");
+        // discard path
+        let mut r = ClipRecorder::new(320, 240, 10_000).expect("init");
+        r.push_frame(&img).expect("push");
+        r.discard();
+        // failure path: finishing with no frames errors, and must still clean up
+        let r = ClipRecorder::new(320, 240, 10_000).expect("init");
+        assert!(r.finish().is_err());
+
+        assert_eq!(count(), before, "clip temp files were left behind");
+    }
+
     /// A recorder with zero frames must fail, not produce an empty clip.
     #[test]
     fn empty_clip_errors() {
@@ -332,7 +526,7 @@ mod platform {
     use std::ptr::NonNull;
 
     use block2::RcBlock;
-    use objc2::rc::Retained;
+    use objc2::rc::{autoreleasepool, Retained};
     use objc2::runtime::{AnyObject, ProtocolObject};
     use objc2_av_foundation::{
         AVAssetWriter, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor,
@@ -373,7 +567,13 @@ mod platform {
             bitrate: u32,
             frame_interval_ms: u64,
         ) -> Result<Self, String> {
-            unsafe {
+            // Every Cocoa object built below is autoreleased, and the capture
+            // loop calls this from a tokio worker thread — which, unlike the
+            // main run loop, never drains a pool. Without an explicit one the
+            // settings dictionaries and the writer itself accumulate for the
+            // life of the process: measured ~4.9 MB per clip, i.e. GBs over a
+            // long session.
+            autoreleasepool(|_| unsafe {
                 let url = NSURL::fileURLWithPath(&NSString::from_str(
                     path.to_str().ok_or("non-utf8 temp path")?,
                 ));
@@ -474,7 +674,7 @@ mod platform {
                     adaptor,
                     started: false,
                 })
-            }
+            })
         }
 
         pub fn append_bgra_frame(
@@ -484,7 +684,10 @@ mod platform {
             height: u32,
             pts_ms: u64,
         ) -> Result<(), String> {
-            unsafe {
+            // Per-frame pool: this is the hottest of the three entry points,
+            // and CVPixelBufferCreate's buffer is only one of several objects
+            // the frameworks autorelease on the way through.
+            autoreleasepool(|_| unsafe {
                 if !self.started {
                     if !self.writer.startWriting() {
                         return Err(format!(
@@ -548,11 +751,11 @@ mod platform {
                     ));
                 }
                 Ok(())
-            }
+            })
         }
 
         pub fn finish(self, duration_ms: u64) -> Result<(), String> {
-            unsafe {
+            autoreleasepool(|_| unsafe {
                 if !self.started {
                     // Nothing was written; cancel to avoid a zero-byte file
                     // error from finishWriting.
@@ -578,7 +781,7 @@ mod platform {
                     ));
                 }
                 Ok(())
-            }
+            })
         }
     }
 }
