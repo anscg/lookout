@@ -127,6 +127,12 @@ export interface SessionDetailProps {
   token: string;
   apiBaseUrl: string;
   onBack?: () => void;
+  /**
+   * Draw the in-content back button. Hosts with somewhere better to put it
+   * — the Linux desktop build lifts it into the window's header bar — pass
+   * false and drive `onBack` from there.
+   */
+  showBack?: boolean;
   onArchive?: () => void;
   /** Fired once when the session is observed transitioning to "complete"
    *  while this view is polling (i.e. the timelapse just finished compiling).
@@ -143,6 +149,7 @@ export function SessionDetail({
   token,
   apiBaseUrl,
   onBack,
+  showBack = true,
   onArchive,
   onComplete,
   onEdit,
@@ -262,7 +269,7 @@ export function SessionDetail({
     <div style={{ padding: spacing.lg }}>
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.lg }}>
-        {onBack && (
+        {onBack && showBack && (
           <Button variant="secondary" size="sm" onClick={onBack} style={cardButtonStyle}>
             &larr; Back
           </Button>

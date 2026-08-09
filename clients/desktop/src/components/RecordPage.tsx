@@ -10,6 +10,7 @@ import {
   fontSize,
   fontWeight,
 } from "@lookout/react";
+import { isLinux } from "../platform.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { SourcePicker } from "./SourcePicker.js";
 import { DesktopRecorder } from "./DesktopRecorder.js";
@@ -226,6 +227,7 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
             style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", height: "100%" }}
           >
             <div style={{ maxWidth: 480, margin: "0 auto", padding: spacing.lg, paddingBottom: 0, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, width: "100%", boxSizing: "border-box", position: "relative" }}>
+              {!isLinux && (
               <Button variant="secondary" size="sm" onClick={onBack} style={{...cardButtonStyle, zIndex: 1}}>
                 {isMacOS ? (
                   <span>&larr; Gallery</span>
@@ -238,6 +240,7 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
                   </span>
                 )}
               </Button>
+              )}
               <h2 style={{ position: "absolute", left: sessionStatus !== "pending" ? 100 : 0, right: sessionStatus !== "pending" ? 100 : 0, textAlign: "center", fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text.primary, margin: 0, pointerEvents: "none" }}>
                 {sessionStatus !== "pending" ? "Select source" : "What should Lookout capture?"}
               </h2>

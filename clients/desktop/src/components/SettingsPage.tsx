@@ -18,6 +18,8 @@ import {
 } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { cardButtonStyle } from "./PageLayout.js";
+import { isLinux } from "../platform.js";
+import { usePublishHeaderNav } from "../headerNav.js";
 import { useBlacklistedApps } from "../hooks/useBlacklistedApps.js";
 import {
   DEFAULT_API_BASE,
@@ -91,6 +93,12 @@ function PageChrome({
   onBack: () => void;
   children: ReactNode;
 }) {
+  // The header bar takes the heading and the back action on Linux. This is
+  // also how the settings subpages get a back button that returns to the
+  // settings menu rather than all the way out to the gallery — App only
+  // knows the route's default, and this is the page correcting it.
+  usePublishHeaderNav({ title, onBack });
+
   return (
     <div
       style={{
@@ -103,7 +111,8 @@ function PageChrome({
         boxSizing: "border-box",
       }}
     >
-      {/* Back button */}
+      {/* Back button. Absent on Linux: it lives in the header bar there. */}
+      {!isLinux && (
       <div style={{ flexShrink: 0, marginBottom: spacing.lg }}>
         <Button variant="secondary" size="sm" onClick={onBack} style={cardButtonStyle}>
           {navigator.userAgent.includes("Mac") ? (
@@ -116,9 +125,12 @@ function PageChrome({
           )}
         </Button>
       </div>
+      )}
 
-      {/* Header */}
+      {/* Header. The heading is the header bar's job on Linux; the
+          description stays, as the page's opening line. */}
       <div style={{ flexShrink: 0, marginBottom: spacing.lg }}>
+        {!isLinux && (
         <h2
           style={{
             fontSize: fontSize.heading,
@@ -130,6 +142,7 @@ function PageChrome({
         >
           {title}
         </h2>
+        )}
         <p
           style={{
             fontSize: fontSize.sm,
