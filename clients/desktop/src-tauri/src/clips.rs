@@ -185,11 +185,28 @@ fn frame_to_bgra(frame: &DynamicImage, width: u32, height: u32) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Serialises the tests that care about the CONTENTS of the OS temp dir.
+    ///
+    /// `clip_temp_path()` writes into a directory shared by the whole process,
+    /// and cargo runs tests in parallel, so a test that counts
+    /// `lookout-clip-*` files will see another test's file mid-flight and
+    /// report a leak that isn't there. Every test that either counts those
+    /// files or creates them outside a ClipRecorder must hold this.
+    static TEMP_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the temp-dir lock, ignoring poisoning — a panic in one test should
+    /// surface as that test's failure, not as a cascade of others.
+    fn lock_temp_dir() -> std::sync::MutexGuard<'static, ()> {
+        TEMP_DIR.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Full round-trip through the real OS encoder: synthetic frames in,
     /// container bytes out, then ffprobe (when installed) verifies the
     /// frame count and that the stream decodes.
     #[test]
     fn encodes_frames_into_playable_mp4() {
+        // Stages files via clip_temp_path() for ffprobe — see TEMP_DIR.
+        let _temp_dir = lock_temp_dir();
         let mut recorder = ClipRecorder::new(640, 360, 3000).expect("encoder init");
         for i in 0u32..5 {
             let mut img =
@@ -462,18 +479,20 @@ mod tests {
     /// session leaking one per minute would fill a small disk.
     #[test]
     fn clip_temp_files_are_always_removed() {
-        let count = || {
+        let _temp_dir = lock_temp_dir();
+        // Names, not just a count: if this ever fails for real, the filename
+        // says which recorder leaked it.
+        let names = || -> std::collections::BTreeSet<String> {
             std::fs::read_dir(std::env::temp_dir())
                 .map(|d| {
                     d.filter_map(Result::ok)
-                        .filter(|e| {
-                            e.file_name().to_string_lossy().starts_with("lookout-clip-")
-                        })
-                        .count()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|n| n.starts_with("lookout-clip-"))
+                        .collect()
                 })
-                .unwrap_or(0)
+                .unwrap_or_default()
         };
-        let before = count();
+        let before = names();
 
         let img = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
             320, 240, image::Rgba([1, 2, 3, 255]),
@@ -490,7 +509,8 @@ mod tests {
         let r = ClipRecorder::new(320, 240, 10_000).expect("init");
         assert!(r.finish().is_err());
 
-        assert_eq!(count(), before, "clip temp files were left behind");
+        let leaked: Vec<_> = names().difference(&before).cloned().collect();
+        assert!(leaked.is_empty(), "clip temp files left behind: {leaked:?}");
     }
 
     /// A recorder with zero frames must fail, not produce an empty clip.
