@@ -58,7 +58,10 @@ const HEADER_BAR_CSS = `
     width: 30px;
     height: 30px;
     border: none;
-    border-radius: 6px;
+    /* Circular, matching the close button beside them — libadwaita rounds
+       its header-bar buttons fully, and a rounded rectangle next to a
+       circle reads as two different button systems in one bar. */
+    border-radius: 50%;
     padding: 0;
     display: inline-flex;
     align-items: center;
