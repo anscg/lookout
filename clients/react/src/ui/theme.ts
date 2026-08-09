@@ -5,9 +5,16 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
   style.setAttribute("data-lookout-theme", "");
   style.textContent = `
     :root {
-      /* Dark theme (default/fallback) */
-      --color-bg-body: #000000;
-      --color-bg-panel: #111111;
+      /* Dark theme (default/fallback).
+
+         Not pure black. On macOS and Windows the window is usually wearing
+         vibrancy or mica and this colour never shows — but those materials
+         drop out (remote sessions, transparency disabled, an unsupported
+         compositor) and the flat colour underneath is what the user gets.
+         #000 as that fallback is a hole in the screen; a warm near-black
+         reads as a surface, which is what the material was doing. */
+      --color-bg-body: #1c1a18;
+      --color-bg-panel: #262321;
       --color-modal-backdrop: rgba(0, 0, 0, 0.8);
       --color-bg-surface: rgba(255, 255, 255, 0.05);
       --color-bg-sunken: rgba(255, 255, 255, 0.02);
@@ -57,7 +64,7 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
     }
     @media (prefers-color-scheme: light) {
       :root:not([data-theme="dark"]) {
-        --color-bg-body: #ffffff;
+        --color-bg-body: #faf9f7;
         --color-bg-panel: #ffffff;
         --color-modal-backdrop: rgba(255, 255, 255, 0.8);
         --color-bg-surface: rgba(0, 0, 0, 0.05);
@@ -101,7 +108,7 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       }
     }
     :root[data-theme="light"] {
-      --color-bg-body: #ffffff;
+      --color-bg-body: #faf9f7;
       --color-bg-panel: #ffffff;
       --color-modal-backdrop: rgba(255, 255, 255, 0.8);
       --color-bg-surface: rgba(0, 0, 0, 0.05);
