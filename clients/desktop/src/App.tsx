@@ -794,7 +794,7 @@ function MainWindowApp() {
           title="Settings"
           aria-label="Settings"
         >
-          <GearSixIcon size={17} weight="fill" aria-hidden="true" />
+          <GearSixIcon size={15} weight="fill" aria-hidden="true" />
         </button>
         <button
           type="button"
