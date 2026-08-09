@@ -1,6 +1,7 @@
 mod capture;
 mod clips;
 mod crop;
+mod desktop_appearance;
 mod native_menu;
 #[cfg(target_os = "macos")]
 mod native_tray;
@@ -3490,6 +3491,7 @@ pub fn run() {
             enable_vibrancy,
             disable_vibrancy,
             is_wayland,
+            desktop_appearance::desktop_appearance,
             open_external_url,
             native_menu::show_add_menu,
             native_menu::prefetch_add_menu_icons,
@@ -3649,6 +3651,14 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_maximizable(false)?;
                 window.set_fullscreen(false)?;
+
+                // Linux: drop the server-side titlebar and let the webview
+                // draw a client-side header bar instead (see HeaderBar.tsx).
+                // A GTK titlebar stacked on top of the app's own chrome is
+                // two visual systems in one window, which is most of why
+                // Lookout read as a visitor on the desktop.
+                #[cfg(target_os = "linux")]
+                window.set_decorations(false)?;
 
                 // Auto-grant camera/microphone permissions on Windows so the
                 // WebView2 native prompt never appears.

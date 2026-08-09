@@ -28,6 +28,12 @@ export interface GalleryProps {
   onSettings?: () => void;
   /** Optional content rendered just below the header (e.g. an update banner). */
   banner?: React.ReactNode;
+  /**
+   * Draw the gallery's own title-and-actions row. Hosts that already have
+   * somewhere to put them — the Linux desktop build lifts them into its
+   * header bar — pass false so the title isn't stated twice.
+   */
+  showHeader?: boolean;
 }
 
 const addButtonStyle: React.CSSProperties = {
@@ -85,6 +91,7 @@ export function Gallery({
   onAdd,
   onSettings,
   banner,
+  showHeader = true,
 }: GalleryProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showTopMask, setShowTopMask] = useState(false);
@@ -119,7 +126,7 @@ export function Gallery({
   if (error && sessions.length === 0) {
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-        <GalleryHeader onAdd={onAdd} onSettings={onSettings} />
+        {showHeader && <GalleryHeader onAdd={onAdd} onSettings={onSettings} />}
       {banner && <div style={{ padding: spacing.lg, paddingBottom: 0 }}>{banner}</div>}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: spacing.xxl }}>
           <ErrorDisplay error={error} variant="inline" />
@@ -136,7 +143,7 @@ export function Gallery({
   if (sessions.length === 0) {
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-        <GalleryHeader onAdd={onAdd} onSettings={onSettings} />
+        {showHeader && <GalleryHeader onAdd={onAdd} onSettings={onSettings} />}
       {banner && <div style={{ padding: spacing.lg, paddingBottom: 0 }}>{banner}</div>}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: spacing.xxl }}>
           <p style={{ marginBottom: spacing.md }}>
@@ -157,7 +164,7 @@ export function Gallery({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <GalleryHeader onAdd={onAdd} onSettings={onSettings} />
+      {showHeader && <GalleryHeader onAdd={onAdd} onSettings={onSettings} />}
       {banner && <div style={{ padding: spacing.lg, paddingBottom: 0 }}>{banner}</div>}
       <div
         ref={scrollRef}
