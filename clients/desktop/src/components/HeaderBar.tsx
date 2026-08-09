@@ -91,6 +91,14 @@ function useHeaderBarStyles(): void {
   }, []);
 }
 
+function BackIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10 3L5 8l5 5" />
+    </svg>
+  );
+}
+
 function CloseIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
@@ -118,6 +126,11 @@ export interface HeaderBarProps {
   /** Page actions, placed on the edge opposite the window controls. */
   actions?: React.ReactNode;
   /**
+   * Shown as a back button ahead of the title. Pages publish this through
+   * headerNav rather than drawing their own — see HeaderNavProvider.
+   */
+  onBack?: () => void;
+  /**
    * What the close button does. Defaults to asking the window to close,
    * which fires `onCloseRequested` — the editor hangs its publish-on-close
    * confirmation off that, so overriding is rarely what you want.
@@ -125,7 +138,7 @@ export interface HeaderBarProps {
   onClose?: () => void;
 }
 
-export function HeaderBar({ title, subtitle, appearance, actions, onClose, maximizable = false }: HeaderBarProps) {
+export function HeaderBar({ title, subtitle, appearance, actions, onBack, onClose, maximizable = false }: HeaderBarProps) {
   useHeaderBarStyles();
 
   // One button, no minimize and no maximize. That's what GNOME ships now:
@@ -143,6 +156,19 @@ export function HeaderBar({ title, subtitle, appearance, actions, onClose, maxim
       }}
     >
       <CloseIcon />
+    </button>
+  );
+
+  const backButton = onBack && (
+    <button
+      type="button"
+      className="lookout-headerbar-action"
+      aria-label="Back"
+      title="Back"
+      onClick={onBack}
+      style={{ flexShrink: 0 }}
+    >
+      <BackIcon />
     </button>
   );
 
@@ -213,7 +239,7 @@ export function HeaderBar({ title, subtitle, appearance, actions, onClose, maxim
         display: "flex",
         alignItems: "center",
         gap: spacing.sm,
-        padding: `0 ${spacing.sm}px 0 ${spacing.md}px`,
+        padding: onBack ? `0 ${spacing.sm}px` : `0 ${spacing.sm}px 0 ${spacing.md}px`,
         boxSizing: "border-box",
         // No fill and no divider: the bar is the top of the window, not a
         // strip bolted to it. This is how libadwaita's flat header bars read
@@ -227,6 +253,7 @@ export function HeaderBar({ title, subtitle, appearance, actions, onClose, maxim
       {/* The close button leads instead when the user has moved their window
           controls to the left, which GNOME allows and some distros default to. */}
       {!appearance.controlsOnRight && closeButton}
+      {backButton}
       {titleBlock}
       <div data-tauri-drag-region style={{ flex: 1, alignSelf: "stretch" }} />
       {pageActions}

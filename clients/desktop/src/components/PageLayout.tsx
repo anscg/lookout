@@ -1,4 +1,6 @@
 import React from "react";
+import { isLinux } from "../platform.js";
+import { usePublishHeaderNav } from "../headerNav.js";
 import {
   Button,
   colors,
@@ -33,13 +35,17 @@ interface PageLayoutProps {
 export function PageLayout({ onBack, icon, title, subtitle, hint, actions, children }: PageLayoutProps) {
   const isMacOS = navigator.userAgent.includes("Mac");
 
+  // On Linux the back button belongs in the window's header bar, not in the
+  // content. The hero title stays put — that's the page speaking, not chrome.
+  usePublishHeaderNav(onBack ? { onBack } : null);
+
   return (
     <div style={{
       display: "flex", flexDirection: "column", height: "100%",
       maxWidth: 480, margin: "0 auto", padding: spacing.lg, boxSizing: "border-box",
     }}>
-      {/* Back button */}
-      {onBack && (
+      {/* Back button. Absent on Linux: it lives in the header bar there. */}
+      {onBack && !isLinux && (
         <div style={{ flexShrink: 0 }}>
           <Button variant="secondary" size="sm" onClick={onBack} style={cardButtonStyle}>
             {isMacOS ? (

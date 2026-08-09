@@ -44,6 +44,7 @@ import { getApiBase } from "./serverConfig.js";
 import { HeaderBar } from "./components/HeaderBar.js";
 import { applyLinuxChrome, DEFAULT_APPEARANCE, type DesktopAppearance } from "./linuxChrome.js";
 import { isLinux } from "./platform.js";
+import { HeaderNavProvider, type HeaderNav } from "./headerNav.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -635,6 +636,15 @@ function MainWindowApp() {
     };
   }, []);
 
+  // The two ways out of a subpage. Named so the header bar and the pages'
+  // own controls invoke exactly the same thing rather than two hand-copied
+  // versions that can drift.
+  const toGallery = useCallback(() => navigate({ page: "gallery" }), [navigate]);
+  const toGalleryRefreshed = useCallback(() => {
+    gallery.refresh();
+    navigate({ page: "gallery" });
+  }, [gallery, navigate]);
+
   // Step 2: Route
   const content = (() => {
     // The editor owns the session while its window is open.
@@ -665,14 +675,14 @@ function MainWindowApp() {
       case "settings":
         return (
           <SettingsPage
-            onBack={() => navigate({ page: "gallery" })}
+            onBack={toGallery}
             isWayland={isWayland}
           />
         );
       case "add":
         return (
           <AddSessionPage
-            onBack={() => navigate({ page: "gallery" })}
+            onBack={toGallery}
             onStart={(token) => {
               tokenStore.addToken(token);
               handleDeepLinkRef.current([`lookout://session/?token=${token}`]);
@@ -684,10 +694,7 @@ function MainWindowApp() {
           <RecordPage
             key={route.token}
             token={route.token}
-            onBack={() => {
-              gallery.refresh();
-              navigate({ page: "gallery" });
-            }}
+            onBack={toGalleryRefreshed}
             onViewSession={(token) => {
               tokenStore.addToken(token);
               navigate({ page: "session", token });
@@ -708,10 +715,8 @@ function MainWindowApp() {
               // seen finishing by both paths only redirects once.
               fireRedirect(route.token, redirectUrl);
             }}
-            onBack={() => {
-              gallery.refresh();
-              navigate({ page: "gallery" });
-            }}
+            onBack={toGalleryRefreshed}
+            showBack={!isLinux}
             onArchive={async () => {
               const yes = await confirm("Are you sure you want to archive this session?", { title: "Archive Session", kind: "warning" });
               if (yes) {
@@ -740,7 +745,18 @@ function MainWindowApp() {
   // GNOME names the window after what's in it, not after the app, so the
   // header bar carries the page rather than "Lookout". The subtitle is
   // optional and only earns its line where there's something worth saying.
-  const header = ((): { title: string; subtitle?: string } => {
+  // What the mounted page has published for the header, if anything. Kept
+  // with its publisher's id so an outgoing page's unmount can't wipe the
+  // header the incoming one just set during a route transition.
+  const [pageNav, setPageNav] = useState<{ owner: string; nav: HeaderNav } | null>(null);
+  const publishHeaderNav = useCallback((owner: string, nav: HeaderNav | null) => {
+    setPageNav((prev) => {
+      if (nav) return { owner, nav };
+      return prev && prev.owner !== owner ? prev : null;
+    });
+  }, []);
+
+  const routeHeader = ((): { title: string; subtitle?: string; onBack?: () => void } => {
     // "Lookout" on its own is a bare word in a bare bar — the version is
     // the one thing worth saying underneath it, and it lost its old home in
     // the window title when the header bar took over.
@@ -751,13 +767,22 @@ function MainWindowApp() {
       // The home screen is the app itself, so it takes the app's name and
       // nothing else — a running count under it is noise, not information.
       case "gallery": return { title: "Lookout" };
-      case "settings": return { title: "Settings" };
-      case "add": return { title: "New Timelapse" };
-      case "record": return { title: "Recording" };
-      case "session": return { title: "Timelapse" };
+      case "settings": return { title: "Settings", onBack: toGallery };
+      case "add": return { title: "New Timelapse", onBack: toGallery };
+      case "record": return { title: "Recording", onBack: toGalleryRefreshed };
+      case "session": return { title: "Timelapse", onBack: toGalleryRefreshed };
       default: return appTitle;
     }
   })();
+
+  // A page's own contribution wins over the route default — Settings uses
+  // this so its subpages send you back to the settings menu rather than all
+  // the way out to the gallery.
+  const header = {
+    title: pageNav?.nav.title ?? routeHeader.title,
+    subtitle: pageNav?.nav.title ? pageNav.nav.subtitle : (pageNav?.nav.subtitle ?? routeHeader.subtitle),
+    onBack: pageNav?.nav.onBack ?? routeHeader.onBack,
+  };
 
   const headerActions =
     route.page === "gallery" && screenPermGranted && cameraPermGranted && !editorWindowToken ? (
@@ -769,7 +794,7 @@ function MainWindowApp() {
           title="Settings"
           aria-label="Settings"
         >
-          <GearSixIcon size={19} weight="fill" aria-hidden="true" />
+          <GearSixIcon size={17} weight="fill" aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -781,7 +806,7 @@ function MainWindowApp() {
           title="Start"
           aria-label="Start"
         >
-          <PlusIcon size={19} weight="bold" aria-hidden="true" />
+          <PlusIcon size={17} weight="bold" aria-hidden="true" />
         </button>
       </>
     ) : undefined;
@@ -812,6 +837,7 @@ function MainWindowApp() {
     : `${route.page}:${(route as { token?: string }).token ?? ""}`;
 
   return (
+    <HeaderNavProvider publish={publishHeaderNav}>
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", position: "relative" }}>
       {/* Draggable Titlebar Area that dodges the traffic lights (macOS only).
           The update pill lives here, Ghostty-style — the titlebar is a
@@ -822,6 +848,7 @@ function MainWindowApp() {
           subtitle={header.subtitle}
           appearance={appearance}
           actions={headerActions}
+          onBack={header.onBack}
         />
       )}
       {isMacOS ? (
@@ -897,5 +924,6 @@ function MainWindowApp() {
         </AnimatePresence>
       </div>
     </div>
+    </HeaderNavProvider>
   );
 }
