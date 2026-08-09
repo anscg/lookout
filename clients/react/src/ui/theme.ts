@@ -7,33 +7,37 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
     :root {
       /* Dark theme (default/fallback).
 
-         Not pure black. On macOS and Windows the window is usually wearing
-         vibrancy or mica and this colour never shows — but those materials
-         drop out (remote sessions, transparency disabled, an unsupported
-         compositor) and the flat colour underneath is what the user gets.
-         #000 as that fallback is a hole in the screen; a warm near-black
-         reads as a surface, which is what the material was doing. */
-      --color-bg-body: #1c1a18;
-      --color-bg-panel: #262321;
-      --color-modal-backdrop: rgba(0, 0, 0, 0.8);
-      --color-bg-surface: rgba(255, 255, 255, 0.05);
-      --color-bg-sunken: rgba(255, 255, 255, 0.02);
+         These are Adwaita's surfaces — GNOME's own #242424 window over
+         #1e1e1e views — used as the app's baseline on every platform, not
+         just the one that ships them.
+
+         Not pure black, and the reason matters: on macOS and Windows the
+         window is usually wearing vibrancy or mica and this colour never
+         shows, but those materials drop out (remote sessions, transparency
+         disabled, an unsupported compositor) and the flat colour underneath
+         is what the user is left with. #000 as that fallback reads as a hole
+         in the screen rather than a surface. */
+      --color-bg-body: #242424;
+      --color-bg-panel: #1e1e1e;
+      --color-modal-backdrop: rgba(0, 0, 0, 0.55);
+      --color-bg-surface: rgba(255, 255, 255, 0.08);
+      --color-bg-sunken: rgba(255, 255, 255, 0.04);
       --color-text-primary: #ffffff;
       --color-text-inverse: #000000;
-      --color-text-secondary: rgba(255, 255, 255, 0.6);
-      --color-text-tertiary: rgba(255, 255, 255, 0.4);
-      --color-text-quaternary: rgba(255, 255, 255, 0.2);
+      --color-text-secondary: rgba(255, 255, 255, 0.7);
+      --color-text-tertiary: rgba(255, 255, 255, 0.5);
+      --color-text-quaternary: rgba(255, 255, 255, 0.28);
       --color-text-error: #fca5a5;
-      --color-border-default: rgba(255, 255, 255, 0.1);
-      --color-border-hover: rgba(255, 255, 255, 0.2);
-      --color-bg-selected: rgba(255, 255, 255, 0.08);
+      --color-border-default: rgba(255, 255, 255, 0.12);
+      --color-border-hover: rgba(255, 255, 255, 0.22);
+      --color-bg-selected: rgba(255, 255, 255, 0.12);
       --color-border-selected: rgba(255, 255, 255, 0.3);
       --color-icon-selected: rgba(255, 255, 255, 0.8);
       --color-status-neutral: rgba(255, 255, 255, 0.2);
       --color-spinner-base: rgba(255, 255, 255, 0.1);
       --color-spinner-track: rgba(255, 255, 255, 0.8);
-      --color-skeleton-bg: rgba(255, 255, 255, 0.03);
-      --color-skeleton-shimmer: rgba(255, 255, 255, 0.08);
+      --color-skeleton-bg: rgba(255, 255, 255, 0.06);
+      --color-skeleton-shimmer: rgba(255, 255, 255, 0.12);
       --color-badge-primary-bg: #22c55e26;
       --color-badge-primary-text: #22c55e;
       --color-badge-overlay-bg: rgba(0, 0, 0, 0.7);
@@ -46,13 +50,13 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       /* Editor: a recessed well the footage sits in, and the removed-region
          vocabulary. Deliberately translucent so the window's vibrancy still
          reads through the chrome. */
-      --color-well: rgba(0, 0, 0, 0.45);
-      --color-well-border: rgba(255, 255, 255, 0.08);
+      --color-well: rgba(0, 0, 0, 0.32);
+      --color-well-border: rgba(255, 255, 255, 0.1);
       --color-cut-fill: rgba(248, 113, 113, 0.26);
       --color-cut-fill-hover: rgba(248, 113, 113, 0.36);
       --color-cut-border: #f87171;
       --color-cut-stripe: rgba(248, 113, 113, 0.13);
-      --color-track: rgba(255, 255, 255, 0.06);
+      --color-track: rgba(255, 255, 255, 0.1);
       /* Accent: the one colour an embedding program can replace. Drives
          primary buttons, focus rings, and progress. Semantic status
          colours (success/warning/danger) stay put — those carry meaning,
@@ -64,20 +68,20 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
     }
     @media (prefers-color-scheme: light) {
       :root:not([data-theme="dark"]) {
-        --color-bg-body: #faf9f7;
+        --color-bg-body: #fafafa;
         --color-bg-panel: #ffffff;
-        --color-modal-backdrop: rgba(255, 255, 255, 0.8);
-        --color-bg-surface: rgba(0, 0, 0, 0.05);
-        --color-bg-sunken: rgba(0, 0, 0, 0.02);
-        --color-text-primary: #000000;
+        --color-modal-backdrop: rgba(0, 0, 0, 0.35);
+        --color-bg-surface: #ffffff;
+        --color-bg-sunken: rgba(0, 0, 0, 0.04);
+        --color-text-primary: rgba(0, 0, 0, 0.85);
         --color-text-inverse: #ffffff;
-        --color-text-secondary: rgba(0, 0, 0, 0.6);
-        --color-text-tertiary: rgba(0, 0, 0, 0.4);
-        --color-text-quaternary: rgba(0, 0, 0, 0.2);
+        --color-text-secondary: rgba(0, 0, 0, 0.65);
+        --color-text-tertiary: rgba(0, 0, 0, 0.45);
+        --color-text-quaternary: rgba(0, 0, 0, 0.25);
         --color-text-error: #ef4444;
-        --color-border-default: rgba(0, 0, 0, 0.1);
-        --color-border-hover: rgba(0, 0, 0, 0.2);
-        --color-bg-selected: rgba(0, 0, 0, 0.08);
+        --color-border-default: rgba(0, 0, 0, 0.12);
+        --color-border-hover: rgba(0, 0, 0, 0.22);
+        --color-bg-selected: rgba(0, 0, 0, 0.1);
         --color-border-selected: rgba(0, 0, 0, 0.3);
         --color-icon-selected: rgba(0, 0, 0, 0.8);
         --color-status-neutral: #000000;
@@ -94,13 +98,13 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
         --color-archive-border: rgba(0, 0, 0, 0.1);
         --color-archive-hover-bg: rgba(255, 255, 255, 1);
         --color-archive-hover-border: rgba(0, 0, 0, 0.2);
-        --color-well: rgba(0, 0, 0, 0.10);
-        --color-well-border: rgba(0, 0, 0, 0.08);
+        --color-well: rgba(0, 0, 0, 0.08);
+        --color-well-border: rgba(0, 0, 0, 0.1);
         --color-cut-fill: rgba(220, 38, 38, 0.20);
         --color-cut-fill-hover: rgba(220, 38, 38, 0.30);
         --color-cut-border: #dc2626;
         --color-cut-stripe: rgba(220, 38, 38, 0.12);
-        --color-track: rgba(0, 0, 0, 0.06);
+        --color-track: rgba(0, 0, 0, 0.08);
         --color-accent: #3b82f6;
         --color-accent-hover: #2f6fd0;
       --color-accent-hover: color-mix(in oklab, var(--color-accent) 88%, black);
@@ -108,20 +112,20 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       }
     }
     :root[data-theme="light"] {
-      --color-bg-body: #faf9f7;
+      --color-bg-body: #fafafa;
       --color-bg-panel: #ffffff;
-      --color-modal-backdrop: rgba(255, 255, 255, 0.8);
-      --color-bg-surface: rgba(0, 0, 0, 0.05);
-      --color-bg-sunken: rgba(0, 0, 0, 0.02);
-      --color-text-primary: #000000;
+      --color-modal-backdrop: rgba(0, 0, 0, 0.35);
+      --color-bg-surface: #ffffff;
+      --color-bg-sunken: rgba(0, 0, 0, 0.04);
+      --color-text-primary: rgba(0, 0, 0, 0.85);
       --color-text-inverse: #ffffff;
-      --color-text-secondary: rgba(0, 0, 0, 0.6);
-      --color-text-tertiary: rgba(0, 0, 0, 0.4);
-      --color-text-quaternary: rgba(0, 0, 0, 0.2);
+      --color-text-secondary: rgba(0, 0, 0, 0.65);
+      --color-text-tertiary: rgba(0, 0, 0, 0.45);
+      --color-text-quaternary: rgba(0, 0, 0, 0.25);
       --color-text-error: #ef4444;
-      --color-border-default: rgba(0, 0, 0, 0.1);
-      --color-border-hover: rgba(0, 0, 0, 0.2);
-      --color-bg-selected: rgba(0, 0, 0, 0.08);
+      --color-border-default: rgba(0, 0, 0, 0.12);
+      --color-border-hover: rgba(0, 0, 0, 0.22);
+      --color-bg-selected: rgba(0, 0, 0, 0.1);
       --color-border-selected: rgba(0, 0, 0, 0.3);
       --color-icon-selected: rgba(0, 0, 0, 0.8);
       --color-status-neutral: #000000;
@@ -138,13 +142,13 @@ if (typeof document !== "undefined" && !document.querySelector("style[data-looko
       --color-archive-border: rgba(0, 0, 0, 0.1);
       --color-archive-hover-bg: rgba(255, 255, 255, 1);
       --color-archive-hover-border: rgba(0, 0, 0, 0.2);
-      --color-well: rgba(0, 0, 0, 0.10);
-      --color-well-border: rgba(0, 0, 0, 0.08);
+      --color-well: rgba(0, 0, 0, 0.08);
+      --color-well-border: rgba(0, 0, 0, 0.1);
       --color-cut-fill: rgba(220, 38, 38, 0.20);
       --color-cut-fill-hover: rgba(220, 38, 38, 0.30);
       --color-cut-border: #dc2626;
       --color-cut-stripe: rgba(220, 38, 38, 0.12);
-      --color-track: rgba(0, 0, 0, 0.06);
+      --color-track: rgba(0, 0, 0, 0.08);
       --color-accent: #3b82f6;
       --color-accent-hover: #2f6fd0;
       --color-accent-hover: color-mix(in oklab, var(--color-accent) 88%, black);

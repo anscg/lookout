@@ -1,15 +1,10 @@
 /**
  * Dressing Lookout like a citizen of the Linux desktop.
  *
- * The shared design system is tuned for macOS: pure black on dark, pure
- * white on light, a fixed blue accent, and a bundled typeface. Every one of
- * those reads as "web app in a window" next to an Adwaita app, where the
- * window is #242424, the accent is whatever the user picked in Settings, and
- * the type is the desktop's own.
- *
- * So on Linux — and only on Linux — we overlay Adwaita's palette on the
- * theme's custom properties and pull the session's accent and UI font in
- * from GSettings. macOS and Windows never load any of this.
+ * The shared design system now carries Adwaita's surfaces itself, so the
+ * palette isn't this file's job any more. What is: the session's own accent
+ * colour and UI font, read from GSettings, plus the chrome that only an
+ * undecorated GTK window needs. macOS and Windows never load any of it.
  */
 import { setAccentColor } from "@lookout/react";
 import { isLinux } from "./platform.js";
@@ -34,53 +29,47 @@ export const HEADER_BAR_HEIGHT = 47;
 export const WINDOW_RADIUS = 12;
 
 /**
- * Adwaita's own colours, mapped onto Lookout's tokens.
+ * Linux-only chrome that the shared theme can't carry.
  *
- * Specificity matters here: the shared sheet defines light mode as
- * `:root[data-theme="light"]` (0,2,0), so an override has to carry at least
- * as much weight — hence `html.os-linux[data-theme=…]` (0,2,1) rather than
- * the `:root` these normally live on. Loading order can't be relied on,
- * since the shared sheet injects itself on first import.
+ * The Adwaita palette itself now lives in the shared theme — it's the app's
+ * baseline on every platform — so what's left here is the part that only
+ * makes sense on a GTK desktop: the header bar's control colours, GTK's
+ * cursor behaviour, and the rounded corners an undecorated window owns.
+ *
+ * Specificity note: these still key off `html.os-linux[data-theme=…]`
+ * (0,2,1) because the shared sheet's light block is `:root[data-theme=
+ * "light"]` (0,2,0), and loading order can't be relied on — the shared sheet
+ * injects itself on first import.
  */
 const ADWAITA_CSS = `
   html.os-linux[data-theme="dark"] {
-    --color-bg-body: #242424;
-    --color-bg-panel: #1e1e1e;
-    --color-bg-surface: rgba(255, 255, 255, 0.08);
-    --color-bg-sunken: rgba(255, 255, 255, 0.04);
-    --color-bg-selected: rgba(255, 255, 255, 0.12);
-    --color-modal-backdrop: rgba(0, 0, 0, 0.55);
-    --color-text-secondary: rgba(255, 255, 255, 0.7);
-    --color-text-tertiary: rgba(255, 255, 255, 0.5);
-    --color-text-quaternary: rgba(255, 255, 255, 0.28);
-    --color-border-default: rgba(255, 255, 255, 0.12);
-    --color-border-hover: rgba(255, 255, 255, 0.22);
-    --color-skeleton-bg: rgba(255, 255, 255, 0.06);
-    --color-skeleton-shimmer: rgba(255, 255, 255, 0.12);
-    --color-well: rgba(0, 0, 0, 0.32);
-    --color-well-border: rgba(255, 255, 255, 0.1);
-    --color-track: rgba(255, 255, 255, 0.1);
     --color-headerbar-control: rgba(255, 255, 255, 0.1);
     --color-headerbar-control-hover: rgba(255, 255, 255, 0.18);
+    /* Adwaita's popover_bg_color. Note it is LIGHTER than the #242424
+       window, not darker: a GTK popover is an elevated surface, and
+       reaching for the app's "panel" colour (a recessed one) is what makes
+       a menu read as a hole in the window instead of a thing floating above
+       it. */
+    --color-popover-bg: #383838;
+    /* GNOME's popovers aren't a flat fill — there's a slight vertical
+       lift, lighter at the top. The tail sits above the panel, so it takes
+       this top stop rather than the base colour. */
+    --color-popover-bg-top: #3d3d3d;
+    /* A light edge, not a dark one. The popover is an elevated surface
+       sitting on a darker window, so its outline reads as the light catching
+       the lifted edge; a dark border just sinks into the window behind it. */
+    --color-popover-border: rgba(255, 255, 255, 0.14);
+    --color-popover-hover: rgba(255, 255, 255, 0.1);
+    --color-popover-separator: rgba(255, 255, 255, 0.15);
   }
   html.os-linux[data-theme="light"] {
-    --color-bg-body: #fafafa;
-    --color-bg-panel: #ffffff;
-    --color-bg-surface: #ffffff;
-    --color-bg-sunken: rgba(0, 0, 0, 0.04);
-    --color-bg-selected: rgba(0, 0, 0, 0.1);
-    --color-modal-backdrop: rgba(0, 0, 0, 0.35);
-    --color-text-primary: rgba(0, 0, 0, 0.85);
-    --color-text-secondary: rgba(0, 0, 0, 0.65);
-    --color-text-tertiary: rgba(0, 0, 0, 0.45);
-    --color-text-quaternary: rgba(0, 0, 0, 0.25);
-    --color-border-default: rgba(0, 0, 0, 0.12);
-    --color-border-hover: rgba(0, 0, 0, 0.22);
-    --color-well: rgba(0, 0, 0, 0.08);
-    --color-well-border: rgba(0, 0, 0, 0.1);
-    --color-track: rgba(0, 0, 0, 0.08);
     --color-headerbar-control: rgba(0, 0, 0, 0.08);
     --color-headerbar-control-hover: rgba(0, 0, 0, 0.16);
+    --color-popover-bg: #f7f7f7;
+    --color-popover-bg-top: #ffffff;
+    --color-popover-border: rgba(0, 0, 0, 0.12);
+    --color-popover-hover: rgba(0, 0, 0, 0.08);
+    --color-popover-separator: rgba(0, 0, 0, 0.12);
   }
   /* GTK never swaps in a hand cursor over a button — the pointer is a web
      convention, and having it follow every control around is one of the
@@ -153,7 +142,16 @@ export function linuxFontStack(family: string | null): string {
   return [...families.map((f) => `"${f}"`), 'system-ui', '"Geist"', 'sans-serif'].join(', ');
 }
 
-let injected = false;
+// Injected on import rather than from applyLinuxChrome's effect, for the
+// same reason HeaderBar's sheet is: an effect runs after the first paint, so
+// the frame before it has --color-headerbar-control undefined and the window
+// controls render with no background at all.
+if (isLinux && typeof document !== "undefined" && !document.querySelector("style[data-lookout-linux-chrome]")) {
+  const style = document.createElement("style");
+  style.setAttribute("data-lookout-linux-chrome", "");
+  style.textContent = ADWAITA_CSS;
+  document.head.appendChild(style);
+}
 
 /**
  * Apply the Adwaita palette immediately, then fold in whatever GSettings
@@ -162,11 +160,10 @@ let injected = false;
  * `undecorated` says this window has had its GTK titlebar removed and is
  * therefore responsible for its own corners and header bar.
  *
- * Split in two on purpose: the palette is static and can land before first
- * paint, while the accent and font need a round trip to the native side.
- * Waiting for that round trip to paint anything would show a black window
- * first and recolour it a frame later, which is worse than an accent that
- * settles a moment after the window opens.
+ * The stylesheet itself is already in the document by the time this runs —
+ * it goes in on import, above. What's left here needs a round trip to the
+ * native side, so it necessarily lands a moment after the window opens;
+ * that's better than holding the first paint hostage to an IPC call.
  */
 export async function applyLinuxChrome(
   { undecorated = false }: { undecorated?: boolean } = {},
@@ -177,14 +174,6 @@ export async function applyLinuxChrome(
   // Opts this window into drawing its own rounded corners. Only the windows
   // that actually had their decorations taken away may claim it.
   if (undecorated) document.documentElement.classList.add("lookout-csd");
-
-  if (!injected) {
-    injected = true;
-    const style = document.createElement("style");
-    style.setAttribute("data-lookout-linux-chrome", "");
-    style.textContent = ADWAITA_CSS;
-    document.head.appendChild(style);
-  }
 
   let appearance = DEFAULT_APPEARANCE;
   try {
