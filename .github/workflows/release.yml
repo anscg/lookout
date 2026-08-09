@@ -161,6 +161,40 @@ jobs:
           # the .pdb that this setting was added for.
           CARGO_PROFILE_RELEASE_DEBUG: ${{ runner.os == 'Linux' && 'false' || 'true' }}
 
+      # A wrong name in the .deb's Depends makes the package UNINSTALLABLE,
+      # which is worse than the missing-dependency bug the field was added to
+      # fix — and it cannot be caught by building, only by installing. So do
+      # that here, in a clean container, before the artifact reaches anyone.
+      #
+      # Every name is read back OUT of the package rather than assumed, so this
+      # can't fail spuriously when the product or binary name changes — a
+      # verification step that cries wolf would just get deleted.
+      - name: Verify the .deb installs on a clean Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          deb=$(find clients/desktop/src-tauri/target/release/bundle/deb -name '*.deb' | head -1)
+          if [ -z "$deb" ]; then echo "no .deb produced — nothing to verify"; exit 0; fi
+          pkg=$(dpkg-deb -f "$deb" Package)
+          echo "verifying $deb  ($(du -h "$deb" | cut -f1), package '$pkg')"
+          echo "--- declared dependencies ---"
+          dpkg-deb -f "$deb" Depends Recommends || true
+          docker run --rm \
+            -v "$PWD/$(dirname "$deb")":/pkg:ro \
+            -e "DEB=$(basename "$deb")" -e "PKG=$pkg" \
+            ubuntu:24.04 bash -eux -c '
+              apt-get update -qq
+              # Resolving and installing for real is the assertion: a Depends
+              # name that does not exist in the archive fails right here.
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "/pkg/$DEB"
+              dpkg -s "$PKG" >/dev/null
+              # And the shipped executable must have all its shared libraries.
+              bin=$(dpkg -L "$PKG" | grep "^/usr/bin/" | head -1)
+              test -n "$bin"
+              ldd "$bin" | (grep -i "not found" && exit 1 || true)
+            '
+          echo "OK: the .deb installs, its dependencies resolve, and the binary links"
+
       - name: Build Arch Linux package (.pkg.tar.zst)
         if: runner.os == 'Linux'
         run: |
