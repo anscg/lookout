@@ -59,8 +59,24 @@
          in the script below — so the first frame can be the right shape too
          rather than a square that rounds off a moment later. */
       html.os-linux { background: transparent; }
-      html.os-linux #root { background: #242424; border-radius: 12px; }
-      html.os-linux[data-theme="light"] #root { background: #fafafa; }
+      html.os-linux #root {
+        position: fixed;
+        inset: 20px;
+        height: auto;
+        background: #242424;
+        border-radius: 12px;
+        box-shadow:
+          0 0 0 1px rgba(255, 255, 255, 0.18),
+          0 4px 12px rgba(0, 0, 0, 0.1),
+          0 14px 40px rgba(0, 0, 0, 0.14);
+      }
+      html.os-linux[data-theme="light"] #root {
+        background: #fafafa;
+        box-shadow:
+          0 0 0 1px rgba(0, 0, 0, 0.18),
+          0 4px 12px rgba(0, 0, 0, 0.08),
+          0 14px 40px rgba(0, 0, 0, 0.1);
+      }
 
       /* Linux: prefer the desktop's own UI font over the bundled one, so the
          app reads as part of the session rather than a page inside it. The

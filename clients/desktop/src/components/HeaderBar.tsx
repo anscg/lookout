@@ -231,6 +231,7 @@ export function HeaderBar({ title, subtitle, appearance, actions, onBack, onClos
   return (
     <div
       data-tauri-drag-region
+      className="lookout-headerbar"
       onDoubleClick={maximizable ? () => {
         void getCurrentWindow().toggleMaximize().catch(() => {});
       } : undefined}

@@ -14,17 +14,22 @@
  */
 import React, { useEffect, useState } from "react";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
+import { WINDOW_MARGIN } from "../linuxChrome.js";
 
 /** Mirrors Tauri's ResizeDirection, which the package declares but doesn't export. */
 type ResizeDirection =
   | "East" | "North" | "NorthEast" | "NorthWest"
   | "South" | "SouthEast" | "SouthWest" | "West";
 
-/** How wide the grab strips are. GTK's own invisible frame is about this. */
-const GRAB = 6;
+/**
+ * The grab strips span the whole transparent frame — in GTK that frame is
+ * both the shadow's canvas and the invisible border you resize by, and it
+ * costs nothing to make it serve both here too.
+ */
+const GRAB = WINDOW_MARGIN;
 
 /** The corner zones overlap the edges and win, as they do in GTK. */
-const CORNER = 14;
+const CORNER = WINDOW_MARGIN + 12;
 
 interface Zone {
   direction: ResizeDirection;
