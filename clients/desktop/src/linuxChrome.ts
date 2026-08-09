@@ -7,6 +7,7 @@
  * undecorated GTK window needs. macOS and Windows never load any of it.
  */
 import { useEffect } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setAccentColor } from "@lookout/react";
 import { isLinux } from "./platform.js";
 import { invoke } from "./logger.js";
@@ -165,6 +166,22 @@ const ADWAITA_CSS = `
     border-radius: 0;
     box-shadow: none;
   }
+  /* Modal backdrops portal to <body>, so they cover the whole window —
+     including the transparent frame, which paints the dim over the shadow
+     and squares off the rounded corners. Pull them in to the visible window.
+
+     !important because these set their own inset inline, and an inline
+     declaration otherwise beats anything a stylesheet says. */
+  html.os-linux.lookout-csd [data-lookout-overlay] {
+    inset: var(--lookout-window-margin) !important;
+    border-radius: var(--lookout-window-radius);
+    overflow: hidden;
+  }
+  html.os-linux.lookout-csd.lookout-snapped [data-lookout-overlay] {
+    inset: 0 !important;
+    border-radius: 0;
+  }
+
   /* The header bar dims with the window, GTK's :backdrop state. */
   html.os-linux .lookout-headerbar {
     transition: opacity 160ms ease-out;
@@ -224,15 +241,39 @@ if (isLinux && typeof document !== "undefined" && !document.querySelector("style
 export function useBackdropState(): void {
   useEffect(() => {
     if (!isLinux) return;
-    const sync = () => {
-      document.documentElement.classList.toggle("lookout-backdrop", !document.hasFocus());
+
+    const apply = (focused: boolean) => {
+      document.documentElement.classList.toggle("lookout-backdrop", !focused);
     };
-    sync();
-    window.addEventListener("focus", sync);
-    window.addEventListener("blur", sync);
+
+    // Ask the WINDOW whether it's focused, not the document. Dragging the
+    // window by the header bar takes a pointer grab, which costs the webview
+    // its DOM focus — so document.hasFocus() goes false and the titlebar
+    // dimmed the whole time you were moving the window. The window itself
+    // never stopped being focused.
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    const win = getCurrentWindow();
+    void win.isFocused().then((f) => { if (!cancelled) apply(f); }).catch(() => {
+      apply(document.hasFocus());
+    });
+    void win.onFocusChanged(({ payload }) => apply(payload)).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    }).catch(() => {
+      // No window events (a plain browser, say) — fall back to the document.
+      const sync = () => apply(document.hasFocus());
+      window.addEventListener("focus", sync);
+      window.addEventListener("blur", sync);
+      unlisten = () => {
+        window.removeEventListener("focus", sync);
+        window.removeEventListener("blur", sync);
+      };
+    });
+
     return () => {
-      window.removeEventListener("focus", sync);
-      window.removeEventListener("blur", sync);
+      cancelled = true;
+      if (unlisten) unlisten();
       document.documentElement.classList.remove("lookout-backdrop");
     };
   }, []);

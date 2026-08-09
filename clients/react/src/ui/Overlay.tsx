@@ -57,6 +57,10 @@ export function Overlay({
 
   return createPortal(
     <div
+      // Hosts that inset their window (the Linux CSD build reserves a
+      // transparent frame for its shadow) key off this to clip the backdrop
+      // to the visible window instead of letting it cover the frame.
+      data-lookout-overlay=""
       style={{
         position: "fixed",
         inset: 0,

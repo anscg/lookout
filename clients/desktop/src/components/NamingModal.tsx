@@ -24,7 +24,7 @@ export function NamingModal({ loading, onConfirm, onEditAndSave, onResume }: Nam
   }, []);
 
   return (
-    <div style={{
+    <div data-lookout-overlay="" style={{
       position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
       background: navigator.userAgent.toLowerCase().includes("windows") ? "linear-gradient(to bottom, transparent 0%, var(--color-modal-backdrop, rgba(0,0,0,0.8)) 100%)" : "var(--color-modal-backdrop, rgba(0,0,0,0.8))",
       display: "flex", alignItems: "center", justifyContent: "center",

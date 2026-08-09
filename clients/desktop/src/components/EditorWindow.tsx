@@ -364,7 +364,7 @@ export function EditorWindow({ token }: { token: string }) {
   return (
     <div
       style={{
-        height: "100vh",
+        height: "100%",
         minHeight: 0,
         boxSizing: "border-box",
         color: colors.text.primary,

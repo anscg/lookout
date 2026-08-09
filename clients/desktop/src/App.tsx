@@ -870,7 +870,7 @@ function MainWindowApp() {
 
   return (
     <HeaderNavProvider publish={publishHeaderNav}>
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", position: "relative" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
       {/* Draggable Titlebar Area that dodges the traffic lights (macOS only).
           The update pill lives here, Ghostty-style — the titlebar is a
           transparent webview overlay, so it renders inside the real titlebar. */}
