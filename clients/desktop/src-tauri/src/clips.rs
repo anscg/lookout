@@ -876,6 +876,25 @@ mod platform {
     /// Encoders in preference order: VA-API hardware first, then software
     /// fallbacks. Availability differs per distro/GPU; first that exists
     /// wins.
+    ///
+    /// PACKAGING: none of these are guaranteed present, and they live in
+    /// different packages from the ones the pipeline's other elements need.
+    /// The full Linux runtime set, declared in tauri.conf.json's
+    /// `bundle.linux`:
+    ///
+    ///   pipewiresrc    gstreamer1.0-pipewire      (capture — see pipewire.rs)
+    ///   videoconvert   gstreamer1.0-plugins-base  (capture + clips)
+    ///   mp4mux         gstreamer1.0-plugins-good
+    ///   h264parse      gstreamer1.0-plugins-bad
+    ///   x264enc        gstreamer1.0-plugins-ugly  (Recommends, not Depends)
+    ///
+    /// The encoder is deliberately a soft dependency: -ugly carries GPL x264,
+    /// and gstreamer1-plugins-ugly isn't in Fedora proper at all, so a hard
+    /// dependency would either impose that licence or make the package
+    /// uninstallable. Missing it is survivable — `ClipRecorder::new` fails,
+    /// the interval falls back to a JPEG, and after MAX_CLIP_ENCODER_FAILURES
+    /// the loop stops trying. A user with no encoder gets the legacy
+    /// one-frame-per-minute recording rather than a broken app.
     const ENCODER_CANDIDATES: &[&str] = &["vah264enc", "vaapih264enc", "x264enc", "openh264enc"];
 
     pub struct Encoder {
