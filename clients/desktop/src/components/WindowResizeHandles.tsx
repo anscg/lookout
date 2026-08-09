@@ -14,7 +14,7 @@
  */
 import React, { useEffect, useState } from "react";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
-import { WINDOW_MARGIN } from "../linuxChrome.js";
+import { RESIZE_BAND, SHADOW_PASSTHROUGH, setShadowPassthrough } from "../linuxChrome.js";
 
 /** Mirrors Tauri's ResizeDirection, which the package declares but doesn't export. */
 type ResizeDirection =
@@ -22,14 +22,20 @@ type ResizeDirection =
   | "South" | "SouthEast" | "SouthWest" | "West";
 
 /**
- * The grab strips span the whole transparent frame — in GTK that frame is
- * both the shadow's canvas and the invisible border you resize by, and it
- * costs nothing to make it serve both here too.
+ * The strips sit in the band of the frame that still accepts input, not at
+ * the window's real edge — everything outside that band is passed through
+ * to the desktop (window_shape.rs), so a handle out there could never be
+ * clicked.
  */
-const GRAB = WINDOW_MARGIN;
+const GRAB = RESIZE_BAND;
+const INSET = SHADOW_PASSTHROUGH;
 
-/** The corner zones overlap the edges and win, as they do in GTK. */
-const CORNER = WINDOW_MARGIN + 12;
+/**
+ * Corners reach a little further in than the edges do, as they do in GTK.
+ * Kept modest on purpose: they overlap the visible window, and a larger
+ * value would start swallowing clicks on the header bar's own buttons.
+ */
+const CORNER = RESIZE_BAND + 6;
 
 interface Zone {
   direction: ResizeDirection;
@@ -38,14 +44,14 @@ interface Zone {
 }
 
 const ZONES: Zone[] = [
-  { direction: "North", cursor: "n-resize", style: { top: 0, left: 0, right: 0, height: GRAB } },
-  { direction: "South", cursor: "s-resize", style: { bottom: 0, left: 0, right: 0, height: GRAB } },
-  { direction: "West", cursor: "w-resize", style: { top: 0, bottom: 0, left: 0, width: GRAB } },
-  { direction: "East", cursor: "e-resize", style: { top: 0, bottom: 0, right: 0, width: GRAB } },
-  { direction: "NorthWest", cursor: "nw-resize", style: { top: 0, left: 0, width: CORNER, height: CORNER } },
-  { direction: "NorthEast", cursor: "ne-resize", style: { top: 0, right: 0, width: CORNER, height: CORNER } },
-  { direction: "SouthWest", cursor: "sw-resize", style: { bottom: 0, left: 0, width: CORNER, height: CORNER } },
-  { direction: "SouthEast", cursor: "se-resize", style: { bottom: 0, right: 0, width: CORNER, height: CORNER } },
+  { direction: "North", cursor: "n-resize", style: { top: INSET, left: INSET, right: INSET, height: GRAB } },
+  { direction: "South", cursor: "s-resize", style: { bottom: INSET, left: INSET, right: INSET, height: GRAB } },
+  { direction: "West", cursor: "w-resize", style: { top: INSET, bottom: INSET, left: INSET, width: GRAB } },
+  { direction: "East", cursor: "e-resize", style: { top: INSET, bottom: INSET, right: INSET, width: GRAB } },
+  { direction: "NorthWest", cursor: "nw-resize", style: { top: INSET, left: INSET, width: CORNER, height: CORNER } },
+  { direction: "NorthEast", cursor: "ne-resize", style: { top: INSET, right: INSET, width: CORNER, height: CORNER } },
+  { direction: "SouthWest", cursor: "sw-resize", style: { bottom: INSET, left: INSET, width: CORNER, height: CORNER } },
+  { direction: "SouthEast", cursor: "se-resize", style: { bottom: INSET, right: INSET, width: CORNER, height: CORNER } },
 ];
 
 /**
@@ -102,6 +108,10 @@ export function useSquareCornersWhenSnapped(): void {
       const flush = await isFlushWithWorkArea();
       if (cancelled) return;
       document.documentElement.classList.toggle("lookout-snapped", flush);
+      // A snapped window has no frame to pass through, and the shape is
+      // computed from the window's size — so it needs redoing on every
+      // resize, not only when the snapped state flips.
+      void setShadowPassthrough(flush ? 0 : SHADOW_PASSTHROUGH);
     };
 
     // `onResized` fires continuously through a drag, and each check costs a
