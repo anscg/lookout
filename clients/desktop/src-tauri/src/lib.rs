@@ -2259,6 +2259,8 @@ async fn capture_and_upload(
             jpeg_quality,
             &pipewire_fds,
             &blacklisted,
+            // Uploaded, so it is a recorded frame even though JS drove it.
+            capture::ResizeQuality::Recorded,
         )
     })
     .await
@@ -2731,6 +2733,9 @@ async fn grab_frame(
             max_height,
             &pipewire_fds,
             &blacklisted,
+            // This frame is what gets encoded and uploaded — the one image
+            // a viewer ever sees of this minute.
+            capture::ResizeQuality::Recorded,
         )?;
         let encoded = match jpeg {
             GrabJpeg::None => None,
@@ -2746,7 +2751,14 @@ async fn grab_frame(
                     // for the clip encoder.
                     image
                         .as_rgba8()
-                        .and_then(|rgba| capture::fast_resize_buffer(rgba, pw, ph))
+                        .and_then(|rgba| {
+                            capture::fast_resize_buffer(
+                                rgba,
+                                pw,
+                                ph,
+                                capture::ResizeQuality::Preview,
+                            )
+                        })
                         .map(|small| {
                             capture::encode_frame_jpeg(
                                 &image::DynamicImage::ImageRgba8(small),
@@ -3708,7 +3720,7 @@ pub fn run() {
                     .and_then(|s| s.blacklisted_apps.lock().ok().map(|g| g.clone()))
                     .unwrap_or_default();
 
-                match crate::capture::take_screenshot_raw_with_blacklist(source, max_width, max_height, jpeg_quality, &pipewire_fds, &blacklisted) {
+                match crate::capture::take_screenshot_raw_with_blacklist(source, max_width, max_height, jpeg_quality, &pipewire_fds, &blacklisted, crate::capture::ResizeQuality::Preview) {
                     Ok(res) => responder.respond(
                         http::Response::builder()
                             .header("Content-Type", "image/jpeg")
