@@ -3171,6 +3171,7 @@ dependencies = [
  "block2",
  "bytes",
  "fast_image_resize",
+ "futures-util",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-video",
@@ -3209,6 +3210,7 @@ dependencies = [
  "window-vibrancy 0.7.1",
  "windows 0.62.2",
  "xcap",
+ "zbus 5.14.0",
 ]
 
 [[package]]
@@ -8362,6 +8364,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

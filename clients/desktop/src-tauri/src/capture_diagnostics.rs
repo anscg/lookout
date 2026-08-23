@@ -42,6 +42,19 @@ pub struct CaptureEnvironment {
     /// GStreamer can find `pipewiresrc`, which is a separate package from
     /// PipeWire itself on most distros.
     pub pipewire_gst_element: Option<bool>,
+    /// Which encoder element the per-minute clips will actually be recorded
+    /// with, e.g. `x264enc`, `vah264enc`, `vp9enc`, `openh264enc`. `None`
+    /// means GStreamer found none of them and the session will fall back to
+    /// one JPEG a minute.
+    ///
+    /// This is a QUALITY probe, not an availability one, and it is the
+    /// answer to "why does my Linux timelapse look softer than the same
+    /// machine's Windows one": the candidates are not equivalent (see
+    /// clips.rs ENCODER_CANDIDATES / VP9_FALLBACK), and which one a machine
+    /// gets depends on whether `gstreamer1.0-plugins-ugly` came along with
+    /// the package — it is a Recommends, so a `dpkg -i` install or any
+    /// Fedora install does not have it.
+    pub clip_encoder: Option<String>,
 }
 
 /// Read one key out of os-release.
@@ -156,6 +169,14 @@ fn pipewire_gst_element() -> Option<bool> {
     Some(gstreamer::ElementFactory::find("pipewiresrc").is_some())
 }
 
+/// Which encoder `clips::ClipRecorder` will pick on this machine. Same
+/// probe and same order as the recorder's own, so the two can't disagree.
+#[cfg(target_os = "linux")]
+fn clip_encoder() -> Option<String> {
+    gstreamer::init().ok()?;
+    crate::clips::available_clip_encoder().map(str::to_string)
+}
+
 #[cfg(target_os = "linux")]
 async fn collect() -> CaptureEnvironment {
     let release = os_release();
@@ -183,6 +204,7 @@ async fn collect() -> CaptureEnvironment {
         portal_backends: portal_backends(),
         pipewire_running,
         pipewire_gst_element: pipewire_gst_element(),
+        clip_encoder: clip_encoder(),
     }
 }
 
@@ -210,6 +232,27 @@ mod tests {
     async fn reports_the_running_os() {
         let env = collect().await;
         assert_eq!(env.os, std::env::consts::OS);
+    }
+
+    /// The encoder the diagnostics report has to be the one the recorder
+    /// will actually use — a report that named a different element than the
+    /// clips came out of would send people to fix the wrong package.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reports_the_encoder_the_recorder_would_pick() {
+        gstreamer::init().expect("gst init");
+        let reported = clip_encoder();
+        assert_eq!(
+            reported.as_deref(),
+            crate::clips::available_clip_encoder(),
+            "diagnostics and ClipRecorder disagree about the clip encoder"
+        );
+        if let Some(name) = reported {
+            assert!(
+                gstreamer::ElementFactory::find(&name).is_some(),
+                "reported an encoder that isn't installed: {name}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -64,8 +64,10 @@ export const CREDIT_PER_CAPTURE_S = 60;
 /** Upload payload formats the server accepts on upload-url.
  *  "jpeg" is the legacy single-screenshot-per-minute payload.
  *  "webm"/"mp4" are per-minute video clips holding ~6 frames captured
- *  seconds apart (webm from Chromium/Firefox MediaRecorder; mp4 from
- *  Safari MediaRecorder and the desktop hardware encoder). The
+ *  seconds apart (webm from Chromium/Firefox MediaRecorder and from the
+ *  desktop's Linux VP9 fallback; mp4 from Safari MediaRecorder and the
+ *  desktop's H.264 encoders). Neither format is tied to a client — a
+ *  client sends whichever container the encoder it found produces. The
  *  per-minute request cadence, credit math, and rate limits are
  *  identical in all formats — a clip is still ONE capture unit.
  *  Clips are gated per session by `sessions.clips_enabled`, which defaults

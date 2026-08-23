@@ -1,15 +1,25 @@
-//! Per-minute clip recording: hardware H.264 encoding of capture-loop
-//! frames into MP4 clips — the `format=mp4` upload payload for sessions
-//! with clips enabled.
+//! Per-minute clip recording: encoding capture-loop frames into the
+//! `format=mp4` (or, on the Linux VP9 fallback, `format=webm`) upload
+//! payload for sessions with clips enabled.
 //!
 //! One `ClipRecorder` lives per upload interval: the capture loop pushes a
 //! frame every `frameIntervalMs` (server-authoritative, 10s = 6/min), and
-//! at the upload tick `finish()` produces the MP4 bytes. Encoding is done
-//! by the OS hardware encoder on every platform — no bundled codecs:
+//! at the upload tick `finish()` produces the container bytes plus the
+//! `ClipFormat` they are in. Encoding uses what the OS already has — no
+//! bundled codecs:
 //!
 //! - macOS:   AVAssetWriter (VideoToolbox underneath), muxes MP4 itself
 //! - Windows: Media Foundation sink writer (hardware MFT when available)
 //! - Linux:   GStreamer (already a dependency for PipeWire capture)
+//!
+//! THE CADENCE IS THE THING. Clip frames sit whole seconds apart in media
+//! time, which is nothing like the video these encoders are tuned for, and
+//! every platform has needed the same two facts spelled out to it: the real
+//! frame rate (so a per-second bitrate buys CLIP_FRAME_BYTE_BUDGET per
+//! frame) and an explicit keyframe interval (so the clip carries ONE IDR
+//! instead of reading every frame as a new scene — see
+//! CLIP_KEYFRAME_INTERVAL). Anything added here should assume an encoder
+//! will get sub-1fps wrong until told otherwise.
 //!
 //! Every error is recoverable by design: the capture loop falls back to
 //! the legacy one-JPEG-per-minute upload for that interval, so a broken
@@ -45,15 +55,68 @@ pub fn clip_bits_per_second(frame_interval_ms: u64) -> u32 {
     ((CLIP_FRAME_BYTE_BUDGET * 8 * 1000) / interval_ms).min(u32::MAX as u64) as u32
 }
 
+/// Keyframe interval handed to every encoder: far more frames than a clip
+/// can hold (MAX_FRAMES_PER_CLIP is 18), so a clip carries exactly ONE IDR.
+///
+/// Frames sit whole seconds apart in media time, and an encoder left on its
+/// own keyframe policy reads that as "every frame opens a new scene" and
+/// emits an all-IDR clip. macOS pins AVVideoMaxKeyFrameIntervalKey and
+/// Windows pins MF_MT_MAX_KEYFRAME_SPACING for exactly this reason; the
+/// GStreamer path pins the same thing here. Measured at the shipping
+/// cadence on 1080p screen content: 330 KB/frame all-IDR against 69
+/// KB/frame for one IDR plus P-frames, at identical PSNR — 4.8x the bytes
+/// for nothing, which on a stalled-upload clip (MAX_FRAMES_PER_CLIP frames)
+/// is what puts a clip over the server's MAX_CLIP_BYTES and costs the
+/// minute its clip entirely.
+const CLIP_KEYFRAME_INTERVAL: u32 = 1200;
+
+/// Container a finished clip is carrying. The desktop encoders produce MP4
+/// everywhere except the Linux VP9 fallback, and the uploader has to label
+/// the payload with the format the presigned PUT was signed for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClipFormat {
+    Mp4,
+    WebM,
+}
+
+impl ClipFormat {
+    /// `format` query value for upload-url, and the `CaptureFormat` the
+    /// server echoes back. Mirrors @lookout/shared's CAPTURE_FORMATS.
+    pub fn upload_format(self) -> &'static str {
+        match self {
+            ClipFormat::Mp4 => "mp4",
+            ClipFormat::WebM => "webm",
+        }
+    }
+
+    /// Mirrors CAPTURE_FORMAT_CONTENT_TYPES. The presigned PUT is signed
+    /// with this and confirm re-validates it, so the two must agree.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            ClipFormat::Mp4 => "video/mp4",
+            ClipFormat::WebM => "video/webm",
+        }
+    }
+}
+
 /// A finished clip ready for upload.
 pub struct FinishedClip {
-    pub mp4: Vec<u8>,
+    pub bytes: Vec<u8>,
+    pub format: ClipFormat,
     pub frame_count: u32,
     pub width: u32,
     pub height: u32,
 }
 
 /// Unique-enough temp path for an in-progress clip container.
+///
+/// Always `.mp4`, even for the Linux VP9 fallback's WebM: which container a
+/// clip lands in isn't known until the platform encoder has picked one, and
+/// AVAssetWriter is the one writer here that has been known to care what
+/// the URL is suffixed with. Nothing downstream reads this path — the bytes
+/// are handed to the uploader with their real format alongside — so a
+/// briefly mislabelled temp file is cheaper than an extension-sensitive
+/// writer failing on macOS.
 fn clip_temp_path() -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -64,7 +127,24 @@ fn clip_temp_path() -> PathBuf {
     ))
 }
 
-/// Records one clip: accepts RGBA frames, hands back MP4 bytes.
+/// The encoder element the clip recorder will use on this machine, or
+/// `None` when GStreamer can find none of them (in which case the capture
+/// loop falls back to one JPEG a minute).
+///
+/// Public because the capture diagnostics report it: the candidates differ
+/// in output quality and which one a machine gets is a packaging accident,
+/// so "which encoder am I on" is the first question to ask about a soft
+/// Linux recording. Callers must have run `gstreamer::init()`.
+#[cfg(target_os = "linux")]
+pub fn available_clip_encoder() -> Option<&'static str> {
+    platform::ENCODER_CANDIDATES
+        .iter()
+        .copied()
+        .find(|name| gstreamer::ElementFactory::find(name).is_some())
+}
+
+/// Records one clip: accepts RGBA frames, hands back container bytes —
+/// H.264 in MP4 on every platform except the Linux VP9 fallback's WebM.
 pub struct ClipRecorder {
     encoder: platform::Encoder,
     path: PathBuf,
@@ -139,20 +219,24 @@ impl ClipRecorder {
     pub fn finish(self) -> Result<FinishedClip, String> {
         // Hold the final duration so the last frame isn't zero-length.
         let duration_ms = self.frame_count as u64 * self.frame_interval_ms;
+        let frame_count = self.frame_count;
+        let (width, height) = (self.width, self.height);
+        let format = self.encoder.clip_format();
         let result = self.encoder.finish(duration_ms);
         let bytes = result.and_then(|()| {
             std::fs::read(&self.path).map_err(|e| format!("failed to read clip file: {e}"))
         });
         let _ = std::fs::remove_file(&self.path);
-        let mp4 = bytes?;
-        if self.frame_count == 0 || mp4.is_empty() {
+        let bytes = bytes?;
+        if frame_count == 0 || bytes.is_empty() {
             return Err("clip has no frames".into());
         }
         Ok(FinishedClip {
-            mp4,
-            frame_count: self.frame_count,
-            width: self.width,
-            height: self.height,
+            bytes,
+            format,
+            frame_count,
+            width,
+            height,
         })
     }
 
@@ -180,12 +264,37 @@ fn frame_to_bgra(frame: &DynamicImage, width: u32, height: u32) -> Vec<u8> {
         }
     }
 
-    // Rare path: mid-clip display change — normalize to the clip's fixed
-    // dimensions with a pillarboxed canvas.
     let rgba = if frame.width() == width && frame.height() == height {
         frame.to_rgba8()
+    } else if frame.width() >= width
+        && frame.height() >= height
+        && frame.width() - width <= 1
+        && frame.height() - height <= 1
+    {
+        // The clip is sized to the FIRST frame rounded down to even (H.264
+        // 4:2:0 needs even dimensions), so a capture with an odd width or
+        // height misses the exact-match path above by a single pixel, on
+        // every single frame.
+        //
+        // Scaling is the worst available answer to a one-pixel difference:
+        // `resize` preserves aspect ratio, so trimming one column rescales
+        // BOTH axes by ~0.9994 — a full-frame bilinear pass that softens
+        // every glyph and buys nothing. Measured against the source at
+        // 1920x1080, that pass alone lands at 25.6 dB, where the H.264
+        // encode downstream of it costs about 1 dB. Drop the odd row and
+        // column instead: exact pixels everywhere, one pixel of content.
+        //
+        // Linux hits this far more than the other platforms because
+        // `crop::auto_crop_black_borders` runs on PipeWire captures and can
+        // hand back any size at all.
+        frame.crop_imm(0, 0, width, height).to_rgba8()
     } else {
-        let scaled = frame.resize(width, height, image::imageops::FilterType::Triangle);
+        // Genuine mid-clip display change — normalize to the clip's fixed
+        // dimensions with a pillarboxed canvas. Lanczos3 rather than
+        // Triangle: this is a real downscale of screen content, and the
+        // capture path already pays for a quality filter for the same
+        // reason (see capture::fast_resize_rgba).
+        let scaled = frame.resize(width, height, image::imageops::FilterType::Lanczos3);
         let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
         let x = (width - scaled.width()) / 2;
         let y = (height - scaled.height()) / 2;
@@ -213,12 +322,72 @@ mod tests {
     fn va_rate_control_config_is_safe_on_foreign_elements() {
         use gstreamer as gst;
         gst::init().expect("gst init");
-        for name in ["identity", "x264enc", "openh264enc"] {
+        for name in ["identity", "x264enc", "openh264enc", "vp9enc"] {
             let Ok(elem) = gst::ElementFactory::make(name).build() else {
                 continue; // element not installed here — nothing to probe
             };
             platform::configure_va_rate_control(&elem, 320, 10_000);
+            platform::configure_va_keyframe_interval(&elem, 1200);
         }
+    }
+
+    /// A capture whose width or height is odd must reach the encoder pixel
+    /// for pixel.
+    ///
+    /// `ClipRecorder::new` rounds the clip down to even dimensions (H.264
+    /// 4:2:0), so an odd capture misses the exact-size path by one pixel on
+    /// EVERY frame. The old behaviour scaled for that, and because `resize`
+    /// preserves aspect ratio a one-column trim rescaled both axes by
+    /// ~0.9994 — a full-frame bilinear pass over every frame of every clip.
+    /// Linux reaches this most often, because `crop::auto_crop_black_borders`
+    /// runs on PipeWire captures and can hand back any size at all.
+    #[test]
+    fn odd_capture_dimensions_are_trimmed_not_resampled() {
+        // High-frequency content: a resample shows up immediately, a crop
+        // leaves the surviving pixels byte-identical.
+        let (cap_w, cap_h) = (65u32, 33u32);
+        let mut img = image::RgbaImage::new(cap_w, cap_h);
+        for y in 0..cap_h {
+            for x in 0..cap_w {
+                let v = if (x + y) % 2 == 0 { 250u8 } else { 5u8 };
+                img.put_pixel(x, y, image::Rgba([v, 255 - v, v / 2, 255]));
+            }
+        }
+        let frame = DynamicImage::ImageRgba8(img.clone());
+
+        let (clip_w, clip_h) = (cap_w & !1, cap_h & !1);
+        let bgra = frame_to_bgra(&frame, clip_w, clip_h);
+        assert_eq!(bgra.len() as u32, clip_w * clip_h * 4);
+
+        for y in 0..clip_h {
+            for x in 0..clip_w {
+                let src = img.get_pixel(x, y).0;
+                let i = ((y * clip_w + x) * 4) as usize;
+                assert_eq!(
+                    [bgra[i + 2], bgra[i + 1], bgra[i], bgra[i + 3]],
+                    src,
+                    "pixel ({x},{y}) was resampled, not trimmed"
+                );
+            }
+        }
+    }
+
+    /// A frame that really is a different size (a display change mid-clip)
+    /// still gets normalized to the clip's fixed dimensions rather than
+    /// being trimmed to nothing.
+    #[test]
+    fn a_genuine_size_change_is_still_scaled_to_fit() {
+        let frame = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1280,
+            720,
+            image::Rgba([70, 130, 180, 255]),
+        ));
+        let bgra = frame_to_bgra(&frame, 640, 360);
+        assert_eq!(bgra.len(), 640 * 360 * 4);
+        // Same aspect ratio, so it fills the canvas — the centre pixel is
+        // the source colour rather than pillarbox black.
+        let mid = ((180 * 640 + 320) * 4) as usize;
+        assert_eq!([bgra[mid + 2], bgra[mid + 1], bgra[mid]], [70, 130, 180]);
     }
 
     /// Full round-trip through the real OS encoder: synthetic frames in,
@@ -242,17 +411,51 @@ mod tests {
         }
         let clip = recorder.finish().expect("finish clip");
 
+        // Which encoder a machine has decides the container, and that is a
+        // packaging accident rather than a choice — say which one this run
+        // actually exercised so a green test isn't ambiguous about it.
+        #[cfg(target_os = "linux")]
+        eprintln!(
+            "[clip test] encoder={:?} format={:?} {} bytes / {} frames",
+            available_clip_encoder(),
+            clip.format,
+            clip.bytes.len(),
+            clip.frame_count
+        );
+        #[cfg(not(target_os = "linux"))]
+        eprintln!(
+            "[clip test] format={:?} {} bytes / {} frames",
+            clip.format,
+            clip.bytes.len(),
+            clip.frame_count
+        );
+
         assert_eq!(clip.frame_count, 5);
         assert_eq!(clip.width, 640);
         assert_eq!(clip.height, 360);
-        assert!(clip.mp4.len() > 500, "suspiciously small mp4: {}B", clip.mp4.len());
-        assert_eq!(&clip.mp4[4..8], b"ftyp", "not an MP4 container");
+        assert!(
+            clip.bytes.len() > 500,
+            "suspiciously small clip: {}B",
+            clip.bytes.len()
+        );
+        // The container has to be the one the payload will claim to be, or
+        // the presigned PUT's content type won't match what lands in R2.
+        match clip.format {
+            ClipFormat::Mp4 => {
+                assert_eq!(&clip.bytes[4..8], b"ftyp", "not an MP4 container")
+            }
+            ClipFormat::WebM => assert_eq!(
+                &clip.bytes[0..4],
+                &[0x1A, 0x45, 0xDF, 0xA3],
+                "not a Matroska/WebM container"
+            ),
+        }
 
         // Deep verification when ffprobe is on the machine (dev boxes, CI).
         let probe = std::process::Command::new("ffprobe").arg("-version").output();
         if probe.is_ok() {
             let path = clip_temp_path();
-            std::fs::write(&path, &clip.mp4).unwrap();
+            std::fs::write(&path, &clip.bytes).unwrap();
             let out = std::process::Command::new("ffprobe")
                 .args([
                     "-v", "error",
@@ -266,23 +469,39 @@ mod tests {
                 .expect("ffprobe run");
             let _ = std::fs::remove_file(&path);
             let stdout = String::from_utf8_lossy(&out.stdout);
+            // The codec has to match the container the payload claims, or
+            // the worker gets a file whose extension lies about its
+            // contents. Which of the two a machine produces depends on
+            // which encoder it has (see the Linux ENCODER_CANDIDATES), so
+            // the test asserts the pairing rather than a fixed codec.
+            let expected_codec = match clip.format {
+                ClipFormat::Mp4 => "h264",
+                ClipFormat::WebM => "vp9",
+            };
             assert!(
-                stdout.contains("h264"),
-                "expected h264 stream, got: {stdout}"
+                stdout.contains(expected_codec),
+                "expected {expected_codec} stream for {:?}, got: {stdout}",
+                clip.format
             );
             assert!(
                 stdout.trim().ends_with(",5"),
                 "expected 5 packets, got: {stdout}"
             );
 
-            // GOP shape: exactly ONE keyframe. Frames are seconds apart in
-            // media time, so a default max-keyframe-interval-duration makes
-            // the encoder emit ALL-keyframe clips — which rations the
-            // bitrate budget across 20 I-frames and produces uniformly soft
-            // output (~20KB/frame). One IDR + cheap P-frames is the shape
-            // that lets the keyframe stay crisp.
+            // GOP shape: exactly ONE keyframe (see CLIP_KEYFRAME_INTERVAL).
+            // Frames sit seconds apart in media time, so every encoder here
+            // reads them as scene changes and emits an ALL-keyframe clip
+            // unless told not to. Measured on Linux before the interval was
+            // pinned: 330 KB/frame all-IDR against 69 KB/frame with one IDR,
+            // at identical PSNR — 4.8x the bytes, which is what pushes a
+            // MAX_FRAMES_PER_CLIP-length clip past the server's
+            // MAX_CLIP_BYTES and costs the minute its clip.
+            //
+            // Note this needs BOTH a large keyframe interval and scene-cut
+            // detection off: with the interval alone, x264 still emitted
+            // 6/6 keyframes on content that changed between frames.
             let path2 = clip_temp_path();
-            std::fs::write(&path2, &clip.mp4).unwrap();
+            std::fs::write(&path2, &clip.bytes).unwrap();
             let frames_out = std::process::Command::new("ffprobe")
                 .args([
                     "-v", "error",
@@ -376,7 +595,7 @@ mod tests {
             let mut r = ClipRecorder::new(1280, 720, 10_000).expect("init");
             for i in 0..7 { r.push_frame(&frame(c * 7 + i)).expect("push"); }
             let clip = r.finish().expect("finish");
-            assert!(!clip.mp4.is_empty());
+            assert!(!clip.bytes.is_empty());
         }
         let after = rss_kb();
 
@@ -467,7 +686,7 @@ mod tests {
         for _ in 0..CLIPS {
             let mut r = ClipRecorder::new(1920, 1080, 10_000).expect("init");
             for f in &frames { r.push_frame(f).expect("push"); }
-            bytes += r.finish().expect("finish").mp4.len();
+            bytes += r.finish().expect("finish").bytes.len();
         }
         let per_clip = t0.elapsed().as_secs_f64() * 1000.0 / f64::from(CLIPS);
         let per_frame = per_clip / frames.len() as f64;
@@ -701,6 +920,12 @@ mod platform {
                     started: false,
                 })
             })
+        }
+
+        /// Both of the OS writers here mux MP4 directly; only the Linux
+        /// GStreamer path has a second container (see its ENCODER_CANDIDATES).
+        pub fn clip_format(&self) -> super::ClipFormat {
+            super::ClipFormat::Mp4
         }
 
         pub fn append_bgra_frame(
@@ -1024,6 +1249,12 @@ mod platform {
             }
         }
 
+        /// Both of the OS writers here mux MP4 directly; only the Linux
+        /// GStreamer path has a second container (see its ENCODER_CANDIDATES).
+        pub fn clip_format(&self) -> super::ClipFormat {
+            super::ClipFormat::Mp4
+        }
+
         pub fn append_bgra_frame(
             &mut self,
             bgra: &[u8],
@@ -1134,25 +1365,63 @@ mod platform {
     /// IS the only one installed, `configure_va_rate_control` steers it off
     /// those defaults.
     ///
-    /// PACKAGING: none of these are guaranteed present, and they live in
-    /// different packages from the ones the pipeline's other elements need.
-    /// The full Linux runtime set, declared in tauri.conf.json's
-    /// `bundle.linux`:
+    /// PACKAGING: none of the H.264 encoders is guaranteed present, and they
+    /// live in different packages from the ones the pipeline's other
+    /// elements need. The full Linux runtime set, declared in
+    /// tauri.conf.json's `bundle.linux`:
     ///
     ///   pipewiresrc    gstreamer1.0-pipewire      (capture — see pipewire.rs)
     ///   videoconvert   gstreamer1.0-plugins-base  (capture + clips)
     ///   mp4mux         gstreamer1.0-plugins-good
+    ///   vp9enc/webmmux gstreamer1.0-plugins-good  (the guaranteed fallback)
     ///   h264parse      gstreamer1.0-plugins-bad
     ///   x264enc        gstreamer1.0-plugins-ugly  (Recommends, not Depends)
     ///
-    /// The encoder is deliberately a soft dependency: -ugly carries GPL x264,
-    /// and gstreamer1-plugins-ugly isn't in Fedora proper at all, so a hard
+    /// x264 is deliberately a soft dependency: -ugly carries GPL x264, and
+    /// gstreamer1-plugins-ugly isn't in Fedora proper at all, so a hard
     /// dependency would either impose that licence or make the package
-    /// uninstallable. Missing it is survivable — `ClipRecorder::new` fails,
+    /// uninstallable. That compromise is why `vp9enc` sits above
+    /// `openh264enc` in the list — see VP9_FALLBACK.
+    pub(super) const ENCODER_CANDIDATES: &[&str] = &[
+        "x264enc",
+        "vah264enc",
+        "vaapih264enc",
+        // Guaranteed present (plugins-good is a hard Depends), and clearly
+        // better than openh264 — see VP9_FALLBACK.
+        "vp9enc",
+        "openh264enc",
+    ];
+
+    /// WHY VP9 SITS ABOVE openh264.
+    ///
+    /// `gstreamer1.0-plugins-ugly` is only a *Recommends* on the .deb, and
+    /// the .rpm doesn't ask for x264 at all. So a `dpkg -i` of the
+    /// downloaded package, any `--no-install-recommends` install, and every
+    /// Fedora install land on the last entry in this list — and openh264 is
+    /// a real-time video-call encoder: Constrained Baseline, 4:2:0 only, no
+    /// useful quality knobs. Measured on 1080p dense-text screen content at
+    /// the shipping cadence, against x264 on the same frames:
+    ///
+    ///     x264enc      74.8 KB/frame   luma 38.56 dB   rgb 37.48 dB
+    ///     vp9enc       27.8 KB/frame   luma 38.16 dB   rgb 35.64 dB
+    ///     openh264enc  40.7 KB/frame   luma 37.33 dB   rgb 34.96 dB
+    ///
+    /// openh264 is 1.2 dB down on luma and 2.5 dB down overall, and no
+    /// combination of usage-type / rate-control / qp-max moves it (all were
+    /// swept; `usage-type=screen` makes it *worse*). VP9 lands within 0.4 dB
+    /// of x264 on luma for a third of the bytes, ships in
+    /// gstreamer1.0-plugins-good — already a hard dependency — and is
+    /// BSD-licensed, so nothing about the packaging compromise changes.
+    ///
+    /// The clip goes up as WebM rather than MP4. That is a format the server
+    /// has always accepted (`CAPTURE_FORMATS` in @lookout/shared) and the
+    /// worker demuxes with ffmpeg like any other clip; it is what every
+    /// Firefox and older-Chromium browser client already uploads.
+    ///
+    /// Missing every entry is still survivable: `ClipRecorder::new` fails,
     /// the interval falls back to a JPEG, and after MAX_CLIP_ENCODER_FAILURES
-    /// the loop stops trying. A user with no encoder gets the legacy
-    /// one-frame-per-minute recording rather than a broken app.
-    const ENCODER_CANDIDATES: &[&str] = &["x264enc", "vah264enc", "vaapih264enc", "openh264enc"];
+    /// the loop stops trying.
+    pub(super) const VP9_FALLBACK: &str = "vp9enc";
 
     /// Quantizer for the VA encoders' constant-QP mode. H.264 QP 23 at
     /// 1080p screen content lands in the same visual class as the JPEG-q85
@@ -1219,12 +1488,29 @@ mod platform {
         }
     }
 
+    /// Pin a VA encoder's keyframe interval, the same way the parse string
+    /// pins x264's — see CLIP_KEYFRAME_INTERVAL for why every encoder here
+    /// needs it.
+    ///
+    /// Introspection-guarded for the same reason
+    /// `configure_va_rate_control` is: `vah264enc` calls this `key-int-max`
+    /// and the legacy `vaapih264enc` calls it `keyframe-period`, each
+    /// element installs only its own spelling, and naming the wrong one in
+    /// the parse_launch string would fail pipeline creation outright rather
+    /// than degrade.
+    pub(super) fn configure_va_keyframe_interval(enc: &gst::Element, keyint: u32) {
+        if !set_uint_prop_clamped(enc, "key-int-max", keyint as u64) {
+            set_uint_prop_clamped(enc, "keyframe-period", keyint as u64);
+        }
+    }
+
     pub struct Encoder {
         pipeline: gst::Pipeline,
         appsrc: AppSrc,
         width: u32,
         height: u32,
         frame_interval_ms: u64,
+        format: super::ClipFormat,
     }
 
     unsafe impl Send for Encoder {}
@@ -1251,29 +1537,58 @@ mod platform {
             let interval_ms = frame_interval_ms.max(1);
             gst::init().map_err(|e| format!("gst init failed: {e}"))?;
 
-            let encoder_name = ENCODER_CANDIDATES
-                .iter()
-                .find(|name| gst::ElementFactory::find(name).is_some())
-                .ok_or("no H.264 encoder element available")?;
+            let encoder_name =
+                super::available_clip_encoder().ok_or("no video encoder element available")?;
 
-            // x264enc wants kbit/s; the VA encoders take kbps too;
-            // openh264enc uses bps. x264enc's default `medium` preset burns
-            // 5-10x the CPU this job needs — superfast + zerolatency keeps
-            // the software fallback cheap at screen-recording quality.
-            let encoder_props = match *encoder_name {
-                "openh264enc" => format!("bitrate={bitrate}"),
-                "x264enc" => format!(
-                    "bitrate={} speed-preset=superfast tune=zerolatency",
-                    (bitrate / 1000).max(1)
+            let kbps = (bitrate / 1000).max(1);
+            let keyint = super::CLIP_KEYFRAME_INTERVAL;
+
+            // Rate units differ per element: x264enc and the VA encoders
+            // take kbit/s, openh264enc and vp9enc take bit/s. Every one of
+            // them also needs its keyframe interval pinned — left alone
+            // they read 10-seconds-apart frames as one scene change after
+            // another and emit an all-IDR clip (see CLIP_KEYFRAME_INTERVAL).
+            //
+            // x264enc's default `medium` preset burns 5-10x the CPU this job
+            // needs. Measured at this cadence on 1080p screen content,
+            // superfast/veryfast/medium all land within 0.02 dB of each
+            // other (38.54 / 38.55 / 38.56 luma) because the 8-bit
+            // RGB->YUV round trip, not the encoder, is what caps quality
+            // here — so the cheap preset stays. `scenecut=0` alongside the
+            // pinned interval makes the GOP deterministic, matching the
+            // worker's own `-sc_threshold 0` on every compile encode.
+            let encoder_props = match encoder_name {
+                "openh264enc" => format!(
+                    "bitrate={bitrate} gop-size={keyint} scene-change-detection=false"
                 ),
-                _ => format!("bitrate={}", (bitrate / 1000).max(1)),
+                "x264enc" => format!(
+                    "bitrate={kbps} speed-preset=superfast tune=zerolatency \
+                     key-int-max={keyint} option-string=\"scenecut=0\""
+                ),
+                "vp9enc" => format!(
+                    "target-bitrate={bitrate} keyframe-max-dist={keyint} \
+                     end-usage=vbr deadline=1000000 threads=4"
+                ),
+                // The VA encoders spell their keyframe interval two
+                // different ways and only install the property their driver
+                // supports, so it is set by introspection below rather than
+                // here — an unknown property in a parse_launch string fails
+                // pipeline creation outright.
+                _ => format!("bitrate={kbps}"),
+            };
+
+            // VP9 rides in WebM; everything else is H.264 in MP4.
+            let (format, muxer_chain) = if encoder_name == VP9_FALLBACK {
+                (super::ClipFormat::WebM, "webmmux")
+            } else {
+                (super::ClipFormat::Mp4, "h264parse ! mp4mux")
             };
 
             let desc = format!(
                 "appsrc name=src is-live=false format=time \
                  caps=video/x-raw,format=BGRA,width={width},height={height},framerate=1000/{interval_ms} \
                  ! videoconvert ! {encoder_name} name=enc {encoder_props} \
-                 ! h264parse ! mp4mux ! filesink location=\"{}\"",
+                 ! {muxer_chain} ! filesink location=\"{}\"",
                 path.to_string_lossy()
             );
             let pipeline = gst::parse::launch(&desc)
@@ -1283,7 +1598,8 @@ mod platform {
 
             if encoder_name.starts_with("va") {
                 if let Some(enc) = pipeline.by_name("enc") {
-                    configure_va_rate_control(&enc, (bitrate / 1000).max(1), interval_ms);
+                    configure_va_rate_control(&enc, kbps, interval_ms);
+                    configure_va_keyframe_interval(&enc, keyint);
                 }
             }
 
@@ -1303,7 +1619,12 @@ mod platform {
                 width,
                 height,
                 frame_interval_ms: interval_ms,
+                format,
             })
+        }
+
+        pub fn clip_format(&self) -> super::ClipFormat {
+            self.format
         }
 
         pub fn append_bgra_frame(

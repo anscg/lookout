@@ -1808,11 +1808,16 @@ impl UploadPayload {
         }
     }
 
-    fn mp4(clip: clips::FinishedClip, preview_base64: String) -> Self {
+    /// A per-minute clip. The container is whatever the platform encoder
+    /// produced — MP4 everywhere except the Linux VP9 fallback's WebM — and
+    /// the granted format has to match the content type the presigned PUT
+    /// was signed with, so both come off the clip rather than being
+    /// hardcoded here.
+    fn clip(clip: clips::FinishedClip, preview_base64: String) -> Self {
         Self {
-            bytes: bytes::Bytes::from(clip.mp4),
-            content_type: "video/mp4",
-            format: Some("mp4"),
+            bytes: bytes::Bytes::from(clip.bytes),
+            content_type: clip.format.content_type(),
+            format: Some(clip.format.upload_format()),
             frame_count: Some(clip.frame_count),
             width: clip.width,
             height: clip.height,
@@ -3297,7 +3302,7 @@ async fn capture_loop_task(
                     match clip {
                         Some(c) => {
                             match upload_and_confirm(
-                                UploadPayload::mp4(c, jpeg_base64),
+                                UploadPayload::clip(c, jpeg_base64),
                                 task_captured_at.as_deref(),
                                 &task_config,
                                 &task_app,

@@ -30,6 +30,13 @@ export interface CaptureEnvironment {
   portalBackends: string[];
   pipewireRunning: boolean | null;
   pipewireGstElement: boolean | null;
+  /** GStreamer element the per-minute clips are encoded with on this
+   *  machine (`x264enc`, `vah264enc`, `vp9enc`, `openh264enc`), or null when
+   *  none is installed and the session records one JPEG a minute. The
+   *  candidates are not equal in quality, and which one a machine gets is a
+   *  packaging accident, so this is the first thing to check when a Linux
+   *  recording looks softer than the same machine's on another OS. */
+  clipEncoder: string | null;
 }
 
 export interface CaptureDiagnosis {
@@ -359,6 +366,7 @@ export function buildCaptureReport(
     lines.push(`portal backends: ${env.portalBackends.length > 0 ? env.portalBackends.join(", ") : "none found"}`);
     lines.push(`pipewire running: ${fmt(env.pipewireRunning)}`);
     lines.push(`pipewiresrc element: ${fmt(env.pipewireGstElement)}`);
+    lines.push(`clip encoder: ${env.clipEncoder ?? "none (recording one JPEG per minute)"}`);
     lines.push("");
   }
   lines.push(getReport(raw));

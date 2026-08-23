@@ -79,6 +79,7 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
   let tmpDir: string;
   let jpegPath: string;
   let webmPath: string;
+  let vp9Path: string;
   let mp4Path: string;
 
   beforeAll(async () => {
@@ -114,6 +115,23 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
       { timeout: 120_000 },
     );
 
+    // Clip unit: VP9/WebM. The desktop client's Linux fallback, for the
+    // (common) machines with no x264 encoder installed — same container as
+    // the browser's VP8 but a different codec, and the worker must not care
+    // which. 6 frames over 60s, the shipping desktop cadence.
+    vp9Path = path.join(tmpDir, "unit_clip_vp9.webm");
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-f", "lavfi",
+        "-i", "testsrc2=size=1620x1080:rate=1/10:duration=60",
+        "-c:v", "libvpx-vp9",
+        "-b:v", "320k",
+        "-y", vp9Path,
+      ],
+      { timeout: 120_000 },
+    );
+
     // Clip unit: H.264/MP4 at a DIFFERENT resolution — Safari's format,
     // and simulates a mid-session display change. 12 frames over 60s.
     mp4Path = path.join(tmpDir, "unit_clip.mp4");
@@ -140,6 +158,11 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
     expect(await probeFrameCount(seg)).toBe(SEGMENT_FPS);
   }, 120_000);
 
+  it("normalizes a VP9 webm clip to exactly one second of 30fps video", async () => {
+    const seg = await buildSegment(tmpDir, 3, vp9Path, "webm");
+    expect(await probeFrameCount(seg)).toBe(SEGMENT_FPS);
+  }, 120_000);
+
   it("normalizes an H.264 mp4 clip to exactly one second of 30fps video", async () => {
     const seg = await buildSegment(tmpDir, 2, mp4Path, "mp4");
     expect(await probeFrameCount(seg)).toBe(SEGMENT_FPS);
@@ -147,11 +170,14 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
 
   it("stream-copy concatenates a mixed session into a coherent MP4", async () => {
     // Same order a real mixed session could produce: clip, jpeg fallback,
-    // clip in another format/resolution.
+    // clip in another format/resolution, clip in another codec. Every
+    // combination has to copy-concat, since one session can switch payload
+    // between minutes (encoder failure, and now codec availability).
     const segments = [
       await buildSegment(tmpDir, 10, webmPath, "webm"),
       await buildSegment(tmpDir, 11, jpegPath, "jpeg"),
       await buildSegment(tmpDir, 12, mp4Path, "mp4"),
+      await buildSegment(tmpDir, 13, vp9Path, "webm"),
     ];
     const listPath = path.join(tmpDir, "segments.txt");
     await fs.writeFile(
@@ -173,8 +199,8 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
     );
 
     // 3 units → exactly 3 seconds, 90 frames, one decodable H.264 stream.
-    expect(await probeFrameCount(outPath)).toBe(3 * SEGMENT_FPS);
-    expect(await probeDurationSeconds(outPath)).toBeCloseTo(3, 1);
+    expect(await probeFrameCount(outPath)).toBe(segments.length * SEGMENT_FPS);
+    expect(await probeDurationSeconds(outPath)).toBeCloseTo(segments.length, 1);
 
     // The copied stream must actually DECODE end to end (a bad splice can
     // still carry a plausible frame count).
