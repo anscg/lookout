@@ -9,7 +9,7 @@
 //! link-time dependency on libgbm.
 
 use std::ffi::CString;
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_int, c_void};
 
 // GBM constants (from <gbm.h>)
 const GBM_BO_USE_RENDERING: u32 = 1 << 2;

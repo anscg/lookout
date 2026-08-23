@@ -42,7 +42,7 @@ import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.j
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 import { getApiBase } from "./serverConfig.js";
 import { HeaderBar } from "./components/HeaderBar.js";
-import { useBackdropState, useDesktopAppearance } from "./linuxChrome.js";
+import { useBackdropState, useBackgroundBlur, useDesktopAppearance } from "./linuxChrome.js";
 import { isLinux } from "./platform.js";
 import { HeaderNavProvider, type HeaderNav } from "./headerNav.js";
 import { useWindowFrameState } from "./components/WindowResizeHandles.js";
@@ -569,6 +569,9 @@ function MainWindowApp() {
   // Fixed size hints don't stop a tiling WM sizing this window, so its frame
   // has to collapse under one just as the editor's does.
   useWindowFrameState();
+  // Blur behind the window where the compositor offers it. A no-op — and an
+  // opaque window — everywhere it doesn't.
+  useBackgroundBlur();
   // Listen for native menu navigation events
   useEffect(() => {
     let unlisten: (() => void) | undefined;

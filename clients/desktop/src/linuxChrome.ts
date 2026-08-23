@@ -85,11 +85,14 @@ export const WINDOW_RADIUS = 12;
  * window is still undecorated, and the extensions in question do nothing
  * about titlebars.
  *
- * The culprits are the Rounded Window Corners family of GNOME extensions,
- * which round and shade every window from its real edge — 40px outside
- * ours — so the two frames nest with a band of desktop showing between
- * them. See `shell_draws_window_frame` in desktop_appearance.rs, which is
- * what decides this.
+ * The culprits are compositors that frame every window themselves —
+ * Hyprland, niri, the tiling ones — and the Rounded Window Corners family
+ * of GNOME extensions, which do it to a session that otherwise wouldn't.
+ * Either way the frame is drawn from the window's real edge, 40px outside
+ * ours, so the two nest with a band of desktop showing between them. A
+ * tiler also sizes the window, so there the margin comes out of the app
+ * instead. See `shell_draws_window_frame` in desktop_appearance.rs, which
+ * is what decides this.
  *
  * Read off a global rather than fetched over IPC, and deliberately so. The
  * frame is painted on the very first frame (index.html), and the native
@@ -301,6 +304,42 @@ const ADWAITA_CSS = `
   }
   html.os-linux.lookout-backdrop .lookout-headerbar {
     opacity: 0.55;
+  }
+
+  /* Background blur, on the compositors that offer it — niri and KDE today.
+     See useBackgroundBlur below and background_blur.rs: the class arrives
+     only once LOOKOUT_WINDOW_BLUR is set and the compositor has actually
+     been handed a region and agreed to blur it. A desktop without the protocol, GNOME's default session very
+     much included, never reaches these rules and stays exactly as opaque as
+     it was. Nothing here is keyed on which compositor it is.
+
+     The plate is a single semitransparent layer. Which element carries it
+     depends on whether Lookout is drawing its own frame: without one the
+     window IS the surface and <html> is the plate, with one <html> and
+     <body> have to stay clear for the shadow and #root is the plate. Two
+     stacked 80% layers would come out 96% opaque and blur nothing, so
+     exactly one of them ever paints. */
+  html.os-linux.lookout-blur {
+    --lookout-blur-plate: color-mix(in srgb, var(--color-bg-body, #242424) 80%, transparent);
+  }
+  html.os-linux.lookout-blur[data-theme="light"] {
+    --lookout-blur-plate: color-mix(in srgb, var(--color-bg-body, #fafafa) 80%, transparent);
+  }
+  html.os-linux.lookout-blur {
+    background: var(--lookout-blur-plate);
+    /* Opaque until the native side answers, so this is a fade rather than a
+       flash — and the fade only ever runs where the answer was yes. */
+    transition: background-color 200ms ease-out;
+  }
+  html.os-linux.lookout-blur body {
+    background: transparent;
+  }
+  html.os-linux.lookout-blur.lookout-csd {
+    background: transparent;
+  }
+  html.os-linux.lookout-blur.lookout-csd #root {
+    background: var(--lookout-blur-plate);
+    transition: background-color 200ms ease-out, box-shadow 160ms ease-out;
   }
 `;
 
@@ -620,6 +659,124 @@ export function useBackdropState(): void {
       cancelled = true;
       if (unlisten) unlisten();
       document.documentElement.classList.remove("lookout-backdrop");
+    };
+  }, []);
+}
+
+/**
+ * Hand the compositor the region behind which it should blur, and report
+ * whether it is actually doing it.
+ *
+ * False for X11, for every compositor without `ext-background-effect-v1`,
+ * and for a window that isn't mapped yet — see background_blur.rs, which
+ * answers by trying rather than by recognising a desktop.
+ */
+async function syncBackgroundBlur(inset: number, radius: number): Promise<boolean> {
+  if (!isLinux) return false;
+  try {
+    return await invoke<boolean>("sync_background_blur", { inset, radius });
+  } catch (e) {
+    // A window that stays opaque is the status quo, not a failure worth
+    // surfacing.
+    console.warn("[blur] could not sync the blur region:", e);
+    return false;
+  }
+}
+
+/**
+ * The visible window's corner radius right now, in px.
+ *
+ * Read back off the custom property rather than tracked separately, because
+ * that property is what the corners are actually drawn from: the theme feeds
+ * it, and a snapped window overrides it to 0. Reading the same value the
+ * paint uses is what stops the blurred shape and the painted one from
+ * drifting apart.
+ */
+function currentWindowRadius(): number {
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue("--lookout-window-radius")
+    .trim();
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : WINDOW_RADIUS;
+}
+
+/**
+ * Keep the window's blurred area matching its visible one, and mark the
+ * document when the compositor is blurring.
+ *
+ * Off unless `LOOKOUT_WINDOW_BLUR=1` is in the environment — the feature is
+ * new, and it is the one thing in the app that shares a Wayland connection
+ * with GTK. The switch lives on the native side, so this hook does not test
+ * for it: it asks, and an unset variable is simply one more reason for the
+ * answer to be no.
+ *
+ * The class is the *result*, never a prediction: `.lookout-blur` goes on
+ * after the native side reports a region attached, and comes straight back
+ * off if a later sync says no. That ordering is the whole safety property —
+ * a session without the protocol never gets a translucent window, so a
+ * default GNOME setup looks exactly as it does today.
+ *
+ * Re-synced on two signals, both of which move the visible window inside its
+ * surface: a resize, and the frame collapsing when the window manager takes
+ * over sizing (`useWindowFrameState` toggles `.lookout-snapped`, and a
+ * maximized window has no 40px frame and no rounded corners to blur inside).
+ */
+export function useBackgroundBlur(): void {
+  useEffect(() => {
+    if (!isLinux) return;
+
+    const root = document.documentElement;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const sync = async () => {
+      // Both numbers come from the classes the CSS is keyed on, so the
+      // region cannot describe a window shape different from the painted
+      // one. No frame drawn (a shell or compositor is drawing it) and a
+      // window the WM has sized both mean the surface IS the visible window.
+      const framed =
+        root.classList.contains("lookout-csd") && !root.classList.contains("lookout-snapped");
+      const inset = framed ? WINDOW_MARGIN : 0;
+      const blurred = await syncBackgroundBlur(inset, framed ? currentWindowRadius() : 0);
+      if (cancelled) return;
+      root.classList.toggle("lookout-blur", blurred);
+    };
+
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void sync(); }, 120);
+    };
+
+    void sync();
+
+    // The frame state is applied by another hook on the same resize, and the
+    // two are not ordered against each other — so watch for the class
+    // instead of racing it. Only a change to the classes this reads counts,
+    // or toggling `.lookout-blur` below would retrigger this forever.
+    let framing = "";
+    const readFraming = () =>
+      `${root.classList.contains("lookout-csd")}:${root.classList.contains("lookout-snapped")}`;
+    framing = readFraming();
+    const observer = new MutationObserver(() => {
+      const next = readFraming();
+      if (next === framing) return;
+      framing = next;
+      schedule();
+    });
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow().onResized(schedule).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      observer.disconnect();
+      if (unlisten) unlisten();
+      root.classList.remove("lookout-blur");
     };
   }, []);
 }

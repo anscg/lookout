@@ -113,6 +113,24 @@ zbus = { version = "5", features = ["tokio"] }
 # links against — a different gtk would give us a second, incompatible
 # ApplicationWindow type and gtk_window() would stop unifying.
 gtk = "0.18"
+# dlopen/dlsym for the GBM probe (gbm_probe.rs), so asking libgbm whether it
+# can allocate a buffer costs us a runtime lookup instead of a link-time
+# dependency on libgbm. Already in the tree several times over — this is a
+# direct dep on an existing build.
+libc = "0.2"
 gstreamer = "0.24.5"
 gstreamer-app = "0.24.5"
 gstreamer-video = "0.24.5"
+# Background blur behind the window (background_blur.rs), through
+# `ext-background-effect-v1`. All three are already in the tree via
+# xcap → libwayshot-xcap, so this is a direct dep on an existing build.
+#
+# The protocol lands in wayland-protocols 0.32.13; an older 0.32.x compiles
+# everything else here and then fails on the one module we want, so the
+# minimum is spelled out rather than left to whatever the lockfile has.
+wayland-client = "0.31"
+# `client_system` is what makes `wayland_client::backend` the libwayland-backed
+# one, and with it `Backend::from_foreign_display` — the whole reason this
+# works at all, since the display we attach to is GDK's, not ours.
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }

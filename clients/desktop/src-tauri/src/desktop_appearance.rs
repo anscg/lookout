@@ -349,8 +349,8 @@ fn read_theme_colors(window: &tauri::WebviewWindow) -> Result<ThemeColors, Strin
 ///   that is temporary, or only on always-on-top windows, which Lookout is
 ///   not. Giving up our frame permanently for either is the worse trade.
 ///
-/// This list cannot be complete — see `frame_override` for the way out when
-/// it is wrong.
+/// This list cannot be complete — see `LOOKOUT_WINDOW_FRAME` in
+/// `shell_draws_window_frame` for the way out when it is wrong.
 #[cfg(any(target_os = "linux", test))]
 const SHELL_CORNER_EXTENSIONS: [&str; 4] = [
     // Upstream (`@yilozt`), "Rounded Window Corners Reborn" (`@fxgn`), and
@@ -367,27 +367,137 @@ const SHELL_CORNER_EXTENSIONS: [&str; 4] = [
     "p7-borders@",
 ];
 
-/// An explicit answer from the environment, overriding detection entirely:
-/// `LOOKOUT_WINDOW_FRAME=0` to stop Lookout drawing its own frame,
-/// `LOOKOUT_WINDOW_FRAME=1` to make it draw one regardless.
+/// Sessions whose window manager frames every window itself.
 ///
-/// `Some(true)` means Lookout should draw the frame. `None` means the
-/// variable said nothing useful, so fall through to detection.
+/// The same collision as `SHELL_CORNER_EXTENSIONS`, reached from the other
+/// direction: these compositors frame every window they manage themselves,
+/// from the window's real edge. Ours is 40px larger than it looks, so their
+/// border and shadow land 40px out from the app with a band of desktop
+/// showing in between.
 ///
-/// This exists because `SHELL_CORNER_EXTENSIONS` is a list of things we
-/// happen to know about, and that list is always going to be behind: the
-/// family is forked constantly, new implementations appear under new names,
-/// and other desktops (KWin's rounding scripts, a compositor with rounding
-/// built in) do the same thing with no extension involved at all. Someone
-/// hitting a double frame — or a missing frame because we guessed wrong —
-/// should not have to wait for a release.
+/// niri is worth spelling out, because it fails differently and worse. Its
+/// focus ring — on by default, 4px of accent blue — is painted as a solid
+/// rectangle *behind* the window rather than around it, on the stated
+/// grounds that it should show through a semitransparent one. Our frame is
+/// not semitransparent, it is transparent, so the ring is not a 4px outline
+/// there: it is a 40px slab of accent colour with the app floating in the
+/// middle of it.
+///
+/// The tilers among them collide twice over, because a tiler also chooses
+/// the window's size. The margin cannot come out of the window then, so it
+/// comes out of the app: it sits in the middle of its tile with 40px of
+/// nothing on every side, which is the worse-looking half of the bug.
+///
+/// Matched whole and case-insensitively against each name the session
+/// advertises. `XDG_CURRENT_DESKTOP` is a colon-separated list
+/// (`Hyprland`, `sway`, but also `ubuntu:GNOME`), and a substring test on
+/// it would find a window manager inside the name of anything that merely
+/// shipped alongside one.
+///
+/// Deliberately not listed, having been checked:
+/// * GNOME and KDE. Mutter and KWin draw nothing around a window that says
+///   it decorates itself, which this one does (`set_decorations(false)`) —
+///   there the frame is ours, and drawing it well is most of this module.
+/// * `wayfire`, `labwc`. Both decorate server-side, i.e. only windows that
+///   asked them to, and neither is a tiler sizing the window for us.
+///   Rounding and shadows are available in both as configuration, so a
+///   session that turns them on wants `LOOKOUT_WINDOW_FRAME=0`.
 #[cfg(any(target_os = "linux", test))]
-fn frame_override(raw: Option<&str>) -> Option<bool> {
+const SELF_DECORATING_SESSIONS: [&str; 14] = [
+    // Wayland. Every one of them borders each window it manages, and every
+    // one of them tiles by default, so it sizes the window too.
+    "hyprland",
+    "niri",
+    "sway",
+    "river",
+    "dwl",
+    // X11 tilers. No shadows to collide with, but every one of them sizes
+    // the window, which the margin cannot survive.
+    "i3",
+    "bspwm",
+    "awesome",
+    "xmonad",
+    "herbstluftwm",
+    "spectrwm",
+    "dwm",
+    "leftwm",
+    // Runs on both, under the one name.
+    "qtile",
+];
+
+/// Environment variables that name the compositor when the session doesn't.
+///
+/// A window manager launched from a session file has `XDG_CURRENT_DESKTOP`
+/// set for it. One started by hand — a line in `.xinitrc`, an `exec` at the
+/// end of a shell profile, which is how a fair share of the list above gets
+/// run — has nothing set at all, and the session reads as empty. Each of
+/// these is a socket or instance id the compositor exports for its own
+/// clients, so finding one is as good as being told the name.
+#[cfg(target_os = "linux")]
+const SESSION_MARKERS: [(&str, &str); 4] = [
+    ("HYPRLAND_INSTANCE_SIGNATURE", "Hyprland"),
+    ("SWAYSOCK", "sway"),
+    ("NIRI_SOCKET", "niri"),
+    ("I3SOCK", "i3"),
+];
+
+/// The name this session goes by, if it is one that frames its own windows.
+///
+/// Takes the raw value of one of the desktop variables: a colon-separated
+/// list of names, each of which `DESKTOP_SESSION` is allowed to write as a
+/// path to the session file rather than as a bare name.
+#[cfg(any(target_os = "linux", test))]
+fn self_decorating_desktop(raw: &str) -> Option<&str> {
+    raw.split(':')
+        .map(|name| {
+            let name = name.trim();
+            // `/usr/share/wayland-sessions/hyprland` names Hyprland.
+            name.rsplit('/').next().unwrap_or(name)
+        })
+        .find(|name| {
+            SELF_DECORATING_SESSIONS
+                .iter()
+                .any(|wm| name.eq_ignore_ascii_case(*wm))
+        })
+}
+
+/// Ask the environment, every way it might answer, whether the thing
+/// managing this window already frames it.
+#[cfg(target_os = "linux")]
+fn self_decorating_session() -> Option<String> {
+    for var in ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION"] {
+        if let Ok(raw) = std::env::var(var) {
+            if let Some(name) = self_decorating_desktop(&raw) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    SESSION_MARKERS
+        .iter()
+        .find(|(var, _)| std::env::var_os(var).is_some_and(|value| !value.is_empty()))
+        .map(|(_, name)| (*name).to_string())
+}
+
+/// The vocabulary every `LOOKOUT_*` switch on Linux answers to.
+///
+/// `None` means the variable said nothing useful — unset, empty, or a typo —
+/// which each caller reads as "you decide": fall through to detection for
+/// `LOOKOUT_WINDOW_FRAME`, stay off for `LOOKOUT_WINDOW_BLUR`.
+///
+/// Kept in one place so the switches are one thing to learn rather than
+/// several. Someone who found out that `LOOKOUT_WINDOW_FRAME=0` fixes a
+/// double frame should be able to write `LOOKOUT_WINDOW_BLUR=on` without
+/// looking anything up, and should not discover that `off` works for one and
+/// not the other.
+///
+/// Anything unrecognised is deliberately not `false`: a typo is not an
+/// instruction, and silently reading `LOOKOUT_WINDOW_FRAME=ture` as "no
+/// frame" would be worse than ignoring it.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn env_flag(raw: Option<&str>) -> Option<bool> {
     match raw?.trim().to_ascii_lowercase().as_str() {
         "0" | "false" | "off" | "no" => Some(false),
         "1" | "true" | "on" | "yes" => Some(true),
-        // Anything else is a typo, not an instruction. Detection is a better
-        // guess than whichever branch we picked for garbage.
         _ => None,
     }
 }
@@ -426,29 +536,34 @@ fn corner_extension_enabled(disable_user_extensions: bool, enabled: &[String]) -
     })
 }
 
-/// Whether the shell is already drawing this window's rounded corners and
-/// shadow, in which case Lookout must draw none of its own.
+/// Whether something else is already drawing this window's rounded corners
+/// and shadow, in which case Lookout must draw none of its own.
+///
+/// Two things can be: a compositor that frames every window itself
+/// (`SELF_DECORATING_SESSIONS` — Hyprland, niri, the tilers), or a GNOME
+/// Shell extension doing the same to a session that otherwise wouldn't
+/// (`SHELL_CORNER_EXTENSIONS`).
 ///
 /// Lookout's frame is a transparent margin reserved *inside* an
-/// over-sized window (see `WINDOW_MARGIN` in linuxChrome.ts). An extension
-/// that rounds and shades every window knows nothing about that margin, so
-/// it works from the window's real edge — and you get its rounded rectangle
+/// over-sized window (see `WINDOW_MARGIN` in linuxChrome.ts). Whatever
+/// rounds and shades every window knows nothing about that margin, so it
+/// works from the window's real edge — and you get its rounded rectangle
 /// and shadow floating 40px out from the app, with Lookout's own border and
 /// shadow nested inside. One window, decorated twice.
 ///
-/// There is no negotiating with the extension, so the frame is simply
-/// handed over: no margin, no border, no radius, no shadow, and no input
-/// shape. The header bar stays — the window is still undecorated, and the
-/// extension does nothing about titlebars.
+/// There is no negotiating with either, so the frame is simply handed over:
+/// no margin, no border, no radius, no shadow, and no input shape. The
+/// header bar stays — the window is still undecorated, and neither a
+/// compositor nor an extension does anything about titlebars.
 ///
-/// Which extensions those are is a list we maintain and cannot keep
-/// complete, so `LOOKOUT_WINDOW_FRAME` overrides the whole question — see
-/// `frame_override`.
+/// Both lists are things we happen to know about and cannot keep complete,
+/// so `LOOKOUT_WINDOW_FRAME` overrides the whole question.
 ///
 /// Answered once and cached. The window's geometry is chosen from this at
 /// startup and the webview's first-paint CSS is keyed on the same value, so
 /// a re-read that disagreed mid-session would leave the two contradicting
-/// each other; toggling the extension needs an app restart either way.
+/// each other; switching compositor or toggling the extension needs an app
+/// restart either way.
 pub fn shell_draws_window_frame() -> bool {
     static ANSWER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -460,19 +575,45 @@ pub fn shell_draws_window_frame() -> bool {
 
         #[cfg(target_os = "linux")]
         {
-            // An explicit answer wins outright, extension or no extension.
+            // An explicit answer wins outright, extension or no extension:
+            // `LOOKOUT_WINDOW_FRAME=0` to stop Lookout drawing its own frame,
+            // `=1` to make it draw one regardless.
             //
-            // Note the inversion: `frame_override` answers "should Lookout
+            // It exists because `SHELL_CORNER_EXTENSIONS` and
+            // `SELF_DECORATING_SESSIONS` are lists of things we happen to
+            // know about, and both are always going to be behind: the
+            // extension family is forked constantly, new implementations
+            // appear under new names, compositors get written, and a KWin
+            // script or a Picom rule can round and shade every window with
+            // nothing to detect at all. Someone hitting a double frame — or a
+            // missing frame because we guessed wrong — should not have to
+            // wait for a release.
+            //
+            // Note the inversion: the variable answers "should Lookout
             // draw the frame", and this function answers the opposite —
             // whether something else is drawing it, so we don't. Saying no to
             // the frame is saying yes here, and that one boolean is what
             // drops the 40px margin, the border, the shadow, the radius and
             // the input shape together.
-            if let Some(draw_our_own) = frame_override(
+            if let Some(draw_our_own) = env_flag(
                 std::env::var("LOOKOUT_WINDOW_FRAME").ok().as_deref(),
             ) {
                 eprintln!("[linux-chrome] LOOKOUT_WINDOW_FRAME says draw={draw_our_own}");
                 return !draw_our_own;
+            }
+
+            // A compositor that frames its own windows — Hyprland, niri, a
+            // wlroots tiler — is the same collision as the extensions
+            // below, minus the extension. Asked before GSettings because it
+            // is two environment reads against two subprocesses, and
+            // because none of these sessions has a GNOME Shell to ask
+            // about.
+            if let Some(session) = self_decorating_session() {
+                eprintln!(
+                    "[linux-chrome] {session} frames its own windows; \
+                     leaving the window frame to it"
+                );
+                return true;
             }
 
             let disabled = gsetting("org.gnome.shell", "disable-user-extensions")
@@ -717,26 +858,68 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_setting_overrides_whatever_we_detect() {
+    fn every_switch_reads_the_same_yeses_and_noes() {
         for raw in ["0", "false", "off", "no", "OFF", " 0 "] {
-            assert_eq!(frame_override(Some(raw)), Some(false), "{raw}");
+            assert_eq!(env_flag(Some(raw)), Some(false), "{raw}");
         }
         for raw in ["1", "true", "on", "yes", "True"] {
-            assert_eq!(frame_override(Some(raw)), Some(true), "{raw}");
+            assert_eq!(env_flag(Some(raw)), Some(true), "{raw}");
         }
     }
 
     #[test]
-    fn a_setting_we_cannot_read_falls_through_to_detection() {
-        assert_eq!(frame_override(None), None);
-        assert_eq!(frame_override(Some("")), None);
-        assert_eq!(frame_override(Some("maybe")), None);
+    fn a_switch_we_cannot_read_says_nothing_either_way() {
+        // Which each caller resolves for itself: detection for
+        // LOOKOUT_WINDOW_FRAME, off for LOOKOUT_WINDOW_BLUR.
+        assert_eq!(env_flag(None), None);
+        assert_eq!(env_flag(Some("")), None);
+        assert_eq!(env_flag(Some("maybe")), None);
     }
 
     #[test]
     fn extensions_switched_off_wholesale_cannot_be_drawing_anything() {
         let reborn = vec!["rounded-window-corners@fxgn".to_string()];
         assert!(!corner_extension_enabled(true, &reborn));
+    }
+
+    #[test]
+    fn spots_the_compositors_that_frame_their_own_windows() {
+        for desktop in ["Hyprland", "sway", "niri", "river", "dwm", "i3", "qtile"] {
+            assert!(
+                self_decorating_desktop(desktop).is_some(),
+                "{desktop} should have been recognised"
+            );
+        }
+        // The variable is a list, so a name anywhere in it counts...
+        assert_eq!(self_decorating_desktop("Hyprland:wlroots"), Some("Hyprland"));
+        // ...and DESKTOP_SESSION may name the session file rather than the
+        // session.
+        assert_eq!(
+            self_decorating_desktop("/usr/share/wayland-sessions/hyprland"),
+            Some("hyprland")
+        );
+    }
+
+    #[test]
+    fn leaves_the_frame_to_the_desktops_that_expect_us_to_draw_it() {
+        for desktop in [
+            "GNOME",
+            "ubuntu:GNOME",
+            "GNOME-Flashback:GNOME",
+            "KDE",
+            "X-Cinnamon",
+            "XFCE",
+            "",
+        ] {
+            assert!(
+                self_decorating_desktop(desktop).is_none(),
+                "{desktop} should have been left alone"
+            );
+        }
+        // Whole names only. A tool that ships with a window manager carries
+        // its name around, and is not the window manager.
+        assert!(self_decorating_desktop("i3status").is_none());
+        assert!(self_decorating_desktop("swaybg").is_none());
     }
 
     #[test]

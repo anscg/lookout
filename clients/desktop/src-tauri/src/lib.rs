@@ -1,9 +1,12 @@
+mod background_blur;
 mod capture;
 mod capture_diagnostics;
 mod clips;
 mod clock_offset;
 mod crop;
 mod desktop_appearance;
+#[cfg(target_os = "linux")]
+mod gbm_probe;
 #[cfg(target_os = "linux")]
 mod gnome_indicator;
 mod native_menu;
@@ -3641,6 +3644,17 @@ pub fn run() {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
     }
 
+    // The NVIDIA check above is a guess made from a driver name. This one
+    // is a measurement: ask GBM for a buffer and see whether it comes back.
+    // A machine that cannot allocate one cannot run WebKitGTK's DMA-BUF
+    // renderer, and every decoded video frame goes through that renderer —
+    // which is why the failure tends to show up on the first <video> rather
+    // than at launch. Runs second on purpose: the probe leaves an already
+    // set WEBKIT_DISABLE_COMPOSITING_MODE alone, so the NVIDIA case and a
+    // value the user exported both win over it.
+    #[cfg(target_os = "linux")]
+    gbm_probe::ensure_webview_can_render();
+
     // Keep _sentry_guard alive for the lifetime of the app so events flush on exit.
     let _sentry_guard = option_env!("SENTRY_DSN").map(|dsn| {
         sentry::init((dsn, sentry::ClientOptions {
@@ -3818,6 +3832,7 @@ pub fn run() {
             capture_diagnostics::capture_environment,
             desktop_appearance::desktop_appearance,
             window_shape::sync_window_frame,
+            background_blur::sync_background_blur,
             open_external_url,
             native_menu::show_add_menu,
             native_menu::prefetch_add_menu_icons,
@@ -4023,10 +4038,10 @@ pub fn run() {
                     // paint outside the content box, so without the extra room
                     // the compositor simply clips them away.
                     //
-                    // The margin drops to zero when a shell extension is
-                    // already rounding and shading every window — it would draw
-                    // around the grown window, 40px out from the app, and the
-                    // frame ends up decorated twice. See
+                    // The margin drops to zero when the compositor or a shell
+                    // extension is already rounding and shading every window —
+                    // it would draw around the grown window, 40px out from the
+                    // app, and the frame ends up decorated twice. See
                     // `shell_draws_window_frame`.
                     //
                     // The size is NOT read back from the window, and that is

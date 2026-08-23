@@ -248,6 +248,24 @@ jobs:
                 echo "depend = libsoup" >> .PKGINFO
                 echo "depend = pango" >> .PKGINFO
                 echo "depend = webkit2gtk-4.1" >> .PKGINFO
+                # GStreamer, spelled out. The .deb and .rpm both declare these
+                # (see tauri.conf.json > bundle.linux) and this list has to say
+                # the same thing in Arch's names, because Arch will not say it
+                # for us: webkit2gtk-4.1 lists gst-plugins-good, gst-plugins-bad
+                # and gst-libav as *optdepends*, so pacman never pulls them in.
+                # Without them WebKitGTK has no demuxer and no H.264 decoder,
+                # and the first <video> the app loads has nothing to play it.
+                # pacman has no "recommends", so what the .deb only recommends
+                # (x264enc, from -ugly) is a hard dependency here or it is
+                # nothing at all.
+                echo "depend = gstreamer" >> .PKGINFO
+                echo "depend = gst-plugins-base" >> .PKGINFO
+                echo "depend = gst-plugins-good" >> .PKGINFO
+                echo "depend = gst-plugins-bad" >> .PKGINFO
+                echo "depend = gst-plugins-ugly" >> .PKGINFO
+                echo "depend = gst-libav" >> .PKGINFO
+                # pipewiresrc — screen capture, same story as above.
+                echo "depend = gst-plugin-pipewire" >> .PKGINFO
                 
                 tar --zstd -cf "../lookout_${PKGVER}_${ARCH}.pkg.tar.zst" .PKGINFO *
                 cd ..

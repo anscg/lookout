@@ -7,7 +7,7 @@ import { createLookoutClient, type CutInterval } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
-import { useBackdropState, useDesktopAppearance, SHELL_DRAWS_FRAME, WINDOW_MARGIN } from "../linuxChrome.js";
+import { useBackdropState, useBackgroundBlur, useDesktopAppearance, SHELL_DRAWS_FRAME, WINDOW_MARGIN } from "../linuxChrome.js";
 import { HeaderBar } from "./HeaderBar.js";
 import { WindowResizeHandles, useWindowFrameState } from "./WindowResizeHandles.js";
 import { isLinux as IS_LINUX } from "../platform.js";
@@ -250,6 +250,7 @@ export function EditorWindow({ token }: { token: string }) {
   const [sessionName, setSessionName] = useState<string | null>(null);
   useWindowFrameState();
   useBackdropState();
+  useBackgroundBlur();
 
   // Vibrancy: the main window does this too. The webview must be
   // transparent for the material to show, so only go transparent once the
