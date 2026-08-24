@@ -616,7 +616,12 @@ session — a random token in the path, the way `sessionUrl` works. Two reasons:
 
 `panelUrl` must be `https`, except on `localhost`/`127.0.0.1` so you can
 develop your panel against a local server. Max 2048 chars, immutable after
-creation. It's returned on `GET /api/sessions/:token` and
+creation.
+
+Sending it to a Lookout that predates panels is safe: unknown fields on this
+endpoint are dropped, not rejected, so the session is created without a panel
+and the redirect hook covers the flow as before. You do not need to gate the
+field on a version check. It's returned on `GET /api/sessions/:token` and
 `GET /api/sessions/:token/status`, both token-authenticated.
 
 ### Talking to the app
@@ -688,6 +693,12 @@ your own web UI, from a background job, doesn't matter — tell the server:
 curl -X POST https://lookout.hackclub.com/api/internal/sessions/SESSION_ID/panel-resolved \
   -H "X-API-Key: your-api-key"
 ```
+
+Takes no body. If your HTTP client always sets `Content-Type: application/json`
+— most do — send `{}` rather than nothing: an empty body under a JSON content
+type is rejected by the framework before the route is reached. The internal API
+now treats that case as `{}` anyway, but a client sending `{}` works against
+every version.
 
 Idempotent, and a no-op success on a session that has no panel — so you can
 call it unconditionally wherever you mark a timelapse published, without

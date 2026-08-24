@@ -15,6 +15,37 @@ const sessionIdParamSchema = {
 };
 
 export async function internalRoutes(app: FastifyInstance) {
+  /**
+   * Treat an empty JSON body as `{}` on the internal API.
+   *
+   * Fastify rejects `Content-Type: application/json` with no body outright
+   * (FST_ERR_CTP_EMPTY_JSON_BODY, a 400 raised in the parser before any route
+   * or schema is consulted). That is a trap for every endpoint here that
+   * legitimately takes no body: a program whose HTTP client always sets a JSON
+   * content type — which is the normal way to write one — gets a 400 it cannot
+   * see the cause of. `panel-resolved` was doing exactly that, so panels were
+   * never marked resolved and the desktop app went on asking for details the
+   * user had already given.
+   *
+   * Scoped to this plugin by Fastify's encapsulation, so the client-facing and
+   * admin routes keep the stricter default.
+   */
+  app.addContentTypeParser<string>(
+    "application/json",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      if (!body || (typeof body === "string" && body.trim() === "")) {
+        done(null, {});
+        return;
+      }
+      try {
+        done(null, JSON.parse(body as string));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
+
   app.addHook("onRequest", requireApiKey);
 
   // Create a new session
