@@ -54,10 +54,20 @@ describe("isPanelUrlAcceptable", () => {
   });
 
   it("allows http on loopback, so a panel can be developed locally", () => {
-    expect(isPanelUrlAcceptable("http://localhost:3000/publish")).toBe(true);
+    // happy-dom serves the test document from localhost:3000, so 127.0.0.1 is
+    // the loopback host that is NOT our own origin.
     expect(isPanelUrlAcceptable("http://127.0.0.1:3000/publish")).toBe(true);
     // Not a look-alike host that merely starts with "localhost".
     expect(isPanelUrlAcceptable("http://localhost.evil.example/publish")).toBe(false);
+  });
+
+  it("never frames our own origin, which would defeat the sandbox entirely", () => {
+    // A same-origin frame with allow-same-origin can reach the parent's Tauri
+    // IPC, and therefore every stored device credential.
+    expect(isPanelUrlAcceptable(location.origin + "/panel")).toBe(false);
+    expect(isPanelUrlAcceptable(`http://${location.hostname}:9999/panel`)).toBe(false);
+    expect(isPanelUrlAcceptable("https://tauri.localhost/panel")).toBe(false);
+    expect(isPanelUrlAcceptable("https://anything.localhost/panel")).toBe(false);
   });
 
   it("rejects other schemes and junk", () => {
@@ -142,6 +152,23 @@ describe("parsePanelMessage", () => {
     expect(
       parsePanelMessage({ origin: ORIGIN, data: { type: "lookout:resize", height: 1400 } }, ORIGIN),
     ).toEqual({ type: "lookout:resize", height: 1400 });
+  });
+});
+
+describe("parsePanelMessage source pinning", () => {
+  const frame = { name: "panel frame" };
+  const popup = { name: "a popup the panel opened" };
+
+  it("accepts the panel frame and rejects anything else on the same origin", () => {
+    const ev = (source: unknown) => ({ origin: ORIGIN, data: { type: "lookout:done" }, source });
+    expect(parsePanelMessage(ev(frame), ORIGIN, frame)).toEqual({ type: "lookout:done" });
+    expect(parsePanelMessage(ev(popup), ORIGIN, frame)).toBeNull();
+    expect(parsePanelMessage(ev(undefined), ORIGIN, frame)).toBeNull();
+  });
+
+  it("skips the check before the frame exists, so the first resize isn't lost", () => {
+    const ev = { origin: ORIGIN, data: { type: "lookout:resize", height: 400 }, source: frame };
+    expect(parsePanelMessage(ev, ORIGIN, undefined)).toEqual({ type: "lookout:resize", height: 400 });
   });
 });
 

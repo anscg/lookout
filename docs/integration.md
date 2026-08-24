@@ -703,10 +703,29 @@ Two more things worth doing:
   instant and local; the endpoint is authoritative and covers every other
   device. They're complements, not alternatives.
 
+### Light and dark
+
+The app appends **`lookout_theme=light`** or **`lookout_theme=dark`** to your
+panel URL's query when it loads the frame. Read it and colour accordingly — the
+app follows the OS theme, so a dark-only panel is a dark slab on a light sheet.
+
+It arrives in the URL rather than by message on purpose: a `postMessage` can
+only reach you after the frame has loaded, by which point you have already
+painted, and correcting it afterwards *is* the flash. Query params are in force
+before your first byte of CSS.
+
+Only the query is touched, so your origin — and everything keyed off it — is
+unchanged. Existing params on your `panelUrl` are preserved.
+
 ### Making it look like it belongs
 
-**Paint no background.** Set `html, body { background: transparent }` and let
-the sheet be the surface — your content then sits directly on the app's own
+**Paint no background, from the very first paint.** Set
+`html, body { background: transparent }` in a stylesheet, not from script — a
+`useEffect` (or anything else that runs after mount) is one paint too late, and
+that paint is the flash. Watch for a framework default here: a global
+`html, body { background: … }` rule, a `min-height: 100vh` (which floors your
+height report so the sheet can only ever grow) or a `display: flex` on `body`
+will all need overriding for this route. Let the sheet be the surface — your content then sits directly on the app's own
 panel material instead of reading as a rectangle pasted into it. The frame is
 transparent by default, so this is just about not filling it yourself.
 

@@ -30,6 +30,7 @@
  *  - pair/start URLs must be https (http only on localhost, for dev).
  */
 
+import { invoke as rawInvoke } from "@tauri-apps/api/core";
 import { invoke } from "./logger.js";
 import { getApiBase } from "./serverConfig.js";
 import { isValidToken } from "./utils.js";
@@ -356,7 +357,12 @@ export async function completePairing(rawUrl: string): Promise<string | null> {
     throw new Error("pairing exchange returned no deviceToken");
   }
 
-  await invoke("secret_set", { key: secretKey(pending.program), value: deviceToken });
+  // rawInvoke, not the logging wrapper: this argument is a bearer credential, and
+  // the debug buffer it would land in is what users paste into support threads
+  // (and what Sentry captures as a breadcrumb). The wrapper redacts this
+  // command too — both, because the cost of being wrong here is the whole
+  // credential.
+  await rawInvoke("secret_set", { key: secretKey(pending.program), value: deviceToken });
   const links = readLinks();
   links[pending.program] = {
     program: pending.program,

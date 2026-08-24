@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { eq, sql, and, desc, inArray, isNotNull, lt } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { requireApiKey } from "../middleware/apiKey.js";
@@ -478,6 +478,34 @@ export async function internalRoutes(app: FastifyInstance) {
     },
   );
 
+  /**
+   * A session the calling key is actually entitled to write, or null.
+   *
+   * The list endpoint above already scopes by `programId`; these per-session
+   * mutations have to as well. Without it any key-holding program could re-aim
+   * another program's "Open in …" button at a page of its choosing — rendered
+   * inside the desktop app under the *other* program's name, which is a
+   * ready-made phishing primitive — or silently mark their panel resolved and
+   * strand the recording.
+   *
+   * Sessions created with the legacy global key have no `programId`, and a
+   * program key must not be able to adopt them, so they are out of reach too.
+   */
+  async function writableSession(
+    request: FastifyRequest,
+    sessionId: string,
+  ): Promise<{ id: string; panelResolvedAt: Date | null } | null> {
+    const session = await db.query.sessions.findFirst({
+      where: eq(schema.sessions.id, sessionId),
+      columns: { id: true, programId: true, panelResolvedAt: true },
+    });
+
+    if (!session) return null;
+    if (!request.programId || session.programId !== request.programId) return null;
+
+    return { id: session.id, panelResolvedAt: session.panelResolvedAt };
+  }
+
   // Mark a session's program panel as satisfied.
   //
   // Panels are shown in-app, but the user can just as well finish on the
@@ -496,9 +524,9 @@ export async function internalRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { sessionId } = request.params;
 
-      const session = await db.query.sessions.findFirst({
-        where: eq(schema.sessions.id, sessionId),
-      });
+      const session = await writableSession(request, sessionId);
+      // Deliberately 404, not 403: whether a session id exists is not
+      // something one program should learn about another's.
       if (!session) {
         return reply.code(404).send({ error: "Session not found" });
       }
@@ -546,6 +574,10 @@ export async function internalRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { sessionId } = request.params;
       const next = request.body?.viewUrl ?? null;
+
+      if (!(await writableSession(request, sessionId))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
 
       const [updated] = await db
         .update(schema.sessions)

@@ -208,8 +208,37 @@ export function getReport(headline?: string): string {
 // Logged invoke wrapper — drop-in replacement for @tauri-apps/api/core invoke
 // ---------------------------------------------------------------------------
 
+/**
+ * Commands whose arguments must never reach the log.
+ *
+ * The debug buffer is copied into support threads and its console output is a
+ * Sentry breadcrumb, so anything logged here is effectively published. These
+ * carry bearer credentials — a program's device token, which authorizes
+ * creating sessions as that user and does not expire — so the value is
+ * replaced before it is ever formatted. Redaction lives HERE rather than only
+ * at the call site so a future caller can't reintroduce the leak by using the
+ * obvious `invoke`.
+ */
+const SECRET_ARG_COMMANDS = new Set(["secret_set"]);
+
+/** Keys redacted wherever they appear, regardless of command. */
+const SECRET_ARG_KEYS = new Set(["value", "deviceToken", "token", "verifier", "code"]);
+
+function redactArgs(cmd: string, args?: Record<string, unknown>): Record<string, unknown> | "" {
+  if (!args) return "";
+  if (!SECRET_ARG_COMMANDS.has(cmd) && !Object.keys(args).some((k) => SECRET_ARG_KEYS.has(k)))
+    return args;
+
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    const secret = SECRET_ARG_COMMANDS.has(cmd) ? key === "value" : SECRET_ARG_KEYS.has(key);
+    safe[key] = secret ? "[redacted]" : value;
+  }
+  return safe;
+}
+
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  console.log(`[ipc] → ${cmd}`, args ?? "");
+  console.log(`[ipc] → ${cmd}`, redactArgs(cmd, args));
   try {
     const result = await tauriInvoke<T>(cmd, args);
     console.debug(`[ipc] ← ${cmd} ok`);

@@ -139,19 +139,25 @@ export interface SessionDetailProps {
    *  NOT fired when opening a session that is already complete. Carries the
    *  session's redirect-hook URL, if one was set at creation. */
   onComplete?: (info: { redirectUrl: string | null; panelUrl?: string | null }) => void;
-  /**
-   * Fired once when the recording is first observed to be finished and
-   * processing — i.e. the user just saved. NOT fired when opening a session
-   * that was already stopped, and NOT fired while an edit hold is active
-   * (the user is on their way to the editor; the handoff belongs after they
-   * publish from there).
+   /**
+   * Fired once per mount when the recording is over and the session is no
+   * longer being captured — saved, compiling, or already compiled.
    *
-   * Distinct from `onComplete`, which waits for the compile. A host that
-   * wants to collect something from the user should do it here instead —
-   * compiling can take many minutes and there is no reason to make anyone
-   * watch a progress bar before answering a question.
+   * Deliberately NOT gated on observing the transition. The recorder navigates
+   * here *after* it has stopped the session, so the first poll this view ever
+   * makes already says `stopped` — a transition-gated callback would never
+   * fire for the one case it exists to serve. Whether the host should act more
+   * than once is the host's business, tracked by the host.
+   *
+   * Skipped while an edit hold is active: the user is on their way to the
+   * editor, and the handoff belongs after they publish from there.
+   *
+   * Distinct from `onComplete`, which waits for the compile. A host that wants
+   * to collect something from the user should do it here instead — compiling
+   * can take many minutes and there is no reason to make anyone watch a
+   * progress bar before answering a question.
    */
-  onSaved?: (info: {
+  onRecordingFinished?: (info: {
     redirectUrl: string | null;
     panelUrl?: string | null;
     status: StatusResponse["status"];
@@ -183,7 +189,7 @@ export function SessionDetail({
   showBack = true,
   onArchive,
   onComplete,
-  onSaved,
+  onRecordingFinished,
   onEdit,
   belowVideo,
   titleAction,
@@ -223,9 +229,9 @@ export function SessionDetail({
   const completeFiredRef = useRef(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
-  const savedFiredRef = useRef(false);
-  const onSavedRef = useRef(onSaved);
-  onSavedRef.current = onSaved;
+  const finishedFiredRef = useRef(false);
+  const onRecordingFinishedRef = useRef(onRecordingFinished);
+  onRecordingFinishedRef.current = onRecordingFinished;
 
   // Fetch session info (name, createdAt) once
   useEffect(() => {
@@ -255,25 +261,17 @@ export function SessionDetail({
       const prevStatus = prevStatusRef.current;
       prevStatusRef.current = data.status;
 
-      // Just saved: the recording has ended and is now processing. Held
-      // sessions are skipped — their handoff is after the editor publishes,
-      // not while the user is still deciding what to cut.
+      // The recording is over. Held sessions are skipped — their handoff is
+      // after the editor publishes, not while the user is still deciding what
+      // to cut.
       const finishedRecording =
         data.status === "stopped" ||
         data.status === "compiling" ||
         data.status === "complete";
       const held = Boolean(data.editHoldUntil) && data.status !== "failed";
-      if (
-        finishedRecording &&
-        !held &&
-        !savedFiredRef.current &&
-        prevStatus !== null &&
-        prevStatus !== "stopped" &&
-        prevStatus !== "compiling" &&
-        prevStatus !== "complete"
-      ) {
-        savedFiredRef.current = true;
-        onSavedRef.current?.({
+      if (finishedRecording && !held && !finishedFiredRef.current) {
+        finishedFiredRef.current = true;
+        onRecordingFinishedRef.current?.({
           redirectUrl: data.redirectUrl ?? null,
           panelUrl: data.panelUrl ?? null,
           status: data.status,

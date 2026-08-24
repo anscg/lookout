@@ -917,10 +917,15 @@ function MainWindowApp() {
     url: string;
     label: string;
   } | null>(null);
+  // The owning program's display name, straight from the session. Authoritative,
+  // unlike matching a URL's origin against the registry — a program's panel can
+  // sit on a different host from the URLs it registered.
+  const [sessionProgram, setSessionProgram] = useState<{ token: string; label: string } | null>(null);
   useEffect(() => {
     if (route.page !== "session" || !route.token) {
       setPanelPrompt(null);
       setOpenIn(null);
+      setSessionProgram(null);
       return;
     }
     const token = route.token;
@@ -931,8 +936,24 @@ function MainWindowApp() {
         if (!res.ok) return;
         const data = await res.json();
         if (cancelled) return;
+        const rawProgram: string | null = data.program ?? null;
+        if (rawProgram) {
+          const known = programsRef.current.find((p) => p.name === rawProgram);
+          setSessionProgram({ token, label: known?.displayName || rawProgram });
+        }
+        else {
+          setSessionProgram(null);
+        }
+
+        // Only once the recording is actually over. A session still being
+        // captured has nothing to publish yet, so asking for its title would
+        // be nagging about work in progress — and a held one is on its way to
+        // the editor, where the ask belongs after publishing.
+        const finishedRecording = ["stopped", "compiling", "complete"].includes(data.status);
+        const held = Boolean(data.editHoldUntil) && data.status !== "failed";
+
         setPanelPrompt(
-          shouldOfferPanel(token, data.panelUrl, data.panelResolved)
+          finishedRecording && !held && shouldOfferPanel(token, data.panelUrl, data.panelResolved)
             ? { token, url: data.panelUrl, fallbackUrl: data.redirectUrl ?? null }
             : null,
         );
@@ -1032,10 +1053,14 @@ function MainWindowApp() {
             token={route.token}
             apiBaseUrl={API_BASE}
             onEdit={() => { void openEditorWindow(route.token); }}
-            onSaved={({ redirectUrl, panelUrl }) => {
-              // The recording just ended. If the program wants something,
-              // ask now rather than after the compile — the sheet sits over
-              // the progress bar and the answers land while it builds.
+            onRecordingFinished={({ redirectUrl, panelUrl }) => {
+              // The recording is over, so if the program wants something, ask
+              // now rather than after the compile — the sheet sits over the
+              // progress bar and the answers land while it builds.
+              //
+              // Fires on every visit to a finished session, not just the one
+              // where it stopped; `maybeOpenPanel` is what makes it once-only,
+              // by refusing anything the user has already dealt with.
               maybeOpenPanel(route.token, redirectUrl, panelUrl);
             }}
             onComplete={({ redirectUrl, panelUrl }) => {
@@ -1052,7 +1077,11 @@ function MainWindowApp() {
             belowVideo={
               panelPrompt && panel?.token !== panelPrompt.token && (
                 <PanelPrompt
-                  programLabel={programLabelForUrl(panelPrompt.url)}
+                  programLabel={
+                    sessionProgram?.token === panelPrompt.token
+                      ? sessionProgram.label
+                      : programLabelForUrl(panelPrompt.url)
+                  }
                   onOpen={() => openPanel(panelPrompt.token, panelPrompt.url, panelPrompt.fallbackUrl)}
                 />
               )
@@ -1260,7 +1289,11 @@ function MainWindowApp() {
         <ProgramPanel
           key={panel.token}
           url={panel.url}
-          programLabel={programLabelForUrl(panel.url)}
+          programLabel={
+            sessionProgram?.token === panel.token
+              ? sessionProgram.label
+              : programLabelForUrl(panel.url)
+          }
           programIconUrl={programIconForUrl(panel.url)}
           fallbackUrl={panel.fallbackUrl}
           onDone={() => {

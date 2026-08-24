@@ -43,12 +43,51 @@ fn write_all(app: &tauri::AppHandle, map: &HashMap<String, String>) -> Result<()
     let path = store_path(app)?;
     let tmp = path.with_extension("json.tmp");
     let raw = serde_json::to_string(map).map_err(|e| e.to_string())?;
-    fs::write(&tmp, raw).map_err(|e| format!("write secret store: {e}"))?;
-    #[cfg(unix)]
+
+    // The mode is set when the file is CREATED, not after it is written.
+    // Writing first and chmodding after leaves the credential readable for the
+    // window in between (whatever the umask allows, usually 0644), and a plain
+    // `fs::write` would happily follow a symlink or inherit the mode of a file
+    // someone else pre-created at that path.
+    //
+    // `create_new` is what closes that: it fails rather than opening an
+    // existing file or a link, so a stale temp file is cleared first and a
+    // planted one is an error instead of a hijack. The chmod failing is fatal
+    // too — silently continuing would publish the token to every local user.
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+
+        // Only ever our own leftover, since the rename below is atomic.
+        if tmp.exists() {
+            fs::remove_file(&tmp).map_err(|e| format!("clear stale secret temp: {e}"))?;
+        }
+
+        let mut file = opts
+            .open(&tmp)
+            .map_err(|e| format!("create secret store: {e}"))?;
+
+        // Belt and braces on platforms where the open mode was advisory.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("secure secret store: {e}"))?;
+        }
+
+        use std::io::Write;
+        file.write_all(raw.as_bytes())
+            .map_err(|e| format!("write secret store: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("flush secret store: {e}"))?;
     }
+
     fs::rename(&tmp, &path).map_err(|e| format!("commit secret store: {e}"))?;
     Ok(())
 }

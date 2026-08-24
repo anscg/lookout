@@ -35,9 +35,12 @@ export function OpenInProgram({
         alignItems: "center",
         gap: spacing.xs,
         maxWidth: 180,
-        padding: `4px ${spacing.sm}px`,
-        borderRadius: radii.md,
-        border: `1px solid ${colors.border.default}`,
+        // No border, no fill: this sits on the same row as the timelapse's
+        // name, and a boxed control there competes with the title instead of
+        // reading as a quiet action beside it.
+        padding: `4px ${spacing.xs}px`,
+        borderRadius: radii.sm,
+        border: "none",
         background: "transparent",
         color: colors.text.secondary,
         fontFamily: "inherit",

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Drawer } from "vaul";
 import { motion } from "motion/react";
 import { WarningCircleIcon, XIcon } from "@phosphor-icons/react";
@@ -32,6 +32,20 @@ import {
  * convenience and never the only way through.
  */
 
+/**
+ * Which way round the app currently is.
+ *
+ * `data-theme` is what the app itself keys off (App.tsx sets it from the
+ * window's theme, and Linux sets it before first paint in index.html); the
+ * media query is the fallback for the window between boot and that attribute
+ * landing.
+ */
+function currentTheme(): "light" | "dark" {
+  const explicit = document.documentElement.getAttribute("data-theme");
+  if (explicit === "light" || explicit === "dark") return explicit;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
 interface ProgramPanelProps {
   /** The session's `panelUrl` — https, program-minted, per-session. */
   url: string;
@@ -61,6 +75,24 @@ export function ProgramPanel({
   const [iconFailed, setIconFailed] = useState(false);
   const origin = panelOrigin(url);
 
+  // Tell the panel which way round the app is, in the URL rather than over
+  // postMessage. A message can only arrive after the frame has loaded, by
+  // which point it has already painted — and a dark panel on a light sheet
+  // (or the reverse) is exactly the flash we are trying to avoid. Query
+  // params are there before the first byte of CSS is applied.
+  //
+  // Only the query is touched, so the origin the sandbox and the message
+  // checks key off is unchanged.
+  const frameSrc = useMemo(() => {
+    try {
+      const parsed = new URL(url);
+      parsed.searchParams.set("lookout_theme", currentTheme());
+      return parsed.toString();
+    } catch {
+      return url;
+    }
+  }, [url]);
+
   // The sheet closes itself, then reports.
   //
   // Calling onDone/onDismiss straight away would have the host drop this
@@ -71,8 +103,14 @@ export function ProgramPanel({
   // they all animate identically.
   const [open, setOpen] = useState(true);
   const outcomeRef = useRef<"done" | "dismiss">("dismiss");
+  // Set only when WE ask to close. vaul runs onAnimationEnd for its entry
+  // animation too, and reports `false` while the content is still settling —
+  // acting on that dismissed the sheet the instant it opened, and recorded it
+  // as "the user closed this", so the panel could never be shown again.
+  const closingRef = useRef(false);
   const requestClose = useCallback((outcome: "done" | "dismiss") => {
     outcomeRef.current = outcome;
+    closingRef.current = true;
     setOpen(false);
   }, []);
 
@@ -143,10 +181,15 @@ export function ProgramPanel({
   // frame — leaving the sheet pinned at the minimum until the user happened to
   // change something. useLayoutEffect runs before the browser yields, so the
   // listener is always attached before the frame's scripts can run.
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
+
   useLayoutEffect(() => {
     if (!origin) return;
     const onMessage = (event: MessageEvent) => {
-      const msg = parsePanelMessage(event, origin);
+      // Once the frame exists, only it may drive the sheet — the sandbox allows
+      // popups, and a popup on the panel's origin would otherwise pass the
+      // origin check.
+      const msg = parsePanelMessage(event, origin, frameRef.current?.contentWindow ?? undefined);
       if (!msg) return;
       switch (msg.type) {
         case "lookout:resize":
@@ -220,9 +263,10 @@ export function ProgramPanel({
         if (!next) requestClose("dismiss");
       }}
       // Fires once the exit animation has finished, which is the only safe
-      // moment to tell the host: it unmounts us in response.
+      // moment to tell the host: it unmounts us in response. Guarded on
+      // `closingRef` because this also fires for the entry animation.
       onAnimationEnd={(isOpen) => {
-        if (isOpen) return;
+        if (isOpen || !closingRef.current) return;
         if (outcomeRef.current === "done") onDoneRef.current();
         else onDismissRef.current();
       }}
@@ -407,7 +451,8 @@ export function ProgramPanel({
             ) : (
               <>
                 <iframe
-                  src={url}
+                  ref={frameRef}
+                  src={frameSrc}
                   title={`${programLabel} panel`}
                   sandbox={PANEL_SANDBOX}
                   onLoad={() => setLoaded(true)}

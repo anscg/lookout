@@ -105,6 +105,20 @@ export function isPanelUrlAcceptable(raw: string | null | undefined): raw is str
   } catch {
     return false;
   }
+
+  // Never frame our own origin. The sandbox keeps a panel out of the app only
+  // while it is cross-origin: `allow-same-origin` on a same-origin frame is no
+  // isolation at all, and the frame could reach the parent's Tauri IPC — and
+  // therefore every stored device credential. The dev shell runs on
+  // http://localhost:1420, so without this a program could name that as its
+  // panel and walk straight in. Production serves from tauri://localhost /
+  // http://tauri.localhost, which the `.localhost` clause also covers.
+  if (typeof location !== "undefined") {
+    if (url.origin === location.origin) return false;
+    if (url.hostname === location.hostname) return false;
+  }
+  if (url.hostname === "tauri.localhost" || url.hostname.endsWith(".localhost")) return false;
+
   if (url.protocol === "https:") return true;
   return (
     url.protocol === "http:" &&
@@ -131,10 +145,15 @@ export function panelOrigin(url: string): string | null {
  * other frames, other extensions, malformed payloads.
  */
 export function parsePanelMessage(
-  event: { origin: string; data: unknown },
+  event: { origin: string; data: unknown; source?: unknown },
   expectedOrigin: string,
+  expectedSource?: unknown,
 ): PanelMessage | null {
   if (event.origin !== expectedOrigin) return null;
+  // Origin alone is not enough: the sandbox allows popups, so another window on
+  // the panel's own origin could otherwise drive the sheet. When the caller
+  // knows which frame it is listening to, require it.
+  if (expectedSource != null && event.source !== expectedSource) return null;
   const data = event.data as Record<string, unknown> | null;
   if (!data || typeof data !== "object") return null;
   switch (data.type) {
