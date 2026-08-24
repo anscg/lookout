@@ -160,6 +160,7 @@ export interface SessionDetailProps {
   onRecordingFinished?: (info: {
     redirectUrl: string | null;
     panelUrl?: string | null;
+    panelResolved?: boolean;
     status: StatusResponse["status"];
   }) => void;
   /**
@@ -274,6 +275,7 @@ export function SessionDetail({
         onRecordingFinishedRef.current?.({
           redirectUrl: data.redirectUrl ?? null,
           panelUrl: data.panelUrl ?? null,
+          panelResolved: data.panelResolved,
           status: data.status,
         });
       }

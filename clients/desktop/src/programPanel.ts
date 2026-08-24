@@ -32,6 +32,16 @@ const STATE_KEY = "lookout-panel-state";
 
 /** Messages a panel may send us. Anything else is ignored. */
 export type PanelMessage =
+  /**
+   * The panel has finished loading and is ready to be looked at.
+   *
+   * The frame's own `load` event fires when the document is done, which for
+   * anything that fetches after mount is well before there is anything to
+   * see — so waiting on `load` alone means revealing a half-built panel, and
+   * the panel putting its own spinner there means two spinners. A panel that
+   * never sends this still appears, on the `load` fallback.
+   */
+  | { type: "lookout:ready" }
   /** Content height changed; the sheet springs to match. */
   | { type: "lookout:resize"; height: number }
   /** The program finished (published, saved, whatever it does). */
@@ -65,7 +75,25 @@ export const PANEL_SANDBOX = "allow-scripts allow-forms allow-same-origin allow-
  * out here, so the only way to not show one is to never need one.
  */
 export const PANEL_MIN_HEIGHT = 220;
+/** Absolute ceiling, for a window big enough that the fraction below isn't the binding limit. */
 export const PANEL_MAX_HEIGHT = 720;
+/**
+ * How much of the window a sheet may take.
+ *
+ * A fixed pixel cap is wrong on both ends: in a small window 720px is the whole
+ * app, so the sheet swallows the thing it is supposed to sit over, and in a
+ * large one it is needlessly short. Programs size their panels for a page, not
+ * for a sheet, so this is the app's job rather than theirs.
+ */
+export const PANEL_MAX_VIEWPORT_FRACTION = 0.72;
+
+/** The tallest this sheet may be right now, given the window. */
+export function panelMaxHeight(viewportHeight: number): number {
+  return Math.max(
+    PANEL_MIN_HEIGHT,
+    Math.min(PANEL_MAX_HEIGHT, Math.round(viewportHeight * PANEL_MAX_VIEWPORT_FRACTION)),
+  );
+}
 /**
  * Hard ceiling on a reported height, so a panel bug can't ask for a
  * hundred-thousand-pixel frame. Well past any real form.
@@ -86,6 +114,16 @@ export const PANEL_SANITY_MAX_HEIGHT = 6000;
 export const PANEL_HEIGHT_SLACK = 2;
 /** A panel that hasn't loaded by now is treated as broken. */
 export const PANEL_LOAD_TIMEOUT_MS = 12_000;
+/**
+ * How long after the frame's `load` we keep waiting for `lookout:ready`.
+ *
+ * `load` fires when the document is done, which for anything that fetches after
+ * mount is before there is anything to look at — revealing then shows a
+ * half-built panel. So `ready` wins, and this is only the fallback for a panel
+ * that never sends one. Short enough not to feel stuck, long enough that a
+ * panel which does send it is never beaten to the punch.
+ */
+export const PANEL_READY_GRACE_MS = 900;
 
 // ---------------------------------------------------------------------------
 // URL validation
@@ -157,6 +195,8 @@ export function parsePanelMessage(
   const data = event.data as Record<string, unknown> | null;
   if (!data || typeof data !== "object") return null;
   switch (data.type) {
+    case "lookout:ready":
+      return { type: "lookout:ready" };
     case "lookout:done":
       return { type: "lookout:done" };
     case "lookout:cancel":

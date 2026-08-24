@@ -7,8 +7,9 @@ import { invoke } from "../logger.js";
 import {
   PANEL_HEIGHT_SLACK,
   PANEL_LOAD_TIMEOUT_MS,
-  PANEL_MAX_HEIGHT,
+  PANEL_READY_GRACE_MS,
   PANEL_MIN_HEIGHT,
+  panelMaxHeight,
   PANEL_SANDBOX,
   panelOrigin,
   parsePanelMessage,
@@ -71,6 +72,10 @@ export function ProgramPanel({
 }: ProgramPanelProps) {
   const [height, setHeight] = useState(PANEL_MIN_HEIGHT);
   const [loaded, setLoaded] = useState(false);
+  // `loaded` is the frame's document; `ready` is the panel saying it has
+  // something worth showing. We reveal on whichever we get, so a panel that
+  // never announces itself still appears.
+  const [ready, setReady] = useState(false);
   const [broken, setBroken] = useState(false);
   const [iconFailed, setIconFailed] = useState(false);
   const origin = panelOrigin(url);
@@ -165,6 +170,16 @@ export function ProgramPanel({
   // against the frame instead of the viewport.
   const [clip, setClip] = useState<HTMLDivElement | null>(null);
 
+  const [maxHeight, setMaxHeight] = useState(() =>
+    panelMaxHeight(typeof window === "undefined" ? 900 : window.innerHeight),
+  );
+  useLayoutEffect(() => {
+    const measure = () => setMaxHeight(panelMaxHeight(window.innerHeight));
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+
   // Latest callbacks without re-binding the message listener.
   const onDoneRef = useRef(onDone);
   onDoneRef.current = onDone;
@@ -192,6 +207,9 @@ export function ProgramPanel({
       const msg = parsePanelMessage(event, origin, frameRef.current?.contentWindow ?? undefined);
       if (!msg) return;
       switch (msg.type) {
+        case "lookout:ready":
+          setReady(true);
+          break;
         case "lookout:resize":
           setHeight(msg.height);
           break;
@@ -206,6 +224,17 @@ export function ProgramPanel({
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [origin]);
+
+  // `load` alone does not mean "ready to look at". Hold the spinner for a beat
+  // after it, so a panel that announces itself gets to do so before we reveal
+  // whatever it had painted by then.
+  const [graceElapsed, setGraceElapsed] = useState(false);
+  useEffect(() => {
+    if (!loaded || ready) return;
+    const id = setTimeout(() => setGraceElapsed(true), PANEL_READY_GRACE_MS);
+    return () => clearTimeout(id);
+  }, [loaded, ready]);
+  const revealed = ready || (loaded && graceElapsed);
 
   // A frame that never fires `load` (offline, DNS, a hung server) would sit
   // on a spinner forever. Give it a deadline, then offer the browser.
@@ -410,8 +439,9 @@ export function ProgramPanel({
             // false` so the first paint lands at the loading height instead of
             // unfolding from zero. Steps of a form then spring between sizes
             // rather than sliding on a fixed-duration ease.
+            data-vaul-no-drag=""
             initial={false}
-            animate={{ height: Math.min(PANEL_MAX_HEIGHT, height + PANEL_HEIGHT_SLACK) }}
+            animate={{ height: Math.min(maxHeight, height + PANEL_HEIGHT_SLACK) }}
             transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.7 }}
             style={{
               position: "relative",
@@ -452,6 +482,10 @@ export function ProgramPanel({
               <>
                 <iframe
                   ref={frameRef}
+                  // vaul treats a pointerdown anywhere in the sheet as the start
+                  // of a drag, which swallows every click before it reaches the
+                  // frame — the panel looks rendered but is completely dead.
+                  data-vaul-no-drag=""
                   src={frameSrc}
                   title={`${programLabel} panel`}
                   sandbox={PANEL_SANDBOX}
@@ -465,6 +499,9 @@ export function ProgramPanel({
                     // container above.
                     height: height + PANEL_HEIGHT_SLACK,
                     border: "none",
+                    // The sheet is the only scroll surface; a frame that scrolls
+                    // itself shows a scrollbar we cannot style from out here.
+                    overflow: "hidden",
                     // The sheet is the surface. A panel that paints no
                     // background of its own sits directly on it, so the
                     // program's content reads as part of the app instead of a
@@ -473,7 +510,7 @@ export function ProgramPanel({
                     colorScheme: "normal",
                     // Faded in so a white-flashing page doesn't strobe the
                     // sheet before its own styles land.
-                    opacity: loaded ? 1 : 0,
+                    opacity: revealed ? 1 : 0,
                     transition: "opacity 0.18s ease-out",
                   }}
                 />
@@ -482,7 +519,7 @@ export function ProgramPanel({
                     panel's, and a hard swap mid-spring reads as a flicker. */}
                 <motion.div
                   initial={{ opacity: 1 }}
-                  animate={{ opacity: loaded ? 0 : 1 }}
+                  animate={{ opacity: revealed ? 0 : 1 }}
                   transition={{ duration: 0.18, ease: "easeOut" }}
                   style={{
                     position: "absolute",

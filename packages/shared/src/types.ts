@@ -344,6 +344,9 @@ export interface StatusResponse {
    *  status flips to "complete", instead of following `redirectUrl` out to a
    *  browser. Absent when the session has none, or on pre-panel servers. */
   panelUrl?: string;
+  /** Whether the program has confirmed the panel's ask is satisfied. Clients
+   *  must not open a panel when this is true: it would close itself at once. */
+  panelResolved?: boolean;
   /** Whether the session is editable RIGHT NOW: an edit hold is active and
    *  its preview video has finished building. Only ever true while
    *  `stopped` — never after `complete`, which is the point at which

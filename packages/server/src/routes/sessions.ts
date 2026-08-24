@@ -1271,6 +1271,12 @@ export async function sessionRoutes(app: FastifyInstance) {
         // Program panel, shown in-app in place of the redirect. Absent when
         // the session has none.
         panelUrl: session.panelUrl ?? undefined,
+        // Whether the program already has what the panel was asking for. The
+        // client reads this at save time, which is when it decides whether to
+        // open the panel at all — without it, an already-answered panel opens
+        // and then immediately reports itself done, which reads as the sheet
+        // flashing open and shutting.
+        panelResolved: session.panelResolvedAt !== null,
         // Edit hold. `editable` flips true when the preview build lands;
         // until then a set `editHoldUntil` means "still preparing".
         editable: sessionEditability(session).editable,

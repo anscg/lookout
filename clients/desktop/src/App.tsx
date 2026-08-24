@@ -280,7 +280,16 @@ function MainWindowApp() {
    * may have answered on the program's own site instead.
    */
   const maybeOpenPanel = useCallback(
-    (token: string, redirectUrl: string | null, panelUrl: string | null | undefined) => {
+    (
+      token: string,
+      redirectUrl: string | null,
+      panelUrl: string | null | undefined,
+      panelResolved?: boolean,
+    ) => {
+      // Already answered — on this device, on the program's website, anywhere.
+      // Opening it would just have the panel tell us it is done and close, which
+      // reads as the sheet flashing open and shutting for no reason.
+      if (panelResolved) return false;
       if (isPanelUrlAcceptable(panelUrl) && getPanelState(token) === "pending") {
         openPanel(token, panelUrl, redirectUrl);
         return true;
@@ -308,7 +317,7 @@ function MainWindowApp() {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
-    listen<{ token: string; status?: string | null; redirectUrl?: string | null; panelUrl?: string | null }>(
+    listen<{ token: string; status?: string | null; redirectUrl?: string | null; panelUrl?: string | null; panelResolved?: boolean }>(
       EDITED_EVENT,
       (event) => {
         console.log("[app] editor window published — refreshing");
@@ -330,6 +339,7 @@ function MainWindowApp() {
           token,
           event.payload?.redirectUrl ?? null,
           event.payload?.panelUrl ?? null,
+          event.payload?.panelResolved,
         );
 
         // Instant publish (no cuts): the /compile response already told us
@@ -1053,7 +1063,7 @@ function MainWindowApp() {
             token={route.token}
             apiBaseUrl={API_BASE}
             onEdit={() => { void openEditorWindow(route.token); }}
-            onRecordingFinished={({ redirectUrl, panelUrl }) => {
+            onRecordingFinished={({ redirectUrl, panelUrl, panelResolved }) => {
               // The recording is over, so if the program wants something, ask
               // now rather than after the compile — the sheet sits over the
               // progress bar and the answers land while it builds.
@@ -1061,7 +1071,7 @@ function MainWindowApp() {
               // Fires on every visit to a finished session, not just the one
               // where it stopped; `maybeOpenPanel` is what makes it once-only,
               // by refusing anything the user has already dealt with.
-              maybeOpenPanel(route.token, redirectUrl, panelUrl);
+              maybeOpenPanel(route.token, redirectUrl, panelUrl, panelResolved);
             }}
             onComplete={({ redirectUrl, panelUrl }) => {
               // Browser handoff for sessions with no panel. Shared de-dupe
