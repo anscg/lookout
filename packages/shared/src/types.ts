@@ -227,6 +227,14 @@ export interface ApplyCutsResponse {
    *  here so the recording client can fire the redirect the instant publish
    *  completes — no second request, no race. Null when none was configured. */
   redirectUrl: string | null;
+  /** The session's program panel URL (immutable, set at creation). Echoed
+   *  alongside `redirectUrl` for the same reason: the client that publishes
+   *  from the editor decides between panel and redirect the instant it lands,
+   *  and needs both to make that choice. Null when none was configured. */
+  panelUrl?: string | null;
+  /** Whether the program has confirmed the panel is satisfied. When true, the
+   *  client skips opening the panel — the answers already exist. */
+  panelResolved?: boolean;
 }
 
 export interface UploadUrlResponse {

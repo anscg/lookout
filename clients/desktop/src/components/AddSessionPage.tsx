@@ -11,6 +11,8 @@ import {
 
 import { invoke } from "../logger.js";
 import { extractToken } from "../utils.js";
+import { parsePairCallback } from "../programLink.js";
+import { emit } from "@tauri-apps/api/event";
 import { PageLayout } from "./PageLayout.js";
 
 import { getApiBase } from "../serverConfig.js";
@@ -114,9 +116,25 @@ export function AddSessionPage({ onBack, onStart, onOpenProgram }: AddSessionPag
   const handleStart = () => {
     const trimmed = link.trim();
     if (!trimmed) return;
+
+    // A `lookout://pair?...` link routes through the same handler the OS
+    // would have called - if the deep link never fired (Windows sometimes
+    // fails to hand off), pasting the URL from the program's page is the
+    // manual escape hatch.
+    if (parsePairCallback(trimmed)) {
+      setError(null);
+      setLoading(true);
+      void emit("lookout-deep-link", [trimmed]).catch((e) => {
+        console.error("[add] pair paste emit failed:", e);
+        setError("Couldn't finish linking - try again from the program's page.");
+        setLoading(false);
+      });
+      return;
+    }
+
     const token = extractToken(trimmed);
     if (!token) {
-      setError("Couldn't find a valid session token in that link.");
+      setError("Couldn't find a valid session token or pair link in that URL.");
       return;
     }
     setError(null);

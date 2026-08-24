@@ -330,6 +330,13 @@ export function EditorWindow({ token }: { token: string }) {
       token,
       status: published?.status ?? null,
       redirectUrl: published?.redirectUrl ?? null,
+      // Forwarded so the main window's edit-published handler can pick between
+      // panel and redirect the same way `handleCompleted` does. Without these,
+      // a session that has BOTH ends up with the redirect firing (guard sees
+      // null panelUrl) *and* the panel opening from the session page's own
+      // status poll — the reporter's "browser and sheet both opened" symptom.
+      panelUrl: published?.panelUrl ?? null,
+      panelResolved: published?.panelResolved ?? false,
     }).catch((e) => console.error("[editor] emit failed:", e));
     await closeEditorWindow();
   }, [client, token]);
@@ -423,6 +430,8 @@ export function EditorWindow({ token }: { token: string }) {
               token,
               status: result.status,
               redirectUrl: result.redirectUrl,
+              panelUrl: result.panelUrl ?? null,
+              panelResolved: result.panelResolved ?? false,
             }).catch((e) => console.error("[editor] emit failed:", e));
             void closeEditorWindow();
           }}

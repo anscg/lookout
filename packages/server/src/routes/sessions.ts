@@ -1687,6 +1687,8 @@ export async function sessionRoutes(app: FastifyInstance) {
             instant: false,
             recompilesRemaining,
             redirectUrl: session.redirectUrl,
+            panelUrl: session.panelUrl,
+            panelResolved: session.panelResolvedAt !== null,
           });
       }
       if (session.status === "complete") {
@@ -1697,6 +1699,8 @@ export async function sessionRoutes(app: FastifyInstance) {
           instant: true,
           recompilesRemaining,
           redirectUrl: session.redirectUrl,
+          panelUrl: session.panelUrl,
+          panelResolved: session.panelResolvedAt !== null,
         };
       }
 
@@ -1716,6 +1720,8 @@ export async function sessionRoutes(app: FastifyInstance) {
           instant: false,
           recompilesRemaining,
           redirectUrl: session.redirectUrl,
+          panelUrl: session.panelUrl,
+          panelResolved: session.panelResolvedAt !== null,
         };
       }
 
@@ -1741,6 +1747,8 @@ export async function sessionRoutes(app: FastifyInstance) {
           instant: true,
           recompilesRemaining,
           redirectUrl: session.redirectUrl,
+          panelUrl: session.panelUrl,
+          panelResolved: session.panelResolvedAt !== null,
         };
       }
 
@@ -1779,6 +1787,8 @@ export async function sessionRoutes(app: FastifyInstance) {
           MAX_USER_RECOMPILES - (session.recompileCount + 1),
         ),
         redirectUrl: session.redirectUrl,
+        panelUrl: session.panelUrl,
+        panelResolved: session.panelResolvedAt !== null,
       };
     },
   );
