@@ -629,6 +629,9 @@ field on a version check. It's returned on `GET /api/sessions/:token` and
 The panel drives the sheet over `postMessage`. Send to `window.parent`:
 
 ```javascript
+// You have something worth looking at. The app's spinner comes off.
+parent.postMessage({ type: "lookout:ready" }, "*");
+
 // Grow/shrink the sheet to fit your content. No upper bound beyond the app window.
 parent.postMessage({ type: "lookout:resize", height: document.body.scrollHeight }, "*");
 
@@ -638,6 +641,15 @@ parent.postMessage({ type: "lookout:done" }, "*");
 // The user backed out inside your UI. Same as them closing the sheet.
 parent.postMessage({ type: "lookout:cancel" }, "*");
 ```
+
+Send `ready` when your panel is *usable*, not when it loads — after the fetch
+that fills your form, not on mount. Until it arrives the app covers the frame
+with its own spinner, so `load` firing over an empty skeleton shows nobody a
+skeleton. If you never send it the cover lifts on a timeout (a few seconds)
+and whatever you have is what the user sees.
+
+Your frame is live behind that cover, not hidden, so timers, animation frames
+and network requests all run normally while it is up.
 
 Send `resize` whenever your content height changes — a multi-step form should
 send it on every step, and the sheet springs between sizes. A panel that never

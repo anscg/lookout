@@ -215,15 +215,13 @@ export function ProgramPanel({
     return () => window.removeEventListener("message", onMessage);
   }, [origin]);
 
-  // `load` alone does not mean "ready to look at", so hold the spinner a beat to
-  // let a panel announce itself first.
+  // The spinner comes down when the panel says `lookout:ready` — `load` only
+  // means the document arrived, which for a panel that fetches its own data is
+  // well before there is anything worth looking at.
   //
-  // Timed from MOUNT, not from `load`. Two things made the load-gated version
-  // deadlock: React can attach `onLoad` after a local frame has already fired
-  // it, so `loaded` may never become true; and a frame we keep hidden is a
-  // frame the browser does not paint, so a panel measuring itself in
-  // requestAnimationFrame never runs and never reports. Either way the wait has
-  // to end on its own.
+  // The timer is the fallback for a panel that never says it, and it is timed
+  // from MOUNT rather than from `load` because React can attach `onLoad` after
+  // a frame has already fired it, leaving `loaded` false forever.
   const [graceElapsed, setGraceElapsed] = useState(false);
   useEffect(() => {
     const id = setTimeout(() => setGraceElapsed(true), PANEL_READY_GRACE_MS);
@@ -507,15 +505,18 @@ export function ProgramPanel({
                     // rectangle pasted into it.
                     background: "transparent",
                     colorScheme: "normal",
-                    // Faded in so a white-flashing page doesn't strobe the
-                    // sheet before its own styles land.
-                    opacity: revealed ? 1 : 0,
-                    transition: "opacity 0.18s ease-out",
                   }}
                 />
-                {/* Crossfades with the frame rather than switching: the
-                    sheet enters at its loading height and springs to the
-                    panel's, and a hard swap mid-spring reads as a flicker. */}
+                {/* An opaque cover, not a replacement: the frame below it is
+                    visible to the browser the whole time it is on screen.
+                    Hiding the frame instead (opacity, visibility, display)
+                    stops it being painted, and an unpainted frame runs no
+                    animation frames — a panel measuring itself in
+                    requestAnimationFrame would never report a height, and we
+                    would be waiting on a message that our own hiding prevented.
+                    Crossfaded rather than swapped: the sheet enters at its
+                    loading height and springs to the panel's, and a hard switch
+                    mid-spring reads as a flicker. */}
                 <motion.div
                   initial={{ opacity: 1 }}
                   animate={{ opacity: revealed ? 0 : 1 }}
@@ -526,7 +527,10 @@ export function ProgramPanel({
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    pointerEvents: "none",
+                    background: colors.bg.panel,
+                    // Nothing behind the spinner is meant to be clicked yet,
+                    // and the frame is live rather than hidden.
+                    pointerEvents: revealed ? "none" : "auto",
                   }}
                 >
                   <Spinner size="md" />

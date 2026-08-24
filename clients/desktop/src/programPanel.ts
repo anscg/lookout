@@ -98,16 +98,19 @@ export const PANEL_HEIGHT_SLACK = 2;
 /** A panel that hasn't loaded by now is treated as broken. */
 export const PANEL_LOAD_TIMEOUT_MS = 12_000;
 /**
- * How long we keep the frame hidden waiting for `lookout:ready`.
+ * How long the spinner covers the frame while waiting for `lookout:ready`.
  *
- * `ready` is the good signal, so it wins. But the wait has to end regardless of
- * whether it ever arrives — a frame nobody paints does not animate, so a panel
- * measuring itself in requestAnimationFrame would never get to report its
- * height, and holding it hidden until it does deadlocks the pair. Short enough
- * not to feel stuck, long enough that a panel which does announce itself is
- * never beaten to the punch.
+ * `ready` is the real signal and wins whenever it arrives; this is only the
+ * deadline for a panel that never sends one — an older deployment, or a program
+ * that never implemented the protocol. It can afford to be generous, because
+ * the frame underneath is painting the whole time: the spinner is a cover, not
+ * a gate, so nothing on the panel's side is waiting on us to lift it.
+ *
+ * It must stay well clear of a panel's own startup. A panel typically announces
+ * itself after fetching its data, which is a round-trip we do not control, and
+ * a deadline that beats that would show a half-built form.
  */
-export const PANEL_READY_GRACE_MS = 900;
+export const PANEL_READY_GRACE_MS = 4000;
 
 // ---------------------------------------------------------------------------
 // URL validation
