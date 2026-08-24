@@ -9,7 +9,6 @@ import {
   PANEL_LOAD_TIMEOUT_MS,
   PANEL_READY_GRACE_MS,
   PANEL_MIN_HEIGHT,
-  panelMaxHeight,
   PANEL_SANDBOX,
   panelOrigin,
   parsePanelMessage,
@@ -170,15 +169,6 @@ export function ProgramPanel({
   // against the frame instead of the viewport.
   const [clip, setClip] = useState<HTMLDivElement | null>(null);
 
-  const [maxHeight, setMaxHeight] = useState(() =>
-    panelMaxHeight(typeof window === "undefined" ? 900 : window.innerHeight),
-  );
-  useLayoutEffect(() => {
-    const measure = () => setMaxHeight(panelMaxHeight(window.innerHeight));
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, []);
 
   // Latest callbacks without re-binding the message listener.
   const onDoneRef = useRef(onDone);
@@ -225,16 +215,21 @@ export function ProgramPanel({
     return () => window.removeEventListener("message", onMessage);
   }, [origin]);
 
-  // `load` alone does not mean "ready to look at". Hold the spinner for a beat
-  // after it, so a panel that announces itself gets to do so before we reveal
-  // whatever it had painted by then.
+  // `load` alone does not mean "ready to look at", so hold the spinner a beat to
+  // let a panel announce itself first.
+  //
+  // Timed from MOUNT, not from `load`. Two things made the load-gated version
+  // deadlock: React can attach `onLoad` after a local frame has already fired
+  // it, so `loaded` may never become true; and a frame we keep hidden is a
+  // frame the browser does not paint, so a panel measuring itself in
+  // requestAnimationFrame never runs and never reports. Either way the wait has
+  // to end on its own.
   const [graceElapsed, setGraceElapsed] = useState(false);
   useEffect(() => {
-    if (!loaded || ready) return;
     const id = setTimeout(() => setGraceElapsed(true), PANEL_READY_GRACE_MS);
     return () => clearTimeout(id);
-  }, [loaded, ready]);
-  const revealed = ready || (loaded && graceElapsed);
+  }, []);
+  const revealed = ready || graceElapsed;
 
   // A frame that never fires `load` (offline, DNS, a hung server) would sit
   // on a spinner forever. Give it a deadline, then offer the browser.
@@ -441,10 +436,14 @@ export function ProgramPanel({
             // rather than sliding on a fixed-duration ease.
             data-vaul-no-drag=""
             initial={false}
-            animate={{ height: Math.min(maxHeight, height + PANEL_HEIGHT_SLACK) }}
+            animate={{ height: height + PANEL_HEIGHT_SLACK }}
             transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.7 }}
             style={{
               position: "relative",
+              // Not shrinkable, and not capped: the sheet is exactly as tall as
+              // the panel asks for. Constraining it here (or on the sheet) left
+              // vaul unable to place the sheet at all — it stayed translated
+              // off the bottom of the window.
               flexShrink: 0,
               // Taller-than-MAX panels scroll HERE, not inside the frame. The
               // app hides its own scrollbars (index.html), so this surface

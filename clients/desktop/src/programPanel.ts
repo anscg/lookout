@@ -74,26 +74,9 @@ export const PANEL_SANDBOX = "allow-scripts allow-forms allow-same-origin allow-
  * hides the scrollbar — a cross-origin frame's scrollbar can't be styled from
  * out here, so the only way to not show one is to never need one.
  */
+/** A panel gets at least this much, so an empty one isn't a sliver. */
 export const PANEL_MIN_HEIGHT = 220;
-/** Absolute ceiling, for a window big enough that the fraction below isn't the binding limit. */
-export const PANEL_MAX_HEIGHT = 720;
-/**
- * How much of the window a sheet may take.
- *
- * A fixed pixel cap is wrong on both ends: in a small window 720px is the whole
- * app, so the sheet swallows the thing it is supposed to sit over, and in a
- * large one it is needlessly short. Programs size their panels for a page, not
- * for a sheet, so this is the app's job rather than theirs.
- */
-export const PANEL_MAX_VIEWPORT_FRACTION = 0.72;
 
-/** The tallest this sheet may be right now, given the window. */
-export function panelMaxHeight(viewportHeight: number): number {
-  return Math.max(
-    PANEL_MIN_HEIGHT,
-    Math.min(PANEL_MAX_HEIGHT, Math.round(viewportHeight * PANEL_MAX_VIEWPORT_FRACTION)),
-  );
-}
 /**
  * Hard ceiling on a reported height, so a panel bug can't ask for a
  * hundred-thousand-pixel frame. Well past any real form.
@@ -115,13 +98,14 @@ export const PANEL_HEIGHT_SLACK = 2;
 /** A panel that hasn't loaded by now is treated as broken. */
 export const PANEL_LOAD_TIMEOUT_MS = 12_000;
 /**
- * How long after the frame's `load` we keep waiting for `lookout:ready`.
+ * How long we keep the frame hidden waiting for `lookout:ready`.
  *
- * `load` fires when the document is done, which for anything that fetches after
- * mount is before there is anything to look at — revealing then shows a
- * half-built panel. So `ready` wins, and this is only the fallback for a panel
- * that never sends one. Short enough not to feel stuck, long enough that a
- * panel which does send it is never beaten to the punch.
+ * `ready` is the good signal, so it wins. But the wait has to end regardless of
+ * whether it ever arrives — a frame nobody paints does not animate, so a panel
+ * measuring itself in requestAnimationFrame would never get to report its
+ * height, and holding it hidden until it does deadlocks the pair. Short enough
+ * not to feel stuck, long enough that a panel which does announce itself is
+ * never beaten to the punch.
  */
 export const PANEL_READY_GRACE_MS = 900;
 

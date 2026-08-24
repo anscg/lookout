@@ -629,7 +629,7 @@ field on a version check. It's returned on `GET /api/sessions/:token` and
 The panel drives the sheet over `postMessage`. Send to `window.parent`:
 
 ```javascript
-// Grow/shrink the sheet to fit your content. Clamped to 220–720px.
+// Grow/shrink the sheet to fit your content. No upper bound beyond the app window.
 parent.postMessage({ type: "lookout:resize", height: document.body.scrollHeight }, "*");
 
 // You're finished. The sheet closes and never re-offers itself.
@@ -654,8 +654,10 @@ both wrong:
   the frame a few pixels short of its content and adding a scrollbar you didn't
   ask for.
 
-If your content is genuinely taller than the 720px cap the frame scrolls, which
-is fine — but consider paging it like the app's own flows do.
+There is no height cap: the sheet is as tall as you ask for. The app window is
+the only bound, and if you exceed it the sheet scrolls — which works, but a
+panel taller than someone's window is worth paging instead, the way the app's
+own flows do.
 
 Anything else is ignored, and messages are accepted only from `panelUrl`'s
 exact origin.

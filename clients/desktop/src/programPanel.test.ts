@@ -2,9 +2,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   PANEL_HEIGHT_SLACK,
-  PANEL_MAX_HEIGHT,
   PANEL_SANITY_MAX_HEIGHT,
-  panelMaxHeight,
   PANEL_MIN_HEIGHT,
   PANEL_SANDBOX,
   getPanelState,
@@ -46,23 +44,6 @@ describe("height slack", () => {
     // that; it stays small because it is real added sheet height.
     expect(PANEL_HEIGHT_SLACK).toBeGreaterThan(0);
     expect(PANEL_HEIGHT_SLACK).toBeLessThanOrEqual(4);
-  });
-});
-
-describe("panelMaxHeight", () => {
-  it("keeps the sheet to a fraction of the window, so it never swallows the app", () => {
-    expect(panelMaxHeight(900)).toBeLessThan(900);
-    expect(panelMaxHeight(600)).toBeLessThan(600);
-    // A short window is the case a fixed 720px cap got wrong.
-    expect(panelMaxHeight(500)).toBeLessThan(500);
-  });
-
-  it("never exceeds the absolute ceiling, however tall the window", () => {
-    expect(panelMaxHeight(4000)).toBe(PANEL_MAX_HEIGHT);
-  });
-
-  it("never goes below the minimum, however short the window", () => {
-    expect(panelMaxHeight(100)).toBe(220);
   });
 });
 
