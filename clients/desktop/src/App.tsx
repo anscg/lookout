@@ -927,10 +927,15 @@ function MainWindowApp() {
     url: string;
     label: string;
   } | null>(null);
-  // The owning program's display name, straight from the session. Authoritative,
-  // unlike matching a URL's origin against the registry — a program's panel can
-  // sit on a different host from the URLs it registered.
-  const [sessionProgram, setSessionProgram] = useState<{ token: string; label: string } | null>(null);
+  // The owning program, straight from the session's own `program` id. Both the
+  // name and the icon are authoritative this way, unlike matching a URL's origin
+  // against the registry — a program's panel can sit on a different host from
+  // the URLs it registered, and then origin matching finds nothing.
+  const [sessionProgram, setSessionProgram] = useState<{
+    token: string;
+    label: string;
+    iconUrl: string | null;
+  } | null>(null);
   useEffect(() => {
     if (route.page !== "session" || !route.token) {
       setPanelPrompt(null);
@@ -949,7 +954,11 @@ function MainWindowApp() {
         const rawProgram: string | null = data.program ?? null;
         if (rawProgram) {
           const known = programsRef.current.find((p) => p.name === rawProgram);
-          setSessionProgram({ token, label: known?.displayName || rawProgram });
+          setSessionProgram({
+            token,
+            label: known?.displayName || rawProgram,
+            iconUrl: known?.iconUrl ?? null,
+          });
         }
         else {
           setSessionProgram(null);
@@ -1304,7 +1313,10 @@ function MainWindowApp() {
               ? sessionProgram.label
               : programLabelForUrl(panel.url)
           }
-          programIconUrl={programIconForUrl(panel.url)}
+          programIconUrl={
+            (sessionProgram?.token === panel.token ? sessionProgram.iconUrl : null) ??
+            programIconForUrl(panel.url)
+          }
           fallbackUrl={panel.fallbackUrl}
           onDone={() => {
             setPanelState(panel.token, "done");
