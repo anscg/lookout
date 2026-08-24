@@ -280,9 +280,15 @@ function rowHtml(p) {
       '" alt="" style="width:16px;height:16px;border-radius:4px;vertical-align:-3px;margin-right:6px">' +
       nameCell;
   }
+  // Desktop instant-start endpoints, stacked under the new-session URL.
+  var urlCell = urlHtml(p.newSessionUrl);
+  if (p.pairUrl || p.startUrl) {
+    urlCell += '<br><span class="muted">pair:</span> ' + urlHtml(p.pairUrl) +
+      '<br><span class="muted">start:</span> ' + urlHtml(p.startUrl);
+  }
   return "<tr>" +
     "<td>" + nameCell + "</td>" +
-    "<td>" + urlHtml(p.newSessionUrl) + "</td>" +
+    "<td>" + urlCell + "</td>" +
     "<td>" + keysHtml(p.keys) + "</td>" +
     '<td class="num">' + (p.sessionCount || 0) + "</td>" +
     "<td>" + hours(p.trackedSeconds) + "</td>" +
@@ -296,6 +302,9 @@ function rowHtml(p) {
         '" data-current="' + esc(p.newSessionUrl || "") + '">set URL</button>' +
       '<button class="secondary" data-icon="' + esc(p.id) + '" data-name="' + esc(p.name) +
         '" data-current="' + esc(p.iconUrl || "") + '">set icon</button>' +
+      '<button class="secondary" data-desktop="' + esc(p.id) + '" data-name="' + esc(p.name) +
+        '" data-pair="' + esc(p.pairUrl || "") + '" data-start="' + esc(p.startUrl || "") +
+        '">set desktop</button>' +
       '<button class="danger" data-del="' + esc(p.id) + '" data-name="' + esc(p.name) +
         '">delete</button></td>' +
     "</tr>";
@@ -512,6 +521,36 @@ rows.addEventListener("click", async function (ev) {
         iconUrl: nextIcon.trim(),
       });
       flash("Updated icon URL.");
+      await load();
+    } catch (e) {
+      flash(e.message, true);
+    }
+    return;
+  }
+
+  var desktopBtn = ev.target.closest("[data-desktop]");
+  if (desktopBtn) {
+    var progName = desktopBtn.getAttribute("data-name");
+    var nextPair = prompt(
+      'Desktop pair URL for "' + progName +
+        '" (https; leave blank to clear both):',
+      desktopBtn.getAttribute("data-pair"),
+    );
+    if (nextPair === null) return; // cancelled
+    var nextStart = "";
+    if (nextPair.trim()) {
+      nextStart = prompt(
+        'Desktop start-session URL for "' + progName + '" (https):',
+        desktopBtn.getAttribute("data-start"),
+      );
+      if (nextStart === null) return; // cancelled
+    }
+    try {
+      await api("PATCH", "/api/admin/programs/" + desktopBtn.getAttribute("data-desktop"), {
+        pairUrl: nextPair.trim(),
+        startUrl: nextStart.trim(),
+      });
+      flash("Updated desktop endpoints.");
       await load();
     } catch (e) {
       flash(e.message, true);

@@ -24,6 +24,8 @@ export async function internalRoutes(app: FastifyInstance) {
       metadata?: Record<string, unknown>;
       clips?: boolean;
       redirectUrl?: string;
+      panelUrl?: string;
+      viewUrl?: string;
     };
   }>(
     "/api/internal/sessions",
@@ -47,13 +49,34 @@ export async function internalRoutes(app: FastifyInstance) {
               pattern: "^https?://",
               maxLength: 2048,
             },
+            // Program panel: rendered in-app in an iframe when the timelapse
+            // finishes, in place of the redirect hop. HTTPS, except on
+            // loopback for local panel development — this URL is a
+            // per-session capability and gets framed inside the app, so a
+            // plain-http remote host (interceptable) is not accepted.
+            // Immutable after creation.
+            panelUrl: {
+              type: "string" as const,
+              pattern:
+                "^(https://|http://(localhost|127\\.0\\.0\\.1)([:/?#]|$))",
+              maxLength: 2048,
+            },
+            // The program's own page for this session, offered to the user as
+            // "Open in <Program>". Opened in a real browser, so http(s) is
+            // fine. Unlike the two above, this one can be changed later.
+            viewUrl: {
+              type: "string" as const,
+              pattern: "^https?://",
+              maxLength: 2048,
+            },
           },
           additionalProperties: false,
         },
       },
     },
     async (request, reply) => {
-      const { name, metadata, clips, redirectUrl } = request.body || {};
+      const { name, metadata, clips, redirectUrl, panelUrl, viewUrl } =
+        request.body || {};
 
       const [session] = await db
         .insert(schema.sessions)
@@ -64,6 +87,8 @@ export async function internalRoutes(app: FastifyInstance) {
           // pins a session to the legacy one-JPEG-per-minute payload.
           clipsEnabled: clips ?? true,
           redirectUrl: redirectUrl ?? null,
+          panelUrl: panelUrl ?? null,
+          viewUrl: viewUrl ?? null,
           // Attribution: tag with the creating program (null for global key).
           // `program` (name) is dual-written for backward compatibility;
           // `programId` is the canonical attribution.
@@ -450,6 +475,88 @@ export async function internalRoutes(app: FastifyInstance) {
       await boss.send(COMPILE_JOB, { sessionId });
 
       return { status: "stopped" };
+    },
+  );
+
+  // Mark a session's program panel as satisfied.
+  //
+  // Panels are shown in-app, but the user can just as well finish on the
+  // program's own website — and the client can't see inside either one. So the
+  // program declares it: until it does, the client keeps offering the panel on
+  // the session page, and after it does, the ask disappears everywhere.
+  // Idempotent; calling it on a session with no panel is a no-op success, so
+  // programs can call it unconditionally when they publish.
+  app.post<{
+    Params: { sessionId: string };
+  }>(
+    "/api/internal/sessions/:sessionId/panel-resolved",
+    {
+      schema: { params: sessionIdParamSchema },
+    },
+    async (request, reply) => {
+      const { sessionId } = request.params;
+
+      const session = await db.query.sessions.findFirst({
+        where: eq(schema.sessions.id, sessionId),
+      });
+      if (!session) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      // First call wins, so the timestamp reflects when it was actually
+      // satisfied rather than the last time the program mentioned it.
+      const resolvedAt = session.panelResolvedAt ?? new Date();
+      if (!session.panelResolvedAt) {
+        await db
+          .update(schema.sessions)
+          .set({ panelResolvedAt: resolvedAt, updatedAt: new Date() })
+          .where(eq(schema.sessions.id, sessionId));
+      }
+
+      return { panelResolved: true, panelResolvedAt: resolvedAt.toISOString() };
+    },
+  );
+
+  // Set or clear a session's "Open in <Program>" link.
+  //
+  // Separate from creation because the target usually does not exist yet when
+  // the session is made — the published timelapse, the submission record. Pass
+  // null (or omit) to clear.
+  app.post<{
+    Params: { sessionId: string };
+    Body: { viewUrl?: string | null };
+  }>(
+    "/api/internal/sessions/:sessionId/view-url",
+    {
+      schema: {
+        params: sessionIdParamSchema,
+        body: {
+          type: "object" as const,
+          properties: {
+            viewUrl: {
+              type: ["string", "null"] as const,
+              pattern: "^https?://",
+              maxLength: 2048,
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { sessionId } = request.params;
+      const next = request.body?.viewUrl ?? null;
+
+      const [updated] = await db
+        .update(schema.sessions)
+        .set({ viewUrl: next, updatedAt: new Date() })
+        .where(eq(schema.sessions.id, sessionId))
+        .returning({ viewUrl: schema.sessions.viewUrl });
+
+      if (!updated) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+      return { viewUrl: updated.viewUrl };
     },
   );
 

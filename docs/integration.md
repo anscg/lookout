@@ -526,6 +526,388 @@ How each client populates it:
 
 It's best-effort: a client omits anything it can't detect, the server truncates over 1024 chars, and a malformed value never fails an upload. `clientInfo` is `null` for sessions recorded before this existed or where no client sent one.
 
+## "Open in <Program>" link
+
+A timelapse recorded through Lookout usually has a home on your site — the
+published page, the submission it belongs to. Set `viewUrl` and the desktop app
+offers it as an **Open in *Program* ↗** action on the session view, next to the
+timelapse's name. Without it there's no way back to your site except finding it
+by hand.
+
+Unlike [`redirectUrl`](#redirect-hook) and [`panelUrl`](#program-panels-in-app-forms),
+this one is **mutable** — the page you want to link to usually doesn't exist
+when the session is created:
+
+```bash
+# After the user publishes, point at the real thing:
+curl -X POST https://lookout.hackclub.com/api/internal/sessions/SESSION_ID/view-url \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"viewUrl": "https://yourprogram.example/timelapses/8f3a2c"}'
+```
+
+Pass `{"viewUrl": null}` to clear it. You can also set it at creation if you
+already know the URL. `http(s)`, max 2048 chars.
+
+It's returned on `GET /api/sessions/:token` as `viewUrl`, and it opens in the
+user's real browser — this is your whole site, not the single-purpose form a
+panel renders in-app. The two pair up nicely: a panel collects the details,
+then `view-url` gives the user a way back to what it produced.
+
+The button's label uses your program's **display name** from the registry, so
+set that (via the Lookout admin) if you want "Open in Lapse" rather than "Open
+in lapse".
+
+## Program panels (in-app forms)
+
+> Optional, and independent of everything else here. A program with no
+> `panelUrl` keeps using the [redirect hook](#redirect-hook) exactly as before.
+
+If your program needs information when a timelapse finishes — a title, a
+visibility choice, which project to credit the time to — the redirect hook
+sends the user to your site in a browser tab to collect it. A **panel** puts
+that same page in a sheet inside the desktop app instead, so there's no app
+switch. Your page, your design, your validation; Lookout supplies a rectangle.
+
+### When it opens
+
+**As soon as the recording is saved — not when the video is ready.** The sheet
+comes up over the compile progress, so the user answers your questions while
+the timelapse builds instead of watching a progress bar first. For a session
+the user chose to edit, "saved" means the moment they publish from the editor.
+
+This has one consequence you must design for: **when your panel loads, the
+video usually does not exist yet.** `GET /api/sessions/:token` will report
+`compiling` (sometimes `stopped`) and `videoUrl: null`. So don't preview the
+video in a panel, and don't block your form on it — take the answers, save
+them, and let your own backend poll for `complete` afterwards if it needs the
+file. `trackedSeconds`, `/timings` and the session's name are all available
+immediately.
+
+The redirect hook still fires on `complete` as always — but only for sessions
+*without* a panel, since a panel is the same handoff done in-app and doing both
+would send the user to a browser tab they already dealt with.
+
+### Setting one up
+
+Pass `panelUrl` when you create the session, alongside (not instead of)
+`redirectUrl`:
+
+```bash
+curl -X POST https://lookout.hackclub.com/api/internal/sessions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+        "metadata": {"userId": "user_123"},
+        "panelUrl": "https://yourprogram.example/publish/8f3a2c9e1b...",
+        "redirectUrl": "https://yourprogram.example/timelapses/42"
+      }'
+```
+
+**The URL is the credential.** Make it unguessable and specific to this one
+session — a random token in the path, the way `sessionUrl` works. Two reasons:
+
+1. A framed page is a third-party context, so **your cookies will not reach
+   it.** WebKit (macOS/Linux) and WebView2 both partition or block
+   third-party cookies, so a cookie-authenticated panel just renders a login
+   screen. Authenticate off the URL instead.
+2. It means panels need no credential of their own, no pairing, and no
+   handshake.
+
+`panelUrl` must be `https`, except on `localhost`/`127.0.0.1` so you can
+develop your panel against a local server. Max 2048 chars, immutable after
+creation. It's returned on `GET /api/sessions/:token` and
+`GET /api/sessions/:token/status`, both token-authenticated.
+
+### Talking to the app
+
+The panel drives the sheet over `postMessage`. Send to `window.parent`:
+
+```javascript
+// Grow/shrink the sheet to fit your content. Clamped to 220–720px.
+parent.postMessage({ type: "lookout:resize", height: document.body.scrollHeight }, "*");
+
+// You're finished. The sheet closes and never re-offers itself.
+parent.postMessage({ type: "lookout:done" }, "*");
+
+// The user backed out inside your UI. Same as them closing the sheet.
+parent.postMessage({ type: "lookout:cancel" }, "*");
+```
+
+Send `resize` whenever your content height changes — a multi-step form should
+send it on every step, and the sheet springs between sizes. A panel that never
+sends it just gets the 220px minimum.
+
+Measure with `Math.ceil(document.body.getBoundingClientRect().height)`, inside
+`requestAnimationFrame` so layout has settled. The two obvious alternatives are
+both wrong:
+
+- `document.documentElement.scrollHeight` is floored at the frame's current
+  height, because `<html>` fills it. Your sheet would grow and never shrink —
+  step 2 of a form could never be shorter than step 1.
+- `document.body.scrollHeight` omits the last child's bottom margin, leaving
+  the frame a few pixels short of its content and adding a scrollbar you didn't
+  ask for.
+
+If your content is genuinely taller than the 720px cap the frame scrolls, which
+is fine — but consider paging it like the app's own flows do.
+
+Anything else is ignored, and messages are accepted only from `panelUrl`'s
+exact origin.
+
+### What the app guarantees
+
+- **The frame is sandboxed** (`allow-scripts allow-forms allow-same-origin
+  allow-popups`). Notably absent is `allow-top-navigation`: a panel cannot
+  navigate the app window. Use `target="_blank"` (or `lookout:done` plus your
+  `redirectUrl`) if you need to send someone to a real browser tab.
+- **No access to Lookout internals.** A cross-origin frame has its own JS
+  realm and the desktop app's IPC is main-frame only, so there is nothing of
+  Lookout's to reach from inside a panel.
+- **Your panel is attributed.** The sheet shows your program name and the
+  panel's origin above the frame, so it's never ambiguous whose UI it is.
+- **There is always a way out.** If your panel fails to load, errors, or
+  hasn't loaded within 12 seconds, the app offers `redirectUrl` (or `panelUrl`)
+  in the real browser instead. Set `redirectUrl` too — it's the fallback.
+- **Dismissal is not loss.** If the user closes the sheet without your page
+  sending `lookout:done`, the ask persists as a card on the session's page
+  ("*Program* needs a few details") that reopens the panel.
+
+### Telling the app you got what you needed
+
+`lookout:done` retires the card on *that device, in that moment*. It is not
+enough on its own, because the user can just as easily finish on your website —
+they hit the browser fallback, or come back to it tomorrow, or use a second
+machine. The app can see inside neither your sheet nor your site, so it would
+keep showing "needs a few details" for something already done.
+
+So whenever you consider a session's panel satisfied — from the panel, from
+your own web UI, from a background job, doesn't matter — tell the server:
+
+```bash
+curl -X POST https://lookout.hackclub.com/api/internal/sessions/SESSION_ID/panel-resolved \
+  -H "X-API-Key: your-api-key"
+```
+
+Idempotent, and a no-op success on a session that has no panel — so you can
+call it unconditionally wherever you mark a timelapse published, without
+branching. Once set, `GET /api/sessions/:token` reports
+`"panelResolved": true` and every client stops offering the panel.
+
+Two more things worth doing:
+
+- **Make your panel idempotent.** The card reopens the same `panelUrl`. If the
+  session is already published, don't show the form again — post
+  `lookout:done` immediately and let the sheet close.
+- **Send `lookout:done` as well as calling the endpoint.** The message is
+  instant and local; the endpoint is authoritative and covers every other
+  device. They're complements, not alternatives.
+
+### Making it look like it belongs
+
+**Paint no background.** Set `html, body { background: transparent }` and let
+the sheet be the surface — your content then sits directly on the app's own
+panel material instead of reading as a rectangle pasted into it. The frame is
+transparent by default, so this is just about not filling it yourself.
+
+The sheet supplies the outer padding-free surface, the rounded top corners, the
+grabber and the title row, so skip your own page chrome: no full-page
+background, no card wrapper around everything, no duplicate heading with your
+program's name. Style your controls to sit on a dark or light surface — the app
+follows the OS theme, so avoid hard-coding a background colour you then depend
+on for contrast.
+
+### Rules
+
+- **Never ask for credentials in a panel.** No password fields, no "sign in to
+  continue". The panel renders inside Lookout's window, so a login form there
+  is indistinguishable from Lookout asking — that's a phishing shape, and
+  panels that do it will be pulled from the registry. Authenticate via the
+  session-scoped URL.
+- **Don't rely on cookies or persistent storage** in the frame; assume both are
+  partitioned or absent.
+- **Degrade gracefully.** The same URL will sometimes be opened in a real
+  browser tab (the fallback paths above), so it must work standalone too.
+
+### One thing to drop first
+
+Lookout already asks the user to name their timelapse when they stop
+recording, and stores it — `GET /api/sessions/:token` returns `name`. If your
+panel opens with a "give your timelapse a title" field, it's asking for
+something they typed a minute earlier. Read the session's `name` and prefill
+or skip it.
+
+## Desktop instant start (device pairing)
+
+> Optional. Every program works in the desktop app's + menu with nothing but
+> a `newSessionUrl` — the app opens your site in the browser, you create a
+> session and redirect to `lookout://session/?token=…`. Implement this
+> section only if you want to remove that browser hop for repeat sessions.
+
+The browser hop exists because only your backend can create sessions and only
+your website knows which user is asking. Device pairing keeps both facts true
+while paying the hop **once per device instead of once per timelapse**: the
+first start opens a consent page on your site (where the user is already
+logged in); every start after that is a single authenticated POST from the
+desktop app to your backend.
+
+Lookout itself gains no user model from this. The device credential is minted
+by you, stored by the desktop app, presented only to you, and revocable by
+you. Lookout's only involvement is carrying two extra URLs in its public
+program registry and answering the app's verification GET at the end.
+
+### What you implement
+
+Two endpoints on **your** backend, registered in the Lookout program registry
+as `pairUrl` and `startUrl` (both must be `https`; both must be set together
+— ask the Lookout admin to set them on your program entry):
+
+```
+GET    {pairUrl}?challenge=…&state=…&device=…    consent page (browser)
+POST   {pairUrl}   {code, verifier}              code → device token exchange
+DELETE {pairUrl}   Authorization: Bearer <tok>   revoke this device
+POST   {startUrl}  Authorization: Bearer <tok>   mint a session, return its token
+```
+
+### The pairing flow
+
+1. The user picks your program in the desktop + menu. The app generates a
+   random `verifier`, and opens the OS browser at:
+
+   ```
+   {pairUrl}?challenge=<b64url(sha256(verifier))>&state=<nonce>&device=<label>
+   ```
+
+2. Your consent page authenticates the user with whatever you already have
+   (your session cookies — that's the whole point), shows one line of consent
+   ("Link *{device}* to your account? It will be able to start Lookout
+   sessions as you."), and on accept:
+   - stores `{user, challenge, code, expiresAt}` where `code` is a fresh
+     single-use random string with a short TTL (≤ 5 minutes),
+   - redirects to `lookout://pair?code=<code>&state=<state>` — echo `state`
+     back **exactly**; the app drops callbacks whose state matches nothing.
+     Hardcode this redirect target. Do not accept a redirect URL as a request
+     parameter, or your consent page becomes an open redirector.
+
+3. The desktop app exchanges the code:
+
+   ```
+   POST {pairUrl}
+   Content-Type: application/json
+
+   {"code": "<code>", "verifier": "<verifier>"}
+   ```
+
+   Verify the code is unexpired and unused, check
+   `b64url(sha256(verifier)) == challenge`, burn the code, and respond:
+
+   ```json
+   {"deviceToken": "<opaque credential, ≤ 4096 chars>"}
+   ```
+
+   The PKCE check means a leaked/intercepted `code` (the deep link travels
+   through OS plumbing any app could register) is unredeemable without the
+   verifier, which never left the desktop app.
+
+4. Show the device in the user's account settings on your site, with a
+   revoke button. Treat the token like a password: store a hash, not the
+   value.
+
+### Starting a session
+
+```
+POST {startUrl}
+Authorization: Bearer <deviceToken>
+```
+
+Resolve the token to its user, create a Lookout session exactly the way your
+web flow does (your internal API key, your metadata, your redirectUrl), store
+the session token against the user as usual, and respond:
+
+```json
+{"sessionToken": "<the 64-hex Lookout session token>"}
+```
+
+Return `401` if the device token is revoked/expired/unknown — the app then
+drops the credential and re-runs the consent flow. Any other failure makes
+the app fall back to opening your `newSessionUrl` in the browser, so a broken
+`startUrl` degrades to the old flow rather than a dead end.
+
+The desktop app then verifies the token against Lookout before recording
+(`GET /api/sessions/:token` must report `program` = your registry name and a
+recordable status), so handing it a token from some other program or a
+finished session doesn't work.
+
+### Rules
+
+- **Scope the credential to exactly one capability**: "create a Lookout
+  session for this user". It must not authorize anything else on your site.
+- **Make it revocable** from your own device list. `DELETE {pairUrl}` with the
+  bearer token must also revoke (the app calls it on Settings → Linked
+  Programs → Unlink, best-effort).
+- **Rate limit `startUrl`** per device token as you see fit; the app calls it
+  once per user gesture.
+- Expire pairing codes fast and make them single-use. Expiring device tokens
+  is fine too — the app re-pairs on `401` at the cost of one browser hop.
+
+### Reference implementation (Express-ish pseudocode)
+
+```typescript
+import { createHash, randomBytes } from "node:crypto";
+
+const b64url = (b: Buffer) => b.toString("base64url");
+const sha256 = (s: string) => createHash("sha256").update(s).digest();
+
+// GET /lookout/pair — consent page (behind your normal login)
+app.get("/lookout/pair", requireLogin, (req, res) => {
+  const { challenge, state, device } = req.query;
+  res.render("lookout-consent", { challenge, state, device });
+});
+
+// The consent form's accept handler
+app.post("/lookout/pair/accept", requireLogin, async (req, res) => {
+  const { challenge, state } = req.body;
+  const code = b64url(randomBytes(24));
+  await db.pairingCodes.insert({
+    code, challenge, userId: req.user.id,
+    device: req.body.device, expiresAt: minutesFromNow(5),
+  });
+  res.redirect(`lookout://pair?code=${code}&state=${encodeURIComponent(state)}`);
+});
+
+// POST /lookout/pair — code → device-token exchange (no cookies; the app calls this)
+app.post("/lookout/pair", async (req, res) => {
+  const { code, verifier } = req.body;
+  const row = await db.pairingCodes.takeUnexpired(code); // atomically burn it
+  if (!row || b64url(sha256(verifier)) !== row.challenge)
+    return res.status(400).json({ error: "invalid code" });
+  const deviceToken = b64url(randomBytes(32));
+  await db.devices.insert({
+    tokenHash: sha256(deviceToken), userId: row.userId,
+    label: row.device, createdAt: new Date(),
+  });
+  res.json({ deviceToken });
+});
+
+// DELETE /lookout/pair — revoke (also expose this in your account settings UI)
+app.delete("/lookout/pair", async (req, res) => {
+  await db.devices.deleteByTokenHash(sha256(bearerToken(req)));
+  res.status(204).end();
+});
+
+// POST /lookout/start — mint a session for a paired device
+app.post("/lookout/start", async (req, res) => {
+  const device = await db.devices.findByTokenHash(sha256(bearerToken(req)));
+  if (!device) return res.status(401).json({ error: "unknown device" });
+  // Exactly your existing web flow, minus the browser:
+  const session = await lookout.createSession({
+    metadata: { userId: device.userId },
+  });
+  await db.sessions.insert({ userId: device.userId, token: session.token });
+  res.json({ sessionToken: session.token });
+});
+```
+
 ## Trust Model
 
 | What | Trusted? | Why |

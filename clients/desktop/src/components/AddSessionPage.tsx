@@ -25,14 +25,25 @@ interface Program {
   displayName?: string;
   newSessionUrl: string;
   iconUrl?: string | null;
+  // Desktop instant-start endpoints — see programLink.ts. Only relevant to
+  // the onOpenProgram delegate; this page itself never touches them.
+  pairUrl?: string | null;
+  startUrl?: string | null;
 }
 
 interface AddSessionPageProps {
   onBack: () => void;
   onStart: (token: string) => void;
+  /**
+   * Preferred way to start a program's session (App's openProgram: instant
+   * start for paired programs, pairing or the browser flow otherwise). Its
+   * outcome decides whether we keep waiting on a deep link or report a
+   * failure. When absent, the page opens newSessionUrl itself.
+   */
+  onOpenProgram?: (program: Program) => Promise<"started" | "browser" | "failed">;
 }
 
-export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
+export function AddSessionPage({ onBack, onStart, onOpenProgram }: AddSessionPageProps) {
   const [programs, setPrograms] = useState<Program[]>([]);
   const [programsLoading, setProgramsLoading] = useState(true);
   const [launched, setLaunched] = useState<string | null>(null);
@@ -79,6 +90,19 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
     setError(null);
     setLaunched(programLabel(program));
     try {
+      if (onOpenProgram) {
+        // App's shared handler: instant start when this device is paired,
+        // otherwise the pairing consent page or the plain browser flow.
+        const outcome = await onOpenProgram(program);
+        if (outcome === "failed") {
+          setError("Couldn't open your browser. Try the link option below.");
+          setLaunched(null);
+        }
+        // "started" unmounts us as the app routes to the record page;
+        // "browser" keeps the spinner up until the deep link lands (or the
+        // 15s grace period above re-enables the buttons).
+        return;
+      }
       await invoke("open_external_url", { url: program.newSessionUrl });
     } catch (e) {
       console.error("[programs] failed to open url:", e);

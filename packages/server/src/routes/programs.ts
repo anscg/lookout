@@ -17,6 +17,12 @@ export async function programRoutes(app: FastifyInstance) {
         displayName: sql<string>`coalesce(${schema.programs.displayName}, ${schema.programs.name})`,
         newSessionUrl: schema.programs.newSessionUrl,
         iconUrl: schema.programs.iconUrl,
+        // Desktop instant-start endpoints (both set, or both null). When set
+        // the desktop app can pair once and start sessions without a browser
+        // hop; when null it opens newSessionUrl as always. See
+        // docs/integration.md "Desktop instant start".
+        pairUrl: schema.programs.pairUrl,
+        startUrl: schema.programs.startUrl,
       })
       .from(schema.programs)
       .where(isNotNull(schema.programs.newSessionUrl))

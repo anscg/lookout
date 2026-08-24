@@ -994,6 +994,334 @@ describe("latency — sustained recording under jitter", () => {
 });
 
 // ────────────────────────────────────────────────────────────
+// Program attribution on the client GET — lets a desktop client
+// handed a token (instant start) verify it belongs to the program
+// it asked before recording
+// ────────────────────────────────────────────────────────────
+
+describe("session GET program attribution", () => {
+  it("exposes the creating program's name, or null for legacy keys", async () => {
+    // A program-key session carries the program name.
+    const [program] = await db
+      .insert(schema.programs)
+      .values({ name: "lapse-attr" })
+      .returning({ id: schema.programs.id });
+    const [keyRow] = await db
+      .insert(schema.apiKeys)
+      .values({ name: "lapse-attr", programId: program.id })
+      .returning({ key: schema.apiKeys.key });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": keyRow.key },
+      payload: {},
+    });
+    expect(created.statusCode).toBe(201);
+    const get = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${created.json().token}`,
+    });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().program).toBe("lapse-attr");
+
+    // A legacy/global-key session reports null.
+    const [legacy] = await db
+      .insert(schema.apiKeys)
+      .values({ name: `legacy-${Date.now()}` })
+      .returning({ key: schema.apiKeys.key, name: schema.apiKeys.name });
+    const created2 = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": legacy.key },
+      payload: {},
+    });
+    const get2 = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${created2.json().token}`,
+    });
+    // Keys always tag their name; the field is null only for rows predating
+    // attribution — so this asserts the key's own name comes through.
+    expect(get2.json().program).toBe(legacy.name);
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// "Open in <Program>" link — the program's own page for a
+// session, mutable because the target outlives creation
+// ────────────────────────────────────────────────────────────
+
+describe("view URL", () => {
+  async function makeApiKey(): Promise<string> {
+    const [row] = await db
+      .insert(schema.apiKeys)
+      .values({ name: `viewurl-test-${Date.now()}-${Math.random()}` })
+      .returning({ key: schema.apiKeys.key });
+    return row.key;
+  }
+
+  it("is null by default, settable after creation, and clearable", async () => {
+    const key = await makeApiKey();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: {},
+    });
+    const { token, sessionId } = created.json();
+
+    // The whole point of this field being mutable: at creation the program has
+    // nothing to link to yet.
+    let get = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(get.json().viewUrl).toBeNull();
+
+    const set = await app.inject({
+      method: "POST",
+      url: `/api/internal/sessions/${sessionId}/view-url`,
+      headers: { "x-api-key": key },
+      payload: { viewUrl: "https://lapse.example.com/timelapses/8f3a" },
+    });
+    expect(set.statusCode).toBe(200);
+    get = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(get.json().viewUrl).toBe("https://lapse.example.com/timelapses/8f3a");
+
+    // Re-pointing it is allowed — unlike redirectUrl/panelUrl.
+    await app.inject({
+      method: "POST",
+      url: `/api/internal/sessions/${sessionId}/view-url`,
+      headers: { "x-api-key": key },
+      payload: { viewUrl: "https://lapse.example.com/timelapses/other" },
+    });
+    get = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(get.json().viewUrl).toBe("https://lapse.example.com/timelapses/other");
+
+    const cleared = await app.inject({
+      method: "POST",
+      url: `/api/internal/sessions/${sessionId}/view-url`,
+      headers: { "x-api-key": key },
+      payload: { viewUrl: null },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().viewUrl).toBeNull();
+  });
+
+  it("accepts viewUrl at creation too", async () => {
+    const key = await makeApiKey();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: { viewUrl: "http://localhost:3000/t/1" },
+    });
+    expect(created.statusCode).toBe(201);
+    const get = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${created.json().token}`,
+    });
+    expect(get.json().viewUrl).toBe("http://localhost:3000/t/1");
+  });
+
+  it("rejects a non-http(s) URL and 404s an unknown session", async () => {
+    const key = await makeApiKey();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: {},
+    });
+    const bad = await app.inject({
+      method: "POST",
+      url: `/api/internal/sessions/${created.json().sessionId}/view-url`,
+      headers: { "x-api-key": key },
+      payload: { viewUrl: "javascript:alert(1)" },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions/00000000-0000-0000-0000-000000000000/view-url",
+      headers: { "x-api-key": key },
+      payload: { viewUrl: "https://lapse.example.com/x" },
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// Program panel — per-session URL the client renders in-app
+// (iframe in a sheet) instead of the redirect hop
+// ────────────────────────────────────────────────────────────
+
+describe("program panel", () => {
+  async function makeApiKey(): Promise<string> {
+    const [row] = await db
+      .insert(schema.apiKeys)
+      .values({ name: `panel-test-${Date.now()}-${Math.random()}` })
+      .returning({ key: schema.apiKeys.key });
+    return row.key;
+  }
+
+  it("persists panelUrl and exposes it on both client read endpoints", async () => {
+    const key = await makeApiKey();
+    const panelUrl = "https://lapse.example.com/publish/8f3a2c";
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: { name: "panelled", panelUrl },
+    });
+    expect(created.statusCode).toBe(201);
+    const { token, sessionId } = created.json();
+
+    const row = await loadSession(sessionId);
+    expect(row?.panelUrl).toBe(panelUrl);
+
+    // Session-recovery fetch.
+    const get = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(get.json().panelUrl).toBe(panelUrl);
+
+    // Status poll — this is the one the client watches for `complete`, so the
+    // panel URL has to arrive on the same response that says it's ready.
+    const status = await app.inject({ method: "GET", url: `/api/sessions/${token}/status` });
+    expect(status.json().panelUrl).toBe(panelUrl);
+  });
+
+  it("defaults to null and is absent from the status response", async () => {
+    const key = await makeApiKey();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: { name: "no-panel" },
+    });
+    const { token, sessionId } = created.json();
+    expect((await loadSession(sessionId))?.panelUrl).toBeNull();
+    const status = await app.inject({ method: "GET", url: `/api/sessions/${token}/status` });
+    expect("panelUrl" in status.json()).toBe(false);
+  });
+
+  it("rejects a non-https panel URL", async () => {
+    const key = await makeApiKey();
+    // A panel is framed inside the app and its URL is its only credential, so
+    // a plain-http remote host is refused. Loopback is exempt for local panel
+    // development, and covered separately below.
+    for (const panelUrl of [
+      "http://lapse.example.com/publish",
+      "http://localhost.evil.example/publish",
+      "javascript:alert(1)",
+      "not-a-url",
+    ]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/internal/sessions",
+        headers: { "x-api-key": key },
+        payload: { panelUrl },
+      });
+      expect(res.statusCode, panelUrl).toBe(400);
+    }
+  });
+
+  it("accepts a loopback panel URL for local development", async () => {
+    const key = await makeApiKey();
+    for (const panelUrl of [
+      "http://localhost:3000/publish/abc",
+      "http://127.0.0.1:8080/publish",
+    ]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/internal/sessions",
+        headers: { "x-api-key": key },
+        payload: { panelUrl },
+      });
+      expect(res.statusCode, panelUrl).toBe(201);
+    }
+  });
+
+  it("panel-resolved is idempotent, first-call-wins, and flips the client flag", async () => {
+    const key = await makeApiKey();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: { panelUrl: "https://lapse.example.com/publish/abc" },
+    });
+    const { token, sessionId } = created.json();
+
+    const before = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(before.json().panelResolved).toBe(false);
+
+    const first = await app.inject({
+      method: "POST",
+      url: `/api/internal/sessions/${sessionId}/panel-resolved`,
+      headers: { "x-api-key": key },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().panelResolved).toBe(true);
+
+    const after = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(after.json().panelResolved).toBe(true);
+
+    // Called again (a program that fires it on every publish), the original
+    // timestamp survives — it records when the ask was satisfied.
+    const second = await app.inject({
+      method: "POST",
+      url: `/api/internal/sessions/${sessionId}/panel-resolved`,
+      headers: { "x-api-key": key },
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().panelResolvedAt).toBe(first.json().panelResolvedAt);
+  });
+
+  it("panel-resolved succeeds on a session with no panel, so callers need no branch", async () => {
+    const key = await makeApiKey();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: {},
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/internal/sessions/${created.json().sessionId}/panel-resolved`,
+      headers: { "x-api-key": key },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("panel-resolved 404s for an unknown session", async () => {
+    const key = await makeApiKey();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions/00000000-0000-0000-0000-000000000000/panel-resolved",
+      headers: { "x-api-key": key },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("coexists with a redirect hook — the client picks the panel first", async () => {
+    const key = await makeApiKey();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: {
+        panelUrl: "https://lapse.example.com/publish/abc",
+        redirectUrl: "https://lapse.example.com/timelapses/abc",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const status = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${created.json().token}/status`,
+    });
+    // Both are carried; the redirect is the client's fallback when the panel
+    // can't render, so neither replaces the other server-side.
+    expect(status.json().panelUrl).toBe("https://lapse.example.com/publish/abc");
+    expect(status.json().redirectUrl).toBe("https://lapse.example.com/timelapses/abc");
+  });
+});
+
+// ────────────────────────────────────────────────────────────
 // Redirect hook — per-session URL opened by the client when the
 // timelapse finishes compiling
 // ────────────────────────────────────────────────────────────

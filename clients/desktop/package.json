@@ -28,7 +28,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tauri-plugin-liquid-glass-api": "^0.1.6",
-    "tauri-plugin-macos-permissions-api": "^2.3.0"
+    "tauri-plugin-macos-permissions-api": "^2.3.0",
+    "vaul": "^1.1.2"
   },
   "devDependencies": {
     "@sentry/vite-plugin": "^5.1.1",

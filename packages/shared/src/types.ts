@@ -70,6 +70,16 @@ export interface CreateSessionRequest {
    *  the timelapse finishes compiling (the desktop app opens it in the
    *  default browser). Immutable after creation. */
   redirectUrl?: string;
+  /** The program's own page for this session (its permalink), offered to the
+   *  user as an "Open in <Program>" action. Unlike the other two URLs this one
+   *  is mutable — see POST /api/internal/sessions/:id/view-url. */
+  viewUrl?: string;
+  /** Program panel: an https URL the recording client renders IN-APP (a sheet
+   *  with an iframe) when the timelapse finishes, in place of the redirect
+   *  hop, so the program can collect what it needs without an app switch.
+   *  Must be an unguessable per-session URL — it is the panel's only
+   *  credential. Immutable after creation. */
+  panelUrl?: string;
 }
 
 export interface CreateSessionResponse {
@@ -106,6 +116,16 @@ export interface SessionResponse {
   /** Redirect hook URL to open once the timelapse completes; `null`/absent
    *  when the session has none. */
   redirectUrl?: string | null;
+  /** Program panel URL, rendered in-app in place of the redirect. `null`/
+   *  absent when the session has none, or on pre-panel servers. */
+  panelUrl?: string | null;
+  /** The program's page for this session, if it set one. Clients offer it as
+   *  an "Open in <Program>" action. `null`/absent when there is none. */
+  viewUrl?: string | null;
+  /** Whether the program has confirmed the panel's ask is satisfied (it may
+   *  have been answered on the program's own site rather than in the sheet).
+   *  Clients stop offering the panel once this is true. */
+  panelResolved?: boolean;
   /** The session's cut list; `[]` when never edited. Absent on pre-edits
    *  servers. Note `trackedSeconds` already reflects these cuts. */
   cuts?: CutInterval[];
@@ -320,6 +340,10 @@ export interface StatusResponse {
   /** Redirect hook URL — clients watching the compile open this when the
    *  status flips to "complete". Absent when the session has none. */
   redirectUrl?: string;
+  /** Program panel URL — clients that can render one show it in-app when the
+   *  status flips to "complete", instead of following `redirectUrl` out to a
+   *  browser. Absent when the session has none, or on pre-panel servers. */
+  panelUrl?: string;
   /** Whether the session is editable RIGHT NOW: an edit hold is active and
    *  its preview video has finished building. Only ever true while
    *  `stopped` — never after `complete`, which is the point at which

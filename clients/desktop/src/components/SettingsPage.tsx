@@ -5,6 +5,7 @@ import {
   CaretRightIcon,
   CheckIcon,
   FunnelIcon,
+  LinkIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
@@ -28,13 +29,18 @@ import {
   normalizeServerUrl,
   setApiBase,
 } from "../serverConfig.js";
+import {
+  getLinkedPrograms,
+  unlinkProgram,
+  type ProgramLink,
+} from "../programLink.js";
 
 interface SettingsPageProps {
   onBack: () => void;
   isWayland?: boolean;
 }
 
-type SettingsSubpage = "menu" | "filtered-apps" | "advanced";
+type SettingsSubpage = "menu" | "filtered-apps" | "linked-programs" | "advanced";
 
 interface AppEntry {
   name: string;
@@ -238,6 +244,10 @@ export function SettingsPage({ onBack, isWayland }: SettingsPageProps) {
   // Single hook instance shared with the Filtered Apps subpage so the menu
   // row's count stays live as apps are toggled.
   const { blacklistedApps, toggleApp } = useBlacklistedApps();
+  // Device links, read fresh on mount and after every unlink so the menu
+  // row's count stays honest.
+  const [links, setLinks] = useState<ProgramLink[]>(() => getLinkedPrograms());
+  const refreshLinks = () => setLinks(getLinkedPrograms());
 
   const backToMenu = () => setSubpage("menu");
 
@@ -250,6 +260,14 @@ export function SettingsPage({ onBack, isWayland }: SettingsPageProps) {
             isWayland={isWayland}
             blacklistedApps={blacklistedApps}
             toggleApp={toggleApp}
+          />
+        );
+      case "linked-programs":
+        return (
+          <LinkedProgramsSettings
+            onBack={backToMenu}
+            links={links}
+            onUnlinked={refreshLinks}
           />
         );
       case "advanced":
@@ -292,6 +310,16 @@ export function SettingsPage({ onBack, isWayland }: SettingsPageProps) {
                 }
                 onClick={() => setSubpage("filtered-apps")}
               />
+              {/* Nothing linked → no row. Linking starts from the + menu,
+                  so an empty Linked Programs page has nothing to offer. */}
+              {links.length > 0 && (
+                <MenuRow
+                  icon={<LinkIcon size={18} weight="bold" aria-hidden="true" />}
+                  title="Linked Programs"
+                  description={`${links.length} program${links.length !== 1 ? "s" : ""} linked`}
+                  onClick={() => setSubpage("linked-programs")}
+                />
+              )}
               <MenuRow
                 icon={<WrenchIcon size={18} weight="fill" aria-hidden="true" />}
                 title="Advanced"
@@ -353,6 +381,176 @@ export function SettingsPage({ onBack, isWayland }: SettingsPageProps) {
         </motion.div>
       </AnimatePresence>
     </div>
+  );
+}
+
+// ── Linked Programs subpage ─────────────────────────────────
+
+/**
+ * A program's logo at settings-row size. Mirrors the + menu's icon handling:
+ * a broken or missing icon falls back to a glyph rather than an empty box.
+ */
+function ProgramIcon({ iconUrl }: { iconUrl?: string | null }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <div
+      style={{
+        width: 32,
+        height: 32,
+        borderRadius: radii.md,
+        background: colors.bg.selected,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: colors.text.secondary,
+        overflow: "hidden",
+      }}
+    >
+      {iconUrl && !failed ? (
+        <img
+          src={iconUrl}
+          alt=""
+          width={32}
+          height={32}
+          draggable={false}
+          onError={() => setFailed(true)}
+          style={{ objectFit: "contain", display: "block" }}
+        />
+      ) : (
+        <LinkIcon size={16} weight="bold" aria-hidden="true" />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The device links the + menu's instant start runs on: one row per paired
+ * program, with Unlink. Unlinking best-effort revokes the credential on the
+ * program's backend and always removes it locally — the next start from the
+ * + menu goes back through the program's consent page.
+ */
+function LinkedProgramsSettings({
+  onBack,
+  links,
+  onUnlinked,
+}: {
+  onBack: () => void;
+  links: ProgramLink[];
+  onUnlinked: () => void;
+}) {
+  // Registry lookup purely for presentation (display names + icons); the
+  // links themselves render fine without it.
+  const [registry, setRegistry] = useState<
+    Record<string, { displayName?: string; iconUrl?: string | null }>
+  >({});
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${getApiBase()}/api/programs`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => {
+        if (cancelled || !Array.isArray(d.programs)) return;
+        const byName: Record<string, { displayName?: string; iconUrl?: string | null }> = {};
+        for (const p of d.programs) byName[p.name] = { displayName: p.displayName, iconUrl: p.iconUrl };
+        setRegistry(byName);
+      })
+      .catch(() => {}); // cosmetic only
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleUnlink = async (link: ProgramLink) => {
+    const label = registry[link.program]?.displayName || link.program;
+    const yes = await confirm(
+      `Unlink ${label} from this device?\n\nStarting a session from the + menu will go through your browser again until you re-link.`,
+      { title: "Unlink program", kind: "warning" },
+    );
+    if (!yes) return;
+    setBusy(link.program);
+    const wasLast = links.length === 1;
+    try {
+      await unlinkProgram(link.program);
+    } finally {
+      setBusy(null);
+      onUnlinked();
+      // Nothing left to show, and no menu row to come back to.
+      if (wasLast) onBack();
+    }
+  };
+
+  return (
+    <PageChrome
+      title="Linked Programs"
+      description="Programs linked to this device can start a timelapse straight from the + menu."
+      onBack={onBack}
+    >
+      {links.length === 0 ? null : (
+        <div
+          style={{
+            borderRadius: radii.lg,
+            border: `1px solid ${colors.border.default}`,
+            background: colors.bg.surface,
+            padding: spacing.xs,
+          }}
+        >
+          {links.map((link) => {
+            const meta = registry[link.program];
+            const label = meta?.displayName || link.displayName || link.program;
+            return (
+              <div
+                key={link.program}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: spacing.md,
+                  padding: `${spacing.sm}px ${spacing.md}px`,
+                }}
+              >
+                <ProgramIcon iconUrl={meta?.iconUrl ?? link.iconUrl} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: fontSize.md,
+                      fontWeight: fontWeight.medium,
+                      color: colors.text.primary,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {label}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: fontSize.sm,
+                      color: colors.text.tertiary,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Linked {new Date(link.pairedAt).toLocaleDateString()} ·{" "}
+                    {new URL(link.pairUrl).hostname}
+                  </div>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy === link.program}
+                  onClick={() => void handleUnlink(link)}
+                  style={cardButtonStyle}
+                >
+                  {busy === link.program ? "Unlinking…" : "Unlink"}
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </PageChrome>
   );
 }
 

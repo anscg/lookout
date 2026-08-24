@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import type { StatusResponse, VideoResponse, SessionResponse } from "@lookout/shared";
 import { formatTrackedTime } from "../hooks/useSessionTimer.js";
@@ -138,7 +138,38 @@ export interface SessionDetailProps {
    *  while this view is polling (i.e. the timelapse just finished compiling).
    *  NOT fired when opening a session that is already complete. Carries the
    *  session's redirect-hook URL, if one was set at creation. */
-  onComplete?: (info: { redirectUrl: string | null }) => void;
+  onComplete?: (info: { redirectUrl: string | null; panelUrl?: string | null }) => void;
+  /**
+   * Fired once when the recording is first observed to be finished and
+   * processing — i.e. the user just saved. NOT fired when opening a session
+   * that was already stopped, and NOT fired while an edit hold is active
+   * (the user is on their way to the editor; the handoff belongs after they
+   * publish from there).
+   *
+   * Distinct from `onComplete`, which waits for the compile. A host that
+   * wants to collect something from the user should do it here instead —
+   * compiling can take many minutes and there is no reason to make anyone
+   * watch a progress bar before answering a question.
+   */
+  onSaved?: (info: {
+    redirectUrl: string | null;
+    panelUrl?: string | null;
+    status: StatusResponse["status"];
+  }) => void;
+  /**
+   * Host-supplied content rendered between the video and the session name.
+   * The desktop app puts a program's outstanding panel request here; the web
+   * SDK leaves it empty. Kept as a slot rather than a feature so this shared
+   * component stays unaware of what the host wants to say.
+   */
+  belowVideo?: ReactNode;
+  /**
+   * Host content pinned to the right-hand end of the name/date row — the
+   * desktop app puts a program's "Open in …" link there. A slot rather than a
+   * feature, so this shared component needn't know what the host wants to
+   * offer.
+   */
+  titleAction?: ReactNode;
   /** Override for the Edit button. When provided, clicking Edit calls this
    *  instead of opening the inline editor — e.g. the desktop app opens a
    *  dedicated resizable editor window (the main window is a fixed 480px). */
@@ -152,7 +183,10 @@ export function SessionDetail({
   showBack = true,
   onArchive,
   onComplete,
+  onSaved,
   onEdit,
+  belowVideo,
+  titleAction,
 }: SessionDetailProps) {
   const [sessionInfo, setSessionInfo] = useState<{ name: string; createdAt: string } | null>(null);
   const [isRenaming, setIsRenaming] = useState(false);
@@ -189,6 +223,9 @@ export function SessionDetail({
   const completeFiredRef = useRef(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+  const savedFiredRef = useRef(false);
+  const onSavedRef = useRef(onSaved);
+  onSavedRef.current = onSaved;
 
   // Fetch session info (name, createdAt) once
   useEffect(() => {
@@ -217,13 +254,42 @@ export function SessionDetail({
 
       const prevStatus = prevStatusRef.current;
       prevStatusRef.current = data.status;
+
+      // Just saved: the recording has ended and is now processing. Held
+      // sessions are skipped — their handoff is after the editor publishes,
+      // not while the user is still deciding what to cut.
+      const finishedRecording =
+        data.status === "stopped" ||
+        data.status === "compiling" ||
+        data.status === "complete";
+      const held = Boolean(data.editHoldUntil) && data.status !== "failed";
+      if (
+        finishedRecording &&
+        !held &&
+        !savedFiredRef.current &&
+        prevStatus !== null &&
+        prevStatus !== "stopped" &&
+        prevStatus !== "compiling" &&
+        prevStatus !== "complete"
+      ) {
+        savedFiredRef.current = true;
+        onSavedRef.current?.({
+          redirectUrl: data.redirectUrl ?? null,
+          panelUrl: data.panelUrl ?? null,
+          status: data.status,
+        });
+      }
+
       if (
         data.status === "complete" &&
         (prevStatus === "stopped" || prevStatus === "compiling") &&
         !completeFiredRef.current
       ) {
         completeFiredRef.current = true;
-        onCompleteRef.current?.({ redirectUrl: data.redirectUrl ?? null });
+        onCompleteRef.current?.({
+          redirectUrl: data.redirectUrl ?? null,
+          panelUrl: data.panelUrl ?? null,
+        });
       }
 
       // Fetch video URL when complete
@@ -347,6 +413,8 @@ export function SessionDetail({
               />
             </div>
           )}
+
+          {belowVideo}
 
           {/* Session name + date */}
           {sessionInfo && (
@@ -484,6 +552,14 @@ export function SessionDetail({
                     )}
                   </AnimatePresence>
                 </div>
+
+                {/* Pushed to the far end so it reads as an action on the
+                    session rather than another word in its title. */}
+                {titleAction && (
+                  <div style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}>
+                    {titleAction}
+                  </div>
+                )}
               </div>
               <motion.div
                 animate={{

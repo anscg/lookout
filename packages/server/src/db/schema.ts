@@ -73,6 +73,17 @@ export const programs = pgTable("programs", {
   // URL of a small square logo shown next to the program in pickers (e.g. the
   // desktop's + menu). NULL means clients fall back to a generic glyph.
   iconUrl: text("icon_url"),
+  // Desktop device-pairing endpoints (see docs/integration.md "Desktop
+  // instant start"). Both live on the PROGRAM's backend — Lookout never
+  // proxies them and never sees the credentials they mint. `pairUrl` handles
+  // the pairing lifecycle (GET consent page, POST code→token exchange,
+  // DELETE revoke); `startUrl` mints a session for an already-paired device.
+  // Both NULL (the default) means the program only supports the browser
+  // handoff via `newSessionUrl`. Setting one without the other is invalid at
+  // the API layer — clients treat the capability as present only when both
+  // are set.
+  pairUrl: text("pair_url"),
+  startUrl: text("start_url"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -133,6 +144,34 @@ export const sessions = pgTable(
     // backend (internal API `redirectUrl`), immutable thereafter. NULL = no
     // redirect.
     redirectUrl: text("redirect_url"),
+    // Program panel: an https URL the recording client renders IN-APP (a
+    // sheet with an iframe) when the timelapse finishes, instead of sending
+    // the user to the browser. Set at creation by the program's backend
+    // (internal API `panelUrl`), immutable thereafter. NULL = no panel.
+    //
+    // The URL is itself the capability: the program mints an unguessable
+    // per-session URL, so the panel needs no cookies (which a third-party
+    // frame would not receive anyway) and no credential of its own. It is
+    // returned only on the token-authenticated session endpoints, exactly
+    // like `redirectUrl`.
+    panelUrl: text("panel_url"),
+    // When the program confirmed it has what the panel was asking for.
+    //
+    // The client shows an outstanding panel as a prompt on the session page,
+    // and only the program knows when the ask is satisfied — the user may
+    // have finished on the program's own website instead of in the sheet, and
+    // Lookout has no way to see inside either. Set via
+    // POST /api/internal/sessions/:id/panel-resolved. NULL = still wanted.
+    panelResolvedAt: timestamp("panel_resolved_at", { withTimezone: true }),
+    // The program's own page for this session — its permalink, shown to the
+    // user as an "Open in <Program>" action on the session view.
+    //
+    // MUTABLE, unlike redirectUrl and panelUrl: a program often can't know
+    // this at creation, because the thing being linked to (a published
+    // timelapse, a submission) doesn't exist until the user finishes. Set or
+    // cleared any time via POST /api/internal/sessions/:id/view-url.
+    // NULL = no link, and clients show no action.
+    viewUrl: text("view_url"),
     // Set when the retention job has deleted this session's screenshot R2
     // objects (after SCREENSHOT_RETENTION_DAYS). The screenshot *rows* are
     // kept so capture timings stay queryable; this flag stops the job from

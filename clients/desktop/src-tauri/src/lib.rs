@@ -14,6 +14,7 @@ mod native_menu;
 mod native_tray;
 mod pipewire;
 mod screencast;
+mod secret_store;
 mod tray;
 mod window_shape;
 #[cfg(target_os = "windows")]
@@ -3834,6 +3835,9 @@ pub fn run() {
             window_shape::sync_window_frame,
             background_blur::sync_background_blur,
             open_external_url,
+            secret_store::secret_set,
+            secret_store::secret_get,
+            secret_store::secret_delete,
             native_menu::show_add_menu,
             native_menu::prefetch_add_menu_icons,
             request_screencast,

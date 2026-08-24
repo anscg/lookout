@@ -1,7 +1,7 @@
 import * as Sentry from "@sentry/react";
 import React, { useState, useEffect, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { confirm, message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "./logger.js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
@@ -9,14 +9,27 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   Gallery,
   SessionDetail,
+  Spinner,
   useTokenStore,
   useGallery,
   useHashRouter,
+  colors,
+  fontSize,
+  radii,
   type AddAnchor,
 } from "@lookout/react";
 import { getVersion } from "@tauri-apps/api/app";
 import { ArrowSquareOutIcon, GearSixIcon, PlusIcon } from "@phosphor-icons/react";
 import { isValidToken, extractToken } from "./utils.js";
+import {
+  StartLinkedError,
+  beginPairing,
+  completePairing,
+  getLink,
+  isLinkable,
+  parsePairCallback,
+  startLinkedSession,
+} from "./programLink.js";
 import {
   checkCameraPermission,
   checkScreenRecordingPermission,
@@ -39,6 +52,15 @@ import { useAnnouncement } from "./hooks/useAnnouncement.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
 import { UpdatePill } from "./components/UpdatePill.js";
 import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.js";
+import { ProgramPanel } from "./components/ProgramPanel.js";
+import { PanelPrompt } from "./components/PanelPrompt.js";
+import { OpenInProgram } from "./components/OpenInProgram.js";
+import {
+  getPanelState,
+  isPanelUrlAcceptable,
+  setPanelState,
+  shouldOfferPanel,
+} from "./programPanel.js";
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 import { getApiBase } from "./serverConfig.js";
 import { HeaderBar } from "./components/HeaderBar.js";
@@ -56,11 +78,27 @@ const API_BASE = getApiBase();
 // the final upload so a legitimately slow compile is never abandoned.
 const REDIRECT_POLL_MAX_MS = 35 * 60_000;
 
+/**
+ * What starting a program did, so a caller can tell "we opened your browser,
+ * keep waiting" apart from "nothing happened".
+ */
+export type ProgramStartOutcome =
+  /** A session began and the app has already navigated to the record page. */
+  | "started"
+  /** The program's site or consent page opened; a deep link is expected next. */
+  | "browser"
+  /** Nothing opened. */
+  | "failed";
+
 interface Program {
   name: string;
   displayName?: string;
   newSessionUrl: string;
   iconUrl?: string | null;
+  // Desktop instant-start endpoints (both present or both null) — see
+  // programLink.ts. Older servers simply omit them.
+  pairUrl?: string | null;
+  startUrl?: string | null;
 }
 
 /** Pause a session by token. Fire-and-forget, logs errors. */
@@ -164,11 +202,113 @@ function MainWindowApp() {
     );
   }, []);
 
+  // The program panel currently on screen, if any. A session's `panelUrl` is
+  // shown in-app in place of the redirect hop, so the two are mutually
+  // exclusive per session — see openPanelOrRedirect.
+  const [panel, setPanel] = useState<{
+    token: string;
+    url: string;
+    fallbackUrl: string | null;
+  } | null>(null);
+  // Bumped on panel resolution so an open SessionDetail re-evaluates whether
+  // it still owes a prompt (the state lives in localStorage, not React).
+  const [panelNonce, setPanelNonce] = useState(0);
+
+  /**
+   * A display name for whoever owns a panel URL. Matched against the cached
+   * program registry by origin, since the session list doesn't carry the
+   * program name; falls back to the host, which is honest and specific
+   * enough (the sheet shows the full origin next to it anyway).
+   */
+  const programLabelForUrl = useCallback((url: string): string => {
+    let origin: string;
+    let host: string;
+    try {
+      const parsed = new URL(url);
+      origin = parsed.origin;
+      host = parsed.hostname.replace(/^www\./, "");
+    } catch {
+      return "This program";
+    }
+    const match = programsRef.current.find((p) =>
+      [p.newSessionUrl, p.pairUrl, p.startUrl].some((candidate) => {
+        if (!candidate) return false;
+        try {
+          return new URL(candidate).origin === origin;
+        } catch {
+          return false;
+        }
+      }),
+    );
+    return match?.displayName || match?.name || host;
+  }, []);
+
+  /** The same registry match's icon, for the panel's attribution row. */
+  const programIconForUrl = useCallback((url: string): string | null => {
+    let origin: string;
+    try {
+      origin = new URL(url).origin;
+    } catch {
+      return null;
+    }
+    const match = programsRef.current.find((p) =>
+      [p.newSessionUrl, p.pairUrl, p.startUrl].some((candidate) => {
+        if (!candidate) return false;
+        try {
+          return new URL(candidate).origin === origin;
+        } catch {
+          return false;
+        }
+      }),
+    );
+    return match?.iconUrl ?? null;
+  }, []);
+
+  const openPanel = useCallback((token: string, url: string, fallbackUrl: string | null) => {
+    setPanel({ token, url, fallbackUrl });
+  }, []);
+
+  /**
+   * Open a session's panel, if it has one that hasn't been dealt with.
+   *
+   * Called when the recording is SAVED, not when it finishes compiling: a
+   * compile can run for many minutes, and there is no reason to make someone
+   * watch a progress bar before answering "what should this be called?". The
+   * program gets its answers while the video builds.
+   *
+   * Never re-offered once the program says it has what it needed — the user
+   * may have answered on the program's own site instead.
+   */
+  const maybeOpenPanel = useCallback(
+    (token: string, redirectUrl: string | null, panelUrl: string | null | undefined) => {
+      if (isPanelUrlAcceptable(panelUrl) && getPanelState(token) === "pending") {
+        openPanel(token, panelUrl, redirectUrl);
+        return true;
+      }
+      return false;
+    },
+    [openPanel],
+  );
+
+  /**
+   * The compile finished. The redirect hook is the browser handoff and still
+   * belongs here — but only for sessions with no panel, since a panel is the
+   * same handoff done in-app and firing both would send the user to a browser
+   * tab they already dealt with.
+   */
+  const handleCompleted = useCallback(
+    (token: string, redirectUrl: string | null, panelUrl: string | null | undefined) => {
+      if (isPanelUrlAcceptable(panelUrl)) return;
+      fireRedirect(token, redirectUrl);
+    },
+    [fireRedirect],
+  );
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
-    listen<{ token: string; status?: string | null; redirectUrl?: string | null }>(
+    listen<{ token: string; status?: string | null; redirectUrl?: string | null; panelUrl?: string | null }>(
       EDITED_EVENT,
       (event) => {
         console.log("[app] editor window published — refreshing");
@@ -183,12 +323,28 @@ function MainWindowApp() {
         const token = event.payload?.token;
         if (!token) return;
 
+        // Publishing from the editor IS the save for a held session, so the
+        // panel opens now — whether the cut compile is instant or still
+        // running. Only the redirect has to wait for `complete`.
+        const publishedPanel = maybeOpenPanel(
+          token,
+          event.payload?.redirectUrl ?? null,
+          event.payload?.panelUrl ?? null,
+        );
+
         // Instant publish (no cuts): the /compile response already told us
         // it's `complete` and carried the redirect URL. Fire now — no poll.
         if (event.payload?.status === "complete") {
-          fireRedirect(token, event.payload.redirectUrl ?? null);
+          handleCompleted(
+            token,
+            event.payload.redirectUrl ?? null,
+            event.payload.panelUrl ?? null,
+          );
           return;
         }
+        // A panel is already open/handled; the poll below only exists to fire
+        // the redirect hook, which a panelled session never does.
+        if (publishedPanel) return;
 
         // A compile is running server-side. Poll until it's terminal.
         // The worker's assemble step alone can run up to ASSEMBLE_TIMEOUT_MS
@@ -205,7 +361,7 @@ function MainWindowApp() {
               const data = await res.json();
               if (data.status === "complete") {
                 galleryRefreshRef.current();
-                fireRedirect(token, data.redirectUrl ?? null);
+                handleCompleted(token, data.redirectUrl ?? null, data.panelUrl ?? null);
                 return;
               }
               if (data.status === "failed") return;
@@ -224,7 +380,7 @@ function MainWindowApp() {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [fireRedirect]);
+  }, [maybeOpenPanel, handleCompleted]);
 
   // Initialize blacklisted apps sync from localStorage to Rust backend
   useBlacklistedApps();
@@ -287,6 +443,82 @@ function MainWindowApp() {
   // Windows/Linux add menu — a DOM replica of the macOS NSPanel popup.
   const [addMenu, setAddMenu] = useState<{ items: AddMenuPopupItem[]; anchor: AddAnchor } | null>(null);
 
+  // Instant-start progress pill ("Starting Lapse…"). Only spans the couple of
+  // network round-trips of a linked start; cleared in every outcome.
+  const [startingProgram, setStartingProgram] = useState<string | null>(null);
+
+  /**
+   * Start a session through an established device link, then route the token
+   * through the same path a deep link takes. Every failure lands somewhere
+   * useful: a rejected/moved credential re-runs the pairing consent (one
+   * browser hop, exactly what the old flow cost), anything else falls back
+   * to the program's browser flow.
+   */
+  const startViaLink = useCallback(
+    async (program: Program): Promise<ProgramStartOutcome> => {
+      const label = program.displayName || program.name;
+      setStartingProgram(label);
+      try {
+        const token = await startLinkedSession(program);
+        await handleDeepLinkRef.current([`lookout://session/?token=${token}`]);
+        return "started";
+      } catch (e) {
+        const reason = e instanceof StartLinkedError ? e.reason : "unavailable";
+        console.warn(`[pair] instant start failed (${reason}):`, e);
+        if (reason === "unauthorized" || reason === "origin-changed") {
+          // The link was dropped by startLinkedSession; re-run consent.
+          try {
+            await beginPairing(program);
+            return "browser";
+          } catch (e2) {
+            console.error("[pair] re-pairing failed, opening browser flow:", e2);
+          }
+        }
+        try {
+          await invoke("open_external_url", { url: program.newSessionUrl });
+          return "browser";
+        } catch (e3) {
+          console.error("[pair] browser fallback failed too:", e3);
+          return "failed";
+        }
+      } finally {
+        setStartingProgram(null);
+      }
+    },
+    [],
+  );
+
+  /**
+   * Start a session for a program, whichever way it supports: a paired
+   * program skips the browser entirely; a linkable-but-unpaired one runs the
+   * pairing consent hop (one browser visit, the same cost as the old flow)
+   * and starts on the way back; programs without the capability open their
+   * site, as always. Shared by the + menu and the Start-a-recording page.
+   */
+  const openProgram = useCallback(
+    async (program: Program): Promise<ProgramStartOutcome> => {
+      if (isLinkable(program)) {
+        if (getLink(program.name)) {
+          return await startViaLink(program);
+        }
+        try {
+          await beginPairing(program);
+          return "browser";
+        } catch (e) {
+          console.error("[programs] pairing start failed, opening browser flow:", e);
+        }
+      }
+      try {
+        await invoke("open_external_url", { url: program.newSessionUrl });
+        return "browser";
+      } catch (e) {
+        console.error("[programs] failed to open program url:", e);
+        return "failed";
+      }
+    },
+    [startViaLink],
+  );
+
   /** Acts on an add-menu choice, from either the native panel or the DOM popup. */
   const handleMenuChoice = useCallback(
     async (choice: string | null) => {
@@ -297,14 +529,11 @@ function MainWindowApp() {
       }
       const program = programsRef.current.find((p) => `program:${p.name}` === choice);
       if (!program) return;
-      try {
-        await invoke("open_external_url", { url: program.newSessionUrl });
-      } catch (e) {
-        console.error("[add-menu] failed to open program url:", e);
+      if ((await openProgram(program)) === "failed") {
         navigate({ page: "add" });
       }
     },
-    [navigate],
+    [navigate, openProgram],
   );
 
   const handleAdd = useCallback(
@@ -426,6 +655,34 @@ function MainWindowApp() {
       console.log("[app] deep link received:", urls);
       for (const url of urls) {
         if (url === lastDeepLink.current) return; // already handled
+
+        // Pairing callback (lookout://pair?code=…&state=…): finish the
+        // device link, then start the session the user originally asked for.
+        // Stale/forged callbacks match no pending pairing and are ignored.
+        if (parsePairCallback(url)) {
+          lastDeepLink.current = url;
+          getCurrentWindow().setFocus().catch(() => {});
+          try {
+            const linked = await completePairing(url);
+            if (linked) {
+              if (!programsRef.current.some((p) => p.name === linked)) {
+                await fetchPrograms();
+              }
+              const program = programsRef.current.find((p) => p.name === linked);
+              if (program && isLinkable(program)) {
+                await startViaLink(program);
+              }
+            }
+          } catch (e) {
+            console.error("[pair] pairing failed:", e);
+            await message("Linking failed — you can retry from the + menu.", {
+              title: "Lookout",
+              kind: "error",
+            }).catch(() => {});
+          }
+          return;
+        }
+
         const token = extractToken(url);
         if (!token) continue;
 
@@ -456,7 +713,7 @@ function MainWindowApp() {
         return;
       }
     },
-    [tokenStore, navigate, route],
+    [tokenStore, navigate, route, fetchPrograms, startViaLink],
   );
   // Ref so effects can call the latest version without depending on it
   const handleDeepLinkRef = React.useRef(handleDeepLinkUrls);
@@ -647,6 +904,66 @@ function MainWindowApp() {
     navigate({ page: "gallery" });
   }, [gallery, navigate]);
 
+  // Per-session program bits for the session view: an outstanding panel
+  // request, and the program's own link for this session. One fetch, recomputed
+  // when the route changes or a panel resolves.
+  const [panelPrompt, setPanelPrompt] = useState<{
+    token: string;
+    url: string;
+    fallbackUrl: string | null;
+  } | null>(null);
+  const [openIn, setOpenIn] = useState<{
+    token: string;
+    url: string;
+    label: string;
+  } | null>(null);
+  useEffect(() => {
+    if (route.page !== "session" || !route.token) {
+      setPanelPrompt(null);
+      setOpenIn(null);
+      return;
+    }
+    const token = route.token;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/sessions/${token}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        setPanelPrompt(
+          shouldOfferPanel(token, data.panelUrl, data.panelResolved)
+            ? { token, url: data.panelUrl, fallbackUrl: data.redirectUrl ?? null }
+            : null,
+        );
+        // Only offered when the program actually published a link. The label
+        // comes from the registry when it's known, so the button reads "Open
+        // in Lapse" rather than "Open in lapse"; the raw name is the fallback
+        // for a program that has left the registry.
+        const viewUrl: unknown = data.viewUrl;
+        if (typeof viewUrl === "string" && /^https?:\/\//i.test(viewUrl)) {
+          const raw: string | null = data.program ?? null;
+          const known = raw
+            ? programsRef.current.find((p) => p.name === raw)
+            : undefined;
+          setOpenIn({
+            token,
+            url: viewUrl,
+            label: known?.displayName || raw || "program",
+          });
+        } else {
+          setOpenIn(null);
+        }
+      } catch {
+        // Offline or transient — showing neither is the safe default; both
+        // reappear next time the page is opened.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [route, panelNonce]);
+
   // Step 2: Route
   const content = (() => {
     // The editor owns the session while its window is open.
@@ -689,6 +1006,7 @@ function MainWindowApp() {
         return (
           <AddSessionPage
             onBack={toGallery}
+            onOpenProgram={openProgram}
             onStart={(token) => {
               tokenStore.addToken(token);
               handleDeepLinkRef.current([`lookout://session/?token=${token}`]);
@@ -714,13 +1032,31 @@ function MainWindowApp() {
             token={route.token}
             apiBaseUrl={API_BASE}
             onEdit={() => { void openEditorWindow(route.token); }}
-            onComplete={({ redirectUrl }) => {
-              // Redirect hook: the session's creator asked us to send the
-              // user somewhere once their timelapse is ready. Shared
-              // de-dupe with the post-edit watcher above, so a session
-              // seen finishing by both paths only redirects once.
-              fireRedirect(route.token, redirectUrl);
+            onSaved={({ redirectUrl, panelUrl }) => {
+              // The recording just ended. If the program wants something,
+              // ask now rather than after the compile — the sheet sits over
+              // the progress bar and the answers land while it builds.
+              maybeOpenPanel(route.token, redirectUrl, panelUrl);
             }}
+            onComplete={({ redirectUrl, panelUrl }) => {
+              // Browser handoff for sessions with no panel. Shared de-dupe
+              // with the post-edit watcher above, so a session seen finishing
+              // by both paths only redirects once.
+              handleCompleted(route.token, redirectUrl, panelUrl);
+            }}
+            titleAction={
+              openIn && openIn.token === route.token ? (
+                <OpenInProgram programLabel={openIn.label} url={openIn.url} />
+              ) : undefined
+            }
+            belowVideo={
+              panelPrompt && panel?.token !== panelPrompt.token && (
+                <PanelPrompt
+                  programLabel={programLabelForUrl(panelPrompt.url)}
+                  onOpen={() => openPanel(panelPrompt.token, panelPrompt.url, panelPrompt.fallbackUrl)}
+                />
+              )
+            }
             onBack={toGalleryRefreshed}
             showBack={!isLinux}
             onArchive={async () => {
@@ -916,6 +1252,70 @@ function MainWindowApp() {
               void handleMenuChoice(choice);
             }}
           />
+        )}
+      </AnimatePresence>
+      {/* Program panel: the session owner's own page, in a sheet, instead of
+          bouncing the user to a browser tab. */}
+      {panel && (
+        <ProgramPanel
+          key={panel.token}
+          url={panel.url}
+          programLabel={programLabelForUrl(panel.url)}
+          programIconUrl={programIconForUrl(panel.url)}
+          fallbackUrl={panel.fallbackUrl}
+          onDone={() => {
+            setPanelState(panel.token, "done");
+            setPanel(null);
+            setPanelNonce((n) => n + 1);
+            gallery.refresh();
+          }}
+          onDismiss={() => {
+            // Closing is always free. The ask persists as a card on the
+            // session page rather than vanishing silently.
+            setPanelState(panel.token, "dismissed");
+            setPanel(null);
+            setPanelNonce((n) => n + 1);
+          }}
+        />
+      )}
+
+      {/* Instant-start progress: shows while a linked program mints the
+          session. Fixed to the viewport, outside the route transition. */}
+      <AnimatePresence>
+        {startingProgram && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8, transition: { duration: 0.12 } }}
+            style={{
+              position: "fixed",
+              bottom: 20,
+              left: 0,
+              right: 0,
+              display: "flex",
+              justifyContent: "center",
+              zIndex: 10001,
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 14px",
+                borderRadius: radii.lg,
+                border: `1px solid ${colors.border.default}`,
+                background: colors.bg.panel,
+                color: colors.text.secondary,
+                fontSize: fontSize.sm,
+                boxShadow: "0 4px 18px rgba(0, 0, 0, 0.18)",
+              }}
+            >
+              <Spinner size="sm" />
+              <span>Starting {startingProgram}…</span>
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
       <div style={{

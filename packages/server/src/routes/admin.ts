@@ -73,6 +73,30 @@ function normalizeIconUrl(raw: unknown): string | null | undefined {
   return trimmed;
 }
 
+// Validation for the desktop pairing endpoints (pairUrl/startUrl). These URLs
+// receive device credentials in Authorization headers, so unlike the other
+// program URLs they must be https — plain http on localhost/127.0.0.1 is
+// allowed purely for development. Empty/whitespace clears (NULL).
+function normalizeDesktopUrl(raw: unknown, field: string): string | null | undefined {
+  if (raw === undefined) return undefined; // not provided → leave unchanged
+  if (raw === null) return null;
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`${field} must be a valid URL`);
+  }
+  const isLocalhost =
+    parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLocalhost)) {
+    throw new Error(`${field} must be an https URL (http is allowed only on localhost)`);
+  }
+  return trimmed;
+}
+
 // Trim a display name; empty/whitespace means "unset" (NULL → falls back to
 // the raw program name). `undefined` means "leave unchanged" on patch.
 function normalizeDisplayName(raw: unknown): string | null | undefined {
@@ -90,6 +114,8 @@ const createProgramBodySchema = {
     displayName: { type: "string" as const, maxLength: 255 },
     newSessionUrl: { type: "string" as const, maxLength: 2048 },
     iconUrl: { type: "string" as const, maxLength: 2048 },
+    pairUrl: { type: "string" as const, maxLength: 2048 },
+    startUrl: { type: "string" as const, maxLength: 2048 },
   },
   required: ["name"] as const,
   additionalProperties: false,
@@ -104,6 +130,10 @@ const patchProgramBodySchema = {
     displayName: { type: ["string", "null"] as const, maxLength: 255 },
     // Pass "" to clear the icon (pickers fall back to a generic glyph).
     iconUrl: { type: ["string", "null"] as const, maxLength: 2048 },
+    // Desktop instant-start endpoints. Pass "" to clear; both must end up
+    // set (or both unset) or the request is rejected.
+    pairUrl: { type: ["string", "null"] as const, maxLength: 2048 },
+    startUrl: { type: ["string", "null"] as const, maxLength: 2048 },
   },
   additionalProperties: false,
 };
@@ -217,6 +247,8 @@ export async function adminRoutes(app: FastifyInstance) {
         displayName: schema.programs.displayName,
         newSessionUrl: schema.programs.newSessionUrl,
         iconUrl: schema.programs.iconUrl,
+        pairUrl: schema.programs.pairUrl,
+        startUrl: schema.programs.startUrl,
         createdAt: schema.programs.createdAt,
       })
       .from(schema.programs)
@@ -344,6 +376,8 @@ export async function adminRoutes(app: FastifyInstance) {
         displayName: p.displayName,
         newSessionUrl: p.newSessionUrl,
         iconUrl: p.iconUrl,
+        pairUrl: p.pairUrl,
+        startUrl: p.startUrl,
         createdAt: p.createdAt,
         keys: (keysByProgram.get(p.id) ?? []).map((k) => ({
           id: k.id,
@@ -388,7 +422,14 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // Create a program and its first API key.
   app.post<{
-    Body: { name: string; displayName?: string; newSessionUrl?: string; iconUrl?: string };
+    Body: {
+      name: string;
+      displayName?: string;
+      newSessionUrl?: string;
+      iconUrl?: string;
+      pairUrl?: string;
+      startUrl?: string;
+    };
   }>(
     "/api/admin/programs",
     { schema: { body: createProgramBodySchema } },
@@ -400,13 +441,24 @@ export async function adminRoutes(app: FastifyInstance) {
       const displayName = normalizeDisplayName(request.body.displayName) ?? null;
       let newSessionUrl: string | null;
       let iconUrl: string | null;
+      let pairUrl: string | null;
+      let startUrl: string | null;
       try {
         newSessionUrl = normalizeNewSessionUrl(request.body.newSessionUrl) ?? null;
         iconUrl = normalizeIconUrl(request.body.iconUrl) ?? null;
+        pairUrl = normalizeDesktopUrl(request.body.pairUrl, "pairUrl") ?? null;
+        startUrl = normalizeDesktopUrl(request.body.startUrl, "startUrl") ?? null;
       } catch (e) {
         return reply
           .code(400)
           .send({ error: e instanceof Error ? e.message : "invalid URL" });
+      }
+      // Half a capability is worse than none: a pair URL with nowhere to
+      // start from (or vice versa) would strand paired devices.
+      if (!!pairUrl !== !!startUrl) {
+        return reply
+          .code(400)
+          .send({ error: "pairUrl and startUrl must be set together" });
       }
 
       const existing = await db.query.programs.findFirst({
@@ -425,7 +477,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const result = await db.transaction(async (tx) => {
         const [program] = await tx
           .insert(schema.programs)
-          .values({ name, displayName, newSessionUrl, iconUrl })
+          .values({ name, displayName, newSessionUrl, iconUrl, pairUrl, startUrl })
           .returning();
         const [key] = await tx
           .insert(schema.apiKeys)
@@ -440,18 +492,22 @@ export async function adminRoutes(app: FastifyInstance) {
         displayName: result.program.displayName,
         newSessionUrl: result.program.newSessionUrl,
         iconUrl: result.program.iconUrl,
+        pairUrl: result.program.pairUrl,
+        startUrl: result.program.startUrl,
         key: result.key.key,
       });
     },
   );
 
-  // Update a program's display name and/or new-session URL (set or clear each).
+  // Update a program's display name and/or URLs (set or clear each).
   app.patch<{
     Params: { id: string };
     Body: {
       newSessionUrl?: string | null;
       displayName?: string | null;
       iconUrl?: string | null;
+      pairUrl?: string | null;
+      startUrl?: string | null;
     };
   }>(
     "/api/admin/programs/:id",
@@ -459,9 +515,13 @@ export async function adminRoutes(app: FastifyInstance) {
     async (request, reply) => {
       let newSessionUrl: string | null | undefined;
       let iconUrl: string | null | undefined;
+      let pairUrl: string | null | undefined;
+      let startUrl: string | null | undefined;
       try {
         newSessionUrl = normalizeNewSessionUrl(request.body.newSessionUrl);
         iconUrl = normalizeIconUrl(request.body.iconUrl);
+        pairUrl = normalizeDesktopUrl(request.body.pairUrl, "pairUrl");
+        startUrl = normalizeDesktopUrl(request.body.startUrl, "startUrl");
       } catch (e) {
         return reply
           .code(400)
@@ -474,14 +534,37 @@ export async function adminRoutes(app: FastifyInstance) {
         newSessionUrl?: string | null;
         displayName?: string | null;
         iconUrl?: string | null;
+        pairUrl?: string | null;
+        startUrl?: string | null;
       } = {};
       if (newSessionUrl !== undefined) set.newSessionUrl = newSessionUrl;
       if (displayName !== undefined) set.displayName = displayName;
       if (iconUrl !== undefined) set.iconUrl = iconUrl;
+      if (pairUrl !== undefined) set.pairUrl = pairUrl;
+      if (startUrl !== undefined) set.startUrl = startUrl;
       if (Object.keys(set).length === 0) {
         return reply
           .code(400)
-          .send({ error: "Provide newSessionUrl, displayName and/or iconUrl" });
+          .send({ error: "Provide newSessionUrl, displayName, iconUrl, pairUrl and/or startUrl" });
+      }
+
+      // The pair/start pair must stay both-set or both-unset AFTER the patch,
+      // so validate against the merged state, not just the request body.
+      if (pairUrl !== undefined || startUrl !== undefined) {
+        const current = await db.query.programs.findFirst({
+          where: eq(schema.programs.id, request.params.id),
+          columns: { pairUrl: true, startUrl: true },
+        });
+        if (!current) {
+          return reply.code(404).send({ error: "Program not found" });
+        }
+        const nextPair = pairUrl !== undefined ? pairUrl : current.pairUrl;
+        const nextStart = startUrl !== undefined ? startUrl : current.startUrl;
+        if (!!nextPair !== !!nextStart) {
+          return reply
+            .code(400)
+            .send({ error: "pairUrl and startUrl must be set together" });
+        }
       }
 
       const [updated] = await db
@@ -494,6 +577,8 @@ export async function adminRoutes(app: FastifyInstance) {
           displayName: schema.programs.displayName,
           newSessionUrl: schema.programs.newSessionUrl,
           iconUrl: schema.programs.iconUrl,
+          pairUrl: schema.programs.pairUrl,
+          startUrl: schema.programs.startUrl,
         });
 
       if (!updated) {

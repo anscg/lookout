@@ -332,6 +332,20 @@ export async function sessionRoutes(app: FastifyInstance) {
         clipsEnabled: session.clipsEnabled,
         frameIntervalMs: CLIP_FRAME_INTERVAL_MS,
         redirectUrl: session.redirectUrl,
+        // Program panel — clients that can render one show it in-app when the
+        // compile lands, instead of following redirectUrl out to a browser.
+        panelUrl: session.panelUrl,
+        // Whether the program has confirmed it got what the panel asked for.
+        // Clients stop offering the panel once this is true.
+        panelResolved: session.panelResolvedAt !== null,
+        // The program's page for this session, if it published one. Clients
+        // offer it as an "Open in <Program>" action.
+        viewUrl: session.viewUrl,
+        // Which program's API key created this session (registry `name`), or
+        // null for the global/legacy key. Lets a client that was HANDED a
+        // token by a program's backend (desktop instant start) verify the
+        // token really belongs to the program it asked before recording.
+        program: session.program,
         metadata: session.metadata ?? {},
       };
     },
@@ -1254,6 +1268,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         // Redirect hook — clients watching the compile open this once the
         // status flips to "complete". Absent when the session has none.
         redirectUrl: session.redirectUrl ?? undefined,
+        // Program panel, shown in-app in place of the redirect. Absent when
+        // the session has none.
+        panelUrl: session.panelUrl ?? undefined,
         // Edit hold. `editable` flips true when the preview build lands;
         // until then a set `editHoldUntil` means "still preparing".
         editable: sessionEditability(session).editable,

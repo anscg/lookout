@@ -304,6 +304,137 @@ describe("admin dashboard", () => {
   });
 });
 
+describe("desktop instant-start endpoints (pairUrl/startUrl)", () => {
+  it("sets both endpoints together and exposes them everywhere", async () => {
+    const { id } = await createProgram(
+      "lapse",
+      "https://lapse.example.com/new?desktop=true",
+    );
+
+    const set = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: {
+        pairUrl: "https://lapse.example.com/lookout/pair",
+        startUrl: "https://lapse.example.com/lookout/start",
+      },
+    });
+    expect(set.statusCode).toBe(200);
+    expect(set.json().pairUrl).toBe("https://lapse.example.com/lookout/pair");
+    expect(set.json().startUrl).toBe("https://lapse.example.com/lookout/start");
+
+    // Public registry carries them for the desktop app.
+    const pub = await app.inject({ method: "GET", url: "/api/programs" });
+    expect(pub.json().programs[0]).toMatchObject({
+      name: "lapse",
+      pairUrl: "https://lapse.example.com/lookout/pair",
+      startUrl: "https://lapse.example.com/lookout/start",
+    });
+
+    // Admin list too.
+    const adminList = await app.inject({
+      method: "GET",
+      url: "/api/admin/programs",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    expect(adminList.json().programs[0].pairUrl).toBe(
+      "https://lapse.example.com/lookout/pair",
+    );
+  });
+
+  it("accepts both at creation and clears both via PATCH", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/admin/programs",
+      headers: { authorization: ADMIN_AUTH },
+      payload: {
+        name: "lapse",
+        newSessionUrl: "https://lapse.example.com/new",
+        pairUrl: "https://lapse.example.com/pair",
+        startUrl: "https://lapse.example.com/start",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().pairUrl).toBe("https://lapse.example.com/pair");
+
+    const cleared = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${created.json().id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: { pairUrl: "", startUrl: "" },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().pairUrl).toBeNull();
+    expect(cleared.json().startUrl).toBeNull();
+  });
+
+  it("rejects half a capability — one endpoint without the other", async () => {
+    // At creation.
+    const createHalf = await app.inject({
+      method: "POST",
+      url: "/api/admin/programs",
+      headers: { authorization: ADMIN_AUTH },
+      payload: { name: "half", pairUrl: "https://half.example.com/pair" },
+    });
+    expect(createHalf.statusCode).toBe(400);
+
+    // Via PATCH, against the merged state: setting only one on a program
+    // with neither fails…
+    const { id } = await createProgram("lapse");
+    const patchHalf = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: { startUrl: "https://lapse.example.com/start" },
+    });
+    expect(patchHalf.statusCode).toBe(400);
+
+    // …and clearing only one of an established pair fails too.
+    await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: {
+        pairUrl: "https://lapse.example.com/pair",
+        startUrl: "https://lapse.example.com/start",
+      },
+    });
+    const clearHalf = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: { pairUrl: "" },
+    });
+    expect(clearHalf.statusCode).toBe(400);
+  });
+
+  it("requires https (http allowed only on localhost)", async () => {
+    const { id } = await createProgram("lapse");
+    const insecure = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: {
+        pairUrl: "http://lapse.example.com/pair",
+        startUrl: "https://lapse.example.com/start",
+      },
+    });
+    expect(insecure.statusCode).toBe(400);
+
+    const dev = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: {
+        pairUrl: "http://localhost:3100/pair",
+        startUrl: "http://127.0.0.1:3100/start",
+      },
+    });
+    expect(dev.statusCode).toBe(200);
+  });
+});
+
 describe("public programs registry", () => {
   it("lists only programs with a new-session URL", async () => {
     await createProgram("withurl", "https://withurl.example.com/new?desktop=true");

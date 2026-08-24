@@ -192,6 +192,9 @@ Returns the current state of a session.
   "clipsEnabled": false,
   "frameIntervalMs": 4000,
   "redirectUrl": null,
+  "panelUrl": null,
+  "viewUrl": null,
+  "program": "fallout",
   "metadata": {}
 }
 ```
@@ -201,6 +204,14 @@ Returns the current state of a session.
 `clipsEnabled` / `frameIntervalMs` are the [clips](#clips) capability signal. This endpoint is the session-recovery fetch clients make before recording, so a clip-capable client knows **before its first capture** whether to record clips (and at what cadence) — the very first upload of a clips session is already a clip.
 
 `redirectUrl` is the session's [redirect hook](#create-session) (`null` when unset): clients watching the compile open it once the status flips to `complete`.
+
+`viewUrl` is the program's own page for this session (`null` when unset) — clients offer it as an "Open in <Program>" action, opened in the user's real browser. Mutable via `POST /api/internal/sessions/:id/view-url`.
+
+`panelResolved` is `true` once the program has confirmed the panel's ask is satisfied (via `POST /api/internal/sessions/:id/panel-resolved`). Clients stop offering the panel when it is — the user may have answered on the program's own website, which the client cannot observe.
+
+`panelUrl` is the session's [program panel](../../docs/integration.md#program-panels-in-app-forms) (`null` when unset): an https URL the recording client renders in-app, in a sheet, when the compile lands — instead of following `redirectUrl` out to a browser. Clients that can't render one ignore it and use `redirectUrl`.
+
+`program` is the registry name of the program whose API key created the session (`null` for the legacy global key). Clients that are *handed* a token by a program's backend — the desktop app's instant start — use it to verify the token belongs to the program they asked before recording.
 
 ---
 
@@ -832,6 +843,8 @@ Creates a new session in `pending` state.
 | `metadata` | object | no | Arbitrary JSON metadata to attach to the session (max 50 properties) |
 | `clips` | boolean | no | Whether this session accepts [clip uploads](#clips) (~6 frames/min video). Default **`true`**; pass `false` to opt out and get the legacy 1 JPEG/min payload. **Immutable after creation.** |
 | `redirectUrl` | string | no | Redirect hook: http(s) URL (max 2048 chars) the recording client opens in the user's browser once the timelapse finishes compiling. Fires at most once, only for a live completion (not on re-opening a finished session). **Immutable after creation.** |
+| `viewUrl` | string | no | The program's own page for this session (its permalink), offered to the user as an "Open in <Program>" action. `http(s)`, max 2048 chars. **Mutable** — set or clear it later with `POST /api/internal/sessions/:id/view-url`, since the target usually doesn't exist at creation. |
+| `panelUrl` | string | no | Program panel: **https** URL (max 2048 chars; `http` allowed on `localhost`/`127.0.0.1` for local development) the recording client renders in-app in a sheet as soon as the recording is **saved** (not when the compile finishes), in place of the redirect hop. The panel therefore loads while the session is still `compiling`, with no `videoUrl` yet. Must be unguessable and per-session — the URL is the panel's only credential, since a third-party frame receives no cookies. Takes precedence over `redirectUrl`, which stays the fallback. **Immutable after creation.** |
 
 **Response `201 Created`:**
 ```json
