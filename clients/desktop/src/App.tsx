@@ -679,8 +679,13 @@ function MainWindowApp() {
                 await fetchPrograms();
               }
               const program = programsRef.current.find((p) => p.name === linked);
-              if (program && isLinkable(program)) {
-                await startViaLink(program);
+              // `openProgram` rather than `startViaLink`: the credential is in
+              // hand, so it takes the instant path, and a program whose row
+              // lost its `startUrl` while the user was consenting still opens
+              // its site. Pairing and then getting nothing is the one outcome
+              // worth ruling out - the user asked for a recording.
+              if (program) {
+                await openProgram(program);
               }
             }
           } catch (e) {
@@ -723,7 +728,7 @@ function MainWindowApp() {
         return;
       }
     },
-    [tokenStore, navigate, route, fetchPrograms, startViaLink],
+    [tokenStore, navigate, route, fetchPrograms, openProgram],
   );
   // Ref so effects can call the latest version without depending on it
   const handleDeepLinkRef = React.useRef(handleDeepLinkUrls);
