@@ -532,7 +532,17 @@ export async function internalRoutes(app: FastifyInstance) {
     });
 
     if (!session) return null;
-    if (!request.programId || session.programId !== request.programId) return null;
+
+    // Ownership, not "is scoped": the caller must be the session's owner, and
+    // for a key with no program that owner is the unowned pool. `programId` is
+    // NULL for legacy/global keys by design, so demanding a program here locked
+    // every pre-programs key out of its own sessions.
+    //
+    // What this still refuses is the case worth refusing: one program writing
+    // another's session, or either direction across the legacy boundary.
+    const owner = session.programId ?? null;
+    const caller = request.programId ?? null;
+    if (owner !== caller) return null;
 
     return { id: session.id, panelResolvedAt: session.panelResolvedAt };
   }
