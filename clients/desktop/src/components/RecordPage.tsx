@@ -40,34 +40,42 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
   const [checkError, setCheckError] = useState<string | null>(null);
   const [isPrompting, setIsPrompting] = useState(false);
 
-  // Check if the session is still recordable before showing source picker
-  useEffect(() => {
-    (async () => {
-      console.log(`[record] checking session status for token: ${token.slice(0, 8)}...`);
-      try {
-        const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
-        if (!res.ok) {
-          const errText = `HTTP ${res.status} ${await res.text().catch(() => "")}`;
-          console.error(`[record] session check failed: ${errText}`);
-          setCheckError(errText);
-          setSessionCheck("error");
-          return;
-        }
-        const data = await res.json();
-        console.log(`[record] session status: ${data.status}`);
-        setSessionStatus(data.status);
-        if (["stopped", "compiling", "complete", "failed"].includes(data.status)) {
-          setSessionCheck("finished");
-        } else {
-          setSessionCheck("ok");
-        }
-      } catch (err: any) {
-        console.error("[record] session check error:", err);
-        setCheckError(err.message || String(err));
+  // Check if the session is still recordable before showing source picker.
+  // Also re-run whenever we come back to the picker mid-session (see
+  // `handleChangeSource`): the header, the submit label and the Stop button
+  // all key off `sessionStatus`, and the mount-time value is stale by then —
+  // a session that was `pending` when the window opened is `active` by the
+  // time anyone re-picks a source, and one the server auto-stopped meanwhile
+  // should show as finished rather than offer another capture.
+  const refreshSessionStatus = useCallback(async () => {
+    console.log(`[record] checking session status for token: ${token.slice(0, 8)}...`);
+    try {
+      const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
+      if (!res.ok) {
+        const errText = `HTTP ${res.status} ${await res.text().catch(() => "")}`;
+        console.error(`[record] session check failed: ${errText}`);
+        setCheckError(errText);
         setSessionCheck("error");
+        return;
       }
-    })();
+      const data = await res.json();
+      console.log(`[record] session status: ${data.status}`);
+      setSessionStatus(data.status);
+      if (["stopped", "compiling", "complete", "failed"].includes(data.status)) {
+        setSessionCheck("finished");
+      } else {
+        setSessionCheck("ok");
+      }
+    } catch (err: any) {
+      console.error("[record] session check error:", err);
+      setCheckError(err.message || String(err));
+      setSessionCheck("error");
+    }
   }, [token]);
+
+  useEffect(() => {
+    void refreshSessionStatus();
+  }, [refreshSessionStatus]);
 
   const handleStopClick = useCallback(() => {
     setIsPrompting(true);
@@ -156,7 +164,8 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
     // Back to the picker: whatever was being cast isn't being recorded any
     // more, and the next pick opens its own session.
     releaseScreencast();
-  }, [releaseScreencast]);
+    void refreshSessionStatus();
+  }, [releaseScreencast, refreshSessionStatus]);
 
   // Loading skeleton that matches the SourcePicker layout
   if (sessionCheck === "loading") {

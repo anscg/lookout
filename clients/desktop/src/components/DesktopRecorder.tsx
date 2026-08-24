@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "../logger.js";
 import { listen, emit } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useSession,
   useSessionTimerState,
@@ -22,6 +23,7 @@ import { NamingModal } from "./NamingModal.js";
 import { CaptureErrorDialog } from "./CaptureErrorDialog.js";
 import { openEditorWindow } from "./EditorWindow.js";
 import { useNativeCapture } from "../hooks/useNativeCapture.js";
+import { SourceLostPrompt } from "./SourceLostPrompt.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
 import { useWindowFocus } from "../hooks/useWindowFocus.js";
@@ -106,7 +108,7 @@ function formatTimeTray(totalSeconds: number): string {
   return `${m}m`;
 }
 
-export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource, onBack, onViewSession }: DesktopRecorderProps) {
+export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewSession }: DesktopRecorderProps) {
   const isMacOS = navigator.userAgent.includes("Mac");
   const isCamera = source.length === 1 && source[0].type === "camera";
   const windowFocused = useWindowFocus();
@@ -139,7 +141,11 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
   // or fails — useful when the app is in the background.
   useSessionNotifications({
     isCapturing: capture.isCapturing,
-    captureError: capture.error,
+    // A lost source counts: the user is most likely looking at something
+    // else when it happens (they just clicked Stop in a system indicator, or
+    // PipeWire fell over), and the window they'd see the prompt in is behind
+    // whatever they're actually doing.
+    captureError: capture.error ?? capture.sourceLost?.message ?? null,
     status: session.status,
   });
 
@@ -321,6 +327,19 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     [finalizeStop],
   );
 
+  /** Back to the source picker, closing whatever is open first.
+   *
+   *  The session is deliberately left alone — still open, still holding its
+   *  tracked time — so the next pick drops straight back into recording
+   *  instead of starting a second session. `onChangeSource` hands the screen
+   *  back to the compositor on the way out. */
+  const reselectSource = useCallback(() => {
+    console.log("[session] source lost — sending the user back to the picker");
+    setIsPrompting(false);
+    setCaptureErrorDetail(null);
+    onChangeSource();
+  }, [onChangeSource]);
+
   const handlePause = useCallback(async () => {
     console.log("[session] pausing...");
     setPauseLoading(true);
@@ -358,6 +377,13 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
 
   // Resume from naming modal: close modal, resume recording
   const handleResumeFromModal = useCallback(async () => {
+    // Reached from the source-lost prompt: there is no stream to resume onto,
+    // so "keep recording" means "give me a source", not "start the loop again
+    // on a dead node".
+    if (capture.sourceLost) {
+      reselectSource();
+      return;
+    }
     console.log("[session] resume from modal, closing and resuming");
     setIsPrompting(false);
     setResumeLoading(true);
@@ -368,14 +394,19 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     invoke("resume_tray_ticker", { trackedSeconds: bestTrackedRef.current }).catch(console.error);
     await capture.startCapturing();
     setResumeLoading(false);
-  }, [capture, session, isCamera, cameraDeviceId, camera, startCameraAndWait]);
+  }, [capture, session, isCamera, cameraDeviceId, camera, startCameraAndWait, reselectSource]);
 
   const isActive = session.status === "active" || session.status === "pending";
   const isPaused = session.status === "paused";
 
   // Pin controls to pre-action state during transitions to prevent flashes.
   let controlMode: "recording" | "paused";
-  if (pauseLoading || ((stopLoading || isPrompting) && isActive)) {
+  if (capture.sourceLost) {
+    // Checked first, ahead of every transition case: the session is still
+    // `active` server-side, so without this the pulsing dot and the menu-bar
+    // clock would both keep claiming a recording that has no source.
+    controlMode = "paused";
+  } else if (pauseLoading || ((stopLoading || isPrompting) && isActive)) {
     controlMode = "recording";
   } else if (resumeLoading || ((stopLoading || isPrompting) && isPaused)) {
     controlMode = "paused";
@@ -492,7 +523,19 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
       if (event.payload === "pause") {
         handlePause();
       } else if (event.payload === "resume") {
-        handleResume();
+        // With the source gone there is nothing to resume onto — and the menu
+        // bar shows a paused session, so Resume is exactly what someone would
+        // reach for. Surface the window instead: the prompt asking for a new
+        // source is in it, behind whatever they're working in.
+        if (capture.sourceLost) {
+          console.warn("[session] tray resume ignored — no capture source, asking for one");
+          const win = getCurrentWindow();
+          void win.unminimize().catch(() => {});
+          void win.show().catch(() => {});
+          void win.setFocus().catch(() => {});
+        } else {
+          handleResume();
+        }
       } else if (event.payload === "stop") {
         handleStopClick();
       }
@@ -500,7 +543,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
       unlisten = fn;
     });
     return () => unlisten?.();
-  }, [handlePause, handleResume, handleStopClick]);
+  }, [handlePause, handleResume, handleStopClick, capture.sourceLost]);
 
   // Loading/skeleton state
   if (session.status === "loading") {
@@ -713,7 +756,7 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
               size="lg"
               loading={resumeLoading}
               onClick={handleResume}
-              disabled={stopLoading || isPrompting}
+              disabled={stopLoading || isPrompting || !!capture.sourceLost}
               fullWidth
               style={{ flex: 1 }}
             >
@@ -740,6 +783,24 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
           onConfirm={handleConfirmStop}
           onEditAndSave={handleEditAndSave}
           onResume={handleResumeFromModal}
+        />
+      )}
+
+      {/* The screencast ended without the recording ending. Nothing below
+          this can capture anything, so ask for a new source outright —
+          stood down while one of the other two dialogs is up, since both
+          are reached from its own buttons. */}
+      {capture.sourceLost && !isPrompting && !captureErrorDetail && (
+        <SourceLostPrompt
+          loss={capture.sourceLost}
+          onReselect={reselectSource}
+          onStop={handleStopClick}
+          onDetails={
+            capture.sourceLost.detail
+              ? () => setCaptureErrorDetail(capture.sourceLost!.detail!)
+              : undefined
+          }
+          stopping={stopLoading}
         />
       )}
     </div>

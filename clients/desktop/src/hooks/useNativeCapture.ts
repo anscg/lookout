@@ -20,6 +20,28 @@ export interface CaptureSource {
   id: number | string; // number for monitor/window/pipewire, string (deviceId) for camera
 }
 
+/**
+ * Why a screen source stopped producing frames.
+ *
+ * A screencast can end without the recording ending, and only on Linux/Wayland
+ * does that happen behind the app's back: the compositor's sharing indicator
+ * has its own Stop button, and PipeWire can restart under a live stream. Both
+ * leave a recorder that cannot record, and neither can be recovered from in
+ * code — the portal session is requested with `PersistMode::DoNot`, so there
+ * is no restore token and the only way back is a trip through the picker.
+ * Hence a distinct state from `error`: this one has an action attached.
+ */
+export interface CaptureSourceLoss {
+  /** `revoked`: the portal told us the cast ended. `failed`: the stream went
+   *  quiet without the portal ever saying so, and the Rust capture loop's
+   *  watchdog gave up on it. */
+  reason: "revoked" | "failed";
+  /** What to put in front of the user. */
+  message: string;
+  /** The raw capture error behind a `failed` loss, for the details dialog. */
+  detail?: string;
+}
+
 interface CaptureUploadResult {
   confirmed: boolean;
   trackedSeconds: number;
@@ -65,6 +87,7 @@ export function useNativeCapture(
   const [trackedSeconds, setTrackedSeconds] = useState(0);
   const [screenshotCount, setScreenshotCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [sourceLost, setSourceLost] = useState<CaptureSourceLoss | null>(null);
   const [lastScreenshotUrl, setLastScreenshotUrl] = useState<string | null>(null);
   const [lastCaptureAt, setLastCaptureAt] = useState<number | null>(null);
 
@@ -318,14 +341,20 @@ export function useNativeCapture(
       // Wayland: the user stopped the share from the system indicator. The
       // portal session is gone, so every further capture would come back
       // empty — stop rather than tick away over a dead stream.
+      //
+      // Reported as a loss rather than an error: there is nothing to retry
+      // and nothing to fix, so the UI owes the user a source picker, not a
+      // red banner. See CaptureSourceLoss.
       listen<{ nodeIds: number[] }>("screencast-revoked", (event) => {
         console.warn(`[capture] screen sharing revoked (nodes ${event.payload.nodeIds.join(", ")})`);
         capturingRef.current = false;
         setIsCapturing(false);
-        setError(
-          "Screen sharing was stopped from your system's sharing indicator. " +
-            "Pick a source again to keep recording.",
-        );
+        setSourceLost({
+          reason: "revoked",
+          message:
+            "Screen sharing was stopped from your system's sharing indicator, " +
+            "so nothing is being captured any more.",
+        });
       }),
       // Same outcome, found the slow way: the capture loop gave up after the
       // source failed repeatedly without the portal ever telling us.
@@ -333,10 +362,13 @@ export function useNativeCapture(
         console.error(`[capture] capture source lost: ${event.payload.message}`);
         capturingRef.current = false;
         setIsCapturing(false);
-        setError(
-          `Lost the screen capture source — recording stopped. Pick a source again to ` +
-            `continue. (${event.payload.message})`,
-        );
+        setSourceLost({
+          reason: "failed",
+          message:
+            "Lookout lost the screen it was capturing — the stream stopped " +
+            "sending frames. This usually means PipeWire restarted.",
+          detail: event.payload.message,
+        });
       }),
     ];
 
@@ -367,6 +399,9 @@ export function useNativeCapture(
     capturingRef.current = true;
     setIsCapturing(true);
     setError(null);
+    // A loss is only cleared by starting over. Nothing else does: the loop
+    // that would have reported a success is the one that stopped.
+    setSourceLost(null);
   }, [token, apiBaseUrl]);
 
   const stopCapturing = useCallback(() => {
@@ -380,6 +415,7 @@ export function useNativeCapture(
     trackedSeconds,
     screenshotCount,
     error,
+    sourceLost,
     lastScreenshotUrl,
     lastCaptureAt,
     startCapturing,
