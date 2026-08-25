@@ -118,26 +118,29 @@ describe("useSessionTimer — freeze (the fix)", () => {
 });
 
 describe("useSessionTimer — unfreeze after stall", () => {
-  it("a late credit lands seamlessly while inside the slack", () => {
+  it("a late credit lands without the clock ever moving backward", () => {
     // The common case: the confirm is a few seconds late. The display
-    // ticked through the minute boundary on the slack, and the credit
-    // ratchets base under it without any visible jump.
+    // ticked through the minute boundary on the slack; the credit ratchets
+    // base underneath and the overshoot is carried into the anchor, so the
+    // clock continues from where it was (0:00→1:05 then "resetting" to
+    // 1:00 was the reported bug this pins against).
     const { result, rerender } = renderHook(
       ({ s, a }) => useSessionTimer(s, a),
       { initialProps: { s: 60, a: true } },
     );
     tickClock(63_000); // 3s of confirm latency
-    expect(result.current).toBeGreaterThanOrEqual(122);
+    const shownBefore = result.current;
+    expect(shownBefore).toBeGreaterThanOrEqual(122);
     rerender({ s: 120, a: true });
-    // Base jumps to 120 and the anchor resets — no backward movement.
-    expect(result.current).toBe(120);
+    expect(result.current).toBeGreaterThanOrEqual(shownBefore);
+    // ...but the carry is only the latency, never more.
+    expect(result.current).toBeLessThanOrEqual(123);
   });
 
-  it("after a genuine stall, the credit snaps down at most the slack", () => {
-    // Past the full cap the display is frozen at base + MAX. A credit
-    // that still lands in the server's streak window advances base by
-    // exactly 60, so the snap reveals at most the slack — the same
-    // truth-over-inflation trade the pause snap already makes.
+  it("after a genuine stall, a full credit continues from the frozen value", () => {
+    // Past the full cap the display is frozen at base + MAX. When the
+    // late credit lands, the frozen value is carried — no backward jump;
+    // the next on-time credit snaps FORWARD to truth instead.
     const { result, rerender } = renderHook(
       ({ s, a }) => useSessionTimer(s, a),
       { initialProps: { s: 60, a: true } },
@@ -148,22 +151,32 @@ describe("useSessionTimer — unfreeze after stall", () => {
 
     // Server credit finally arrives — server advances by 60
     rerender({ s: 120, a: true });
-    expect(result.current).toBe(120);
-    expect(frozenValue - result.current).toBeLessThanOrEqual(
-      MAX_INTERPOLATION_S - 60,
-    );
+    expect(result.current).toBe(frozenValue);
   });
 
-  it("after unfreeze, interpolation resumes from the new server value", () => {
+  it("carry is capped at the slack after a stall + small credit", () => {
+    // A frozen display followed by a tiny partial credit must not let the
+    // clock run most of a minute ahead of the credited truth: the carry
+    // absorbs confirm LATENCY, and latency is bounded by the slack.
     const { result, rerender } = renderHook(
       ({ s, a }) => useSessionTimer(s, a),
       { initialProps: { s: 60, a: true } },
     );
-    tickClock(120_000);
-    rerender({ s: 120, a: true });
+    tickClock(600_000); // long stall — frozen at 60 + MAX
+    rerender({ s: 70, a: true }); // partial credit of 10s lands
+    expect(result.current).toBe(70 + (MAX_INTERPOLATION_S - 60));
+  });
+
+  it("after unfreeze, interpolation resumes carrying the frozen overshoot", () => {
+    const { result, rerender } = renderHook(
+      ({ s, a }) => useSessionTimer(s, a),
+      { initialProps: { s: 60, a: true } },
+    );
+    tickClock(120_000); // frozen at 60 + MAX = 135
+    rerender({ s: 120, a: true }); // carry = 15 → display stays 135
     tickClock(30_000);
-    expect(result.current).toBeGreaterThanOrEqual(149);
-    expect(result.current).toBeLessThanOrEqual(151);
+    expect(result.current).toBeGreaterThanOrEqual(164);
+    expect(result.current).toBeLessThanOrEqual(166);
   });
 
   it("multiple credits arriving back-to-back catch up correctly", () => {
@@ -179,6 +192,64 @@ describe("useSessionTimer — unfreeze after stall", () => {
     rerender({ s: 180, a: true });
     // Display follows the latest server value
     expect(result.current).toBe(180);
+  });
+});
+
+describe("useSessionTimer — hold (pause/stop clicked)", () => {
+  it("freezes the clock at the click instant, through the flush wait", () => {
+    // Pause clicked at 0:23. The flush + pause POST take ~5s; the clock
+    // must NOT tick to 0:28 in the meantime (the reported bug), and must
+    // not snap anywhere.
+    const { result, rerender } = renderHook(
+      ({ s, a, h }: { s: number; a: boolean; h: number | null }) =>
+        useSessionTimer(s, a, h),
+      { initialProps: { s: 0, a: true, h: null as number | null } },
+    );
+    tickClock(23_000);
+    const atClick = result.current;
+    expect(atClick).toBeGreaterThanOrEqual(22);
+    rerender({ s: 0, a: true, h: Date.now() });
+    tickClock(5_000); // flush + pause round trip
+    // Held at the click instant (rAF may lag the last render by one
+    // second, so the held value can be atClick or atClick + 1 — never
+    // ticking on to 0:28).
+    expect(result.current).toBeGreaterThanOrEqual(atClick);
+    expect(result.current).toBeLessThanOrEqual(23);
+  });
+
+  it("the flush credit lands under the held value without moving it", () => {
+    const { result, rerender } = renderHook(
+      ({ s, a, h }: { s: number; a: boolean; h: number | null }) =>
+        useSessionTimer(s, a, h),
+      { initialProps: { s: 0, a: true, h: null as number | null } },
+    );
+    tickClock(23_000);
+    const hold = Date.now();
+    rerender({ s: 0, a: true, h: hold });
+    tickClock(4_000);
+    const held = result.current;
+    // Flush credits the exact elapsed 23s; display stays put...
+    rerender({ s: 23, a: true, h: hold });
+    expect(result.current).toBe(held);
+    // ...and the paused snap lands on the same number: pause at 0:23
+    // SHOWS 0:23.
+    rerender({ s: 23, a: false, h: hold });
+    expect(result.current).toBe(23);
+  });
+
+  it("a failed pause releases the hold and the clock catches up", () => {
+    const { result, rerender } = renderHook(
+      ({ s, a, h }: { s: number; a: boolean; h: number | null }) =>
+        useSessionTimer(s, a, h),
+      { initialProps: { s: 0, a: true, h: null as number | null } },
+    );
+    tickClock(20_000);
+    rerender({ s: 0, a: true, h: Date.now() });
+    tickClock(10_000); // held through a pause attempt that errors
+    rerender({ s: 0, a: true, h: null }); // hold released
+    tickClock(1_000);
+    // Real elapsed is ~31s — the clock jumps forward to the truth.
+    expect(result.current).toBeGreaterThanOrEqual(30);
   });
 });
 
@@ -285,9 +356,9 @@ describe("useSessionTimer — latency / delay scenarios", () => {
     tickClock(90_000); // 90s past last sync; cap holds display at 60 + MAX
     expect(result.current).toBe(60 + MAX_INTERPOLATION_S);
     rerender({ s: 120, a: true });
-    // Display re-anchors to the credited value, revealing at most the
-    // latency slack, and never over-advances.
-    expect(result.current).toBe(120);
+    // The frozen overshoot is carried — never a backward jump; the carry
+    // is bounded by the slack.
+    expect(result.current).toBe(60 + MAX_INTERPOLATION_S);
   });
 
   it("simulated network loss: no credits for 5 minutes then catch-up", () => {
@@ -300,8 +371,8 @@ describe("useSessionTimer — latency / delay scenarios", () => {
     // Network comes back; one credit lands (chain caught up to one
     // interval). Subsequent credits will follow on schedule.
     rerender({ s: 120, a: true });
-    // Display snaps to the credited value — at most the slack revealed
-    expect(result.current).toBe(120);
+    // Continues from the frozen value (carry ≤ slack) — no backward jump.
+    expect(result.current).toBe(120 + (MAX_INTERPOLATION_S - 60));
   });
 
   it("delayed first credit (slow first upload): display still caps", () => {

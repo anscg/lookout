@@ -194,7 +194,16 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
     uploaderTrackedSeconds: capture.trackedSeconds,
   });
 
-  const timer = useSessionTimerState(bestTrackedSeconds, capture.isCapturing);
+  // Set at the instant pause/stop is CLICKED, before any network round
+  // trip, so the visible clock stops right then — it must not keep ticking
+  // through the flush + pause POST, and it must not snap anywhere: the
+  // flush credits the elapsed seconds underneath the held value.
+  const [timerHoldAt, setTimerHoldAt] = useState<number | null>(null);
+  const timer = useSessionTimerState(
+    bestTrackedSeconds,
+    capture.isCapturing,
+    timerHoldAt,
+  );
   const displaySeconds = timer.displaySeconds;
 
   // Read the baseline from a ref inside async handlers: `session.resume()`
@@ -342,23 +351,35 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
 
   const handlePause = useCallback(async () => {
     console.log("[session] pausing...");
-    setPauseLoading(true);
-    // Stop AND AWAIT the Rust loop before the pause POST: on cancel it
-    // flushes the in-progress partial minute as a `final` capture (pause
-    // at 03:15 resumes at 03:15), and that confirm must land while the
-    // session is still active. The effect-cleanup call to
-    // stop_capture_loop after stopCapturing() is then a no-op.
-    await invoke("stop_capture_loop").catch(console.error);
-    capture.stopCapturing();
+    // Freeze every clock surface at the CLICK, before any awaits: the
+    // main-window timer via the hold, the menu bar via the tray ticker.
+    setTimerHoldAt(Date.now());
     invoke("pause_tray_ticker").catch(console.error);
-    if (isCamera) camera.stopStream();
-    await session.pause();
-    console.log("[session] paused");
-    setPauseLoading(false);
+    setPauseLoading(true);
+    try {
+      // Stop AND AWAIT the Rust loop before the pause POST: on cancel it
+      // flushes the in-progress partial minute as a `final` capture (pause
+      // at 03:15 resumes at 03:15), and that confirm must land while the
+      // session is still active. The effect-cleanup call to
+      // stop_capture_loop after stopCapturing() is then a no-op.
+      await invoke("stop_capture_loop").catch(console.error);
+      capture.stopCapturing();
+      if (isCamera) camera.stopStream();
+      await session.pause();
+      console.log("[session] paused");
+    } catch (e) {
+      // Pause failed — the session is still recording, so release the
+      // hold and let the clock catch back up rather than lying frozen.
+      setTimerHoldAt(null);
+      throw e;
+    } finally {
+      setPauseLoading(false);
+    }
   }, [capture, session, isCamera, camera]);
 
   const handleResume = useCallback(async () => {
     console.log("[session] resuming...");
+    setTimerHoldAt(null);
     setResumeLoading(true);
     await session.resume();
     if (isCamera) {
@@ -374,15 +395,23 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
   // Stop button: pause session + stop capture + show naming modal
   const handleStopClick = useCallback(async () => {
     console.log("[session] stop clicked, pausing and opening naming modal");
-    setStopLoading(true);
-    // Same ordering as handlePause: let the Rust loop flush the partial
-    // minute before the session leaves "active".
-    await invoke("stop_capture_loop").catch(console.error);
-    capture.stopCapturing();
+    // Freeze the clock at the click, exactly like handlePause.
+    setTimerHoldAt(Date.now());
     invoke("pause_tray_ticker").catch(console.error);
-    if (isCamera) camera.stopStream();
-    await session.pause();
-    setStopLoading(false);
+    setStopLoading(true);
+    try {
+      // Same ordering as handlePause: let the Rust loop flush the partial
+      // minute before the session leaves "active".
+      await invoke("stop_capture_loop").catch(console.error);
+      capture.stopCapturing();
+      if (isCamera) camera.stopStream();
+      await session.pause();
+    } catch (e) {
+      setTimerHoldAt(null);
+      throw e;
+    } finally {
+      setStopLoading(false);
+    }
     setIsPrompting(true);
   }, [capture, session, isCamera, camera]);
 
@@ -397,6 +426,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
     }
     console.log("[session] resume from modal, closing and resuming");
     setIsPrompting(false);
+    setTimerHoldAt(null);
     setResumeLoading(true);
     await session.resume();
     if (isCamera) {

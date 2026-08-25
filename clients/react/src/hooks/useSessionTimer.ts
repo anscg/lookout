@@ -85,19 +85,72 @@ export function deriveDisplaySeconds(
 export function useSessionTimerState(
   serverTrackedSeconds: number,
   isActive: boolean,
+  /**
+   * When set (ms epoch), the clock is FROZEN at that instant: the pause/stop
+   * button was clicked, and the user expects the timer to stop right then —
+   * not to keep ticking through the flush + pause round trip, and not to
+   * snap anywhere. Everything below computes with `min(now, holdAtMs)`, so
+   * the display holds at the clicked value while the final capture's credit
+   * ratchets the base up to (approximately) that same number underneath;
+   * the eventual paused snap then lands where the clock already is. Cleared
+   * on resume (or on a failed pause, where the clock catches back up).
+   */
+  holdAtMs?: number | null,
 ): SessionTimerState {
   const [displaySeconds, setDisplaySeconds] = useState(serverTrackedSeconds);
   const lastSyncRef = useRef(Date.now());
   const baseRef = useRef(serverTrackedSeconds);
+  // Read by the ratchet effect below; a credit landing while paused must
+  // not manufacture carry out of a display that isn't interpolating.
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  const holdAtRef = useRef<number | null>(holdAtMs ?? null);
+  holdAtRef.current = holdAtMs ?? null;
+  /** The clock's "now": wall clock, stopped at the hold instant when held. */
+  const clockNow = () => {
+    const hold = holdAtRef.current;
+    const now = Date.now();
+    return hold != null ? Math.min(now, hold) : now;
+  };
 
-  // Ratchet baseRef forward on every server update. Resets the
-  // interpolation anchor — this is what unfreezes the timer.
+  // Ratchet baseRef forward on every server update, re-anchoring the
+  // interpolation window — this is what unfreezes the timer.
+  //
+  // THE DISPLAY NEVER MOVES BACKWARD HERE. Credits are earned on the 60s
+  // grid but arrive a confirm round-trip later, and the interpolation slack
+  // lets the clock tick a few seconds past the pending credit while it's in
+  // flight. Snapping to the bare server value on arrival made the clock
+  // visibly jump BACK by the confirm latency at the first credit of every
+  // session and resume (0:00→1:05, then "reset" to 1:00). Instead, any
+  // overshoot is folded into the anchor as carry: the clock continues from
+  // where it was, and the credited base catches up underneath. The carry is
+  // bounded by the interpolation cap by construction, self-corrects as
+  // latency shrinks, and is dropped (never banked) on pause — rule 2 still
+  // snaps to the ratcheted base.
   useEffect(() => {
     const newBase = Math.max(baseRef.current, serverTrackedSeconds);
     if (newBase !== baseRef.current) {
+      // The clock's frozen "now" while held, so the flush credit landing
+      // mid-hold reconciles against the value the user is looking at and
+      // the display stays put.
+      const now = clockNow();
+      const shown = deriveDisplaySeconds(
+        baseRef.current,
+        lastSyncRef.current,
+        isActiveRef.current,
+        now,
+      );
+      // Capped at the slack: carry exists to absorb confirm LATENCY, and
+      // latency can't legitimately exceed the slack allowance. Without the
+      // cap, a long freeze followed by a small partial credit would let the
+      // display run most of a minute ahead of the credited truth.
+      const carryS = Math.min(
+        Math.max(0, shown - newBase),
+        TIMER_INTERPOLATION_SLACK_S,
+      );
       baseRef.current = newBase;
-      setDisplaySeconds(newBase);
-      lastSyncRef.current = Date.now();
+      lastSyncRef.current = now - carryS * 1000;
+      setDisplaySeconds(newBase + carryS);
     }
   }, [serverTrackedSeconds]);
 
@@ -119,7 +172,7 @@ export function useSessionTimerState(
         baseRef.current,
         lastSyncRef.current,
         true,
-        Date.now(),
+        clockNow(),
       );
       if (next !== lastRendered) {
         lastRendered = next;
@@ -156,8 +209,10 @@ export function useSessionTimerState(
 export function useSessionTimer(
   serverTrackedSeconds: number,
   isActive: boolean,
+  holdAtMs?: number | null,
 ): number {
-  return useSessionTimerState(serverTrackedSeconds, isActive).displaySeconds;
+  return useSessionTimerState(serverTrackedSeconds, isActive, holdAtMs)
+    .displaySeconds;
 }
 
 /** Format seconds as H:MM:SS or M:SS (for live timer display). */

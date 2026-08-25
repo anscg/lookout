@@ -768,6 +768,12 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const { screenshotId, width, height, fileSize, frameCount } = request.body;
       const isFinal = request.body.final === true;
+      // Belt-and-braces telemetry for the flag itself: Fastify strips
+      // unknown body fields (removeAdditional), so if a client SENT final
+      // and a proxy or an old schema ate it, this is the only trace.
+      if (isFinal) {
+        request.log.info({ screenshotId }, "confirm carries final=true");
+      }
 
       // Validate screenshot belongs to this session and isn't already confirmed
       const screenshot = await db.query.screenshots.findFirst({
@@ -929,6 +935,23 @@ export async function sessionRoutes(app: FastifyInstance) {
 
         trackedSeconds = result.trackedSeconds;
         nextExpectedAtIso = result.decision.nextExpectedAt.toISOString();
+
+        // Final captures are rare (one per pause/stop) and their crediting
+        // has already been miscounted once in the field — log every decision
+        // so a "paused at 1:39, got 2:00" report is diagnosable from the
+        // server side alone.
+        if (isFinal) {
+          request.log.info(
+            {
+              sessionId: session.id,
+              screenshotId,
+              capturedAt: (screenshot.capturedAt ?? serverNow).toISOString(),
+              credit: result.decision.credit,
+              trackedSeconds,
+            },
+            "final capture (pause/stop flush) credited",
+          );
+        }
       } else {
         // Bucket-mode: existing semantics. Flip the row, bump
         // last_screenshot_at, compute trackedSeconds from bucket count.

@@ -51,9 +51,14 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     uploaderTrackedSeconds: uploader.trackedSeconds,
   });
 
+  // Set the instant pause/stop is invoked, before the flush/POST round
+  // trips, so the visible clock stops exactly when the user acted instead
+  // of ticking on through the network wait. Cleared on resume.
+  const [timerHoldAt, setTimerHoldAt] = useState<number | null>(null);
   const displaySeconds = useSessionTimer(
     bestTrackedSeconds,
     capture.isSharing && (session.status === "active" || session.status === "pending"),
+    timerHoldAt,
   );
 
   // Holds either a setInterval ID (legacy bucket-mode fallback) or
@@ -257,6 +262,11 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
           width: payload.width,
           height: payload.height,
           capturedAtMs: payload.capturedAtMs,
+          // Keep the pause/stop flush flag: without it, a flush whose clip
+          // upload failed would credit as a NORMAL capture — inside the
+          // ±30s window that rounds the partial minute UP to a full one
+          // (pause at 1:39 → display 2:00), outside it the minute credits 0.
+          ...(payload.final ? { final: true } : {}),
         });
       }
     };
@@ -527,6 +537,7 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     if (pauseInFlightRef.current) return;
     pauseInFlightRef.current = true;
     intentionalPauseRef.current = true;
+    setTimerHoldAt(Date.now());
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
@@ -550,6 +561,7 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     if (resumeInFlightRef.current) return;
     resumeInFlightRef.current = true;
     intentionalPauseRef.current = false;
+    setTimerHoldAt(null);
     try {
       await session.resume();
       callbacksRef.current.onResume?.();
@@ -561,6 +573,7 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   const stop = useCallback(async (options?: { name?: string; edit?: boolean }) => {
     if (stopInFlightRef.current) return;
     stopInFlightRef.current = true;
+    setTimerHoldAt(Date.now());
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
