@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 
 import { getApiBase } from "../serverConfig.js";
 
@@ -27,7 +28,17 @@ export function useAnnouncement(): Announcement | null {
 
     const fetchOnce = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/announcement`);
+        // Report who's asking so the server can target announcements (e.g.
+        // "please update" only to versions ≤ X). Best-effort: with no
+        // version the server treats us as version 0, exactly like the old
+        // builds that never sent one.
+        const params = new URLSearchParams({ client: "lookout-desktop" });
+        try {
+          params.set("version", await getVersion());
+        } catch {
+          // version stays unreported
+        }
+        const res = await fetch(`${API_BASE}/api/announcement?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (!cancelled) setAnnouncement(data.announcement ?? null);

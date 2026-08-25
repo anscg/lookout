@@ -212,28 +212,32 @@ describe("the display timer while an upload is in flight", () => {
   const base = 120;
 
   it("ticks smoothly through a normal round trip", () => {
-    // Credits arrive ~60s apart, so the cap is reached just as the next
-    // one lands: no visible stall in the steady state, however long the
-    // individual upload took.
+    // Credits are earned ~60s apart and arrive a confirm round-trip
+    // later; the latency slack in the cap covers that gap, so the clock
+    // ticks straight through the minute boundary in the steady state,
+    // however long the individual upload took (within the slack).
     expect(deriveDisplaySeconds(base, 0, true, 10_000)).toBe(base + 10);
     expect(deriveDisplaySeconds(base, 0, true, 45_000)).toBe(base + 45);
     expect(deriveDisplaySeconds(base, 0, true, 59_000)).toBe(base + 59);
+    expect(deriveDisplaySeconds(base, 0, true, 65_000)).toBe(base + 65);
   });
 
   it("holds instead of inflating once a credit is overdue", () => {
-    // Past one interval the credit is genuinely late — uploads stalling,
-    // or captures falling outside the ±30s window and earning nothing.
-    // Holding is honest: those seconds may never be credited.
+    // Past one interval plus the slack the credit is genuinely late —
+    // uploads stalling, or captures falling outside the ±30s window and
+    // earning nothing. Holding is honest: those seconds may never be
+    // credited.
     expect(deriveDisplaySeconds(base, 0, true, 90_000)).toBe(base + MAX_INTERPOLATION_S);
     expect(deriveDisplaySeconds(base, 0, true, 600_000)).toBe(base + MAX_INTERPOLATION_S);
   });
 
-  it("resumes from the held value rather than jumping when it lands", () => {
-    // Why the cap is exactly one interval: the held number and the
-    // incoming credit are the same, so a late upload costs smoothness for
-    // a moment but never shows the user time going backwards.
-    const held = deriveDisplaySeconds(base, 0, true, 90_000);
-    const afterCredit = deriveDisplaySeconds(base + MAX_INTERPOLATION_S, 1_000, true, 1_000);
-    expect(afterCredit).toBe(held);
+  it("a slack-window credit lands without showing time going backwards", () => {
+    // A confirm a few seconds late arrives while the display is still
+    // ticking on the slack. The credit advances base by one interval, and
+    // the display it re-anchors to is at or above where it was ticking.
+    const ticking = deriveDisplaySeconds(base, 0, true, 63_000); // base + 63
+    const afterCredit = deriveDisplaySeconds(base + 60, 63_000, true, 63_000);
+    expect(afterCredit).toBeGreaterThanOrEqual(base + 60);
+    expect(ticking - afterCredit).toBeLessThanOrEqual(MAX_INTERPOLATION_S - 60);
   });
 });

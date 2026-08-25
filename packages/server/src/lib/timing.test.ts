@@ -7,9 +7,11 @@ import {
 } from "@lookout/shared";
 import {
   creditCapture,
+  creditFinalCapture,
   validateCapturedAt,
   adoptedCapturedAt,
   isClockSkewError,
+  type CreditDecision,
 } from "./timing.js";
 
 const T0 = new Date("2025-01-01T00:00:00.000Z");
@@ -101,6 +103,108 @@ describe("creditCapture", () => {
     }
     // After 5 iterations: 1 seed + 4 credits = 240s total
     expect(count).toBe(4);
+  });
+});
+
+describe("creditFinalCapture (pause/stop flush)", () => {
+  it("seeds exactly like a normal capture when no anchor exists", () => {
+    const d = creditFinalCapture(T0, null, 0);
+    expect(d).toEqual(creditCapture(T0, null, 0));
+  });
+
+  it("credits the partial minute since the last credited mark", () => {
+    // Streak at anchor T0 with 3 credited minutes; pause at 03:15.
+    const capturedAt = ms(T0, 3 * SCREENSHOT_INTERVAL_MS + 15_000);
+    const d = creditFinalCapture(capturedAt, T0, 3);
+    expect(d.credit).toBe(15);
+    // Reset shape, matching what a pause does to the streak anyway.
+    expect(d.newAnchor).toEqual(capturedAt);
+    expect(d.newCount).toBe(0);
+    expect(d.inWindow).toBe(false);
+  });
+
+  it("credits exact elapsed even inside the normal window (no 60s rounding)", () => {
+    // Pause at 03:58 — within ±30s of the 04:00 mark, where a NORMAL
+    // capture would credit the full interval. A final capture must not:
+    // it resets the anchor, and resume re-seeds it, so in-window rounding
+    // here would let a pause at expected−29s bank a full minute per
+    // pause/resume cycle (~1.3x inflation). Exact elapsed only.
+    const capturedAt = ms(T0, 4 * SCREENSHOT_INTERVAL_MS - 2_000);
+    const d = creditFinalCapture(capturedAt, T0, 3);
+    expect(d.credit).toBe(58);
+    expect(d.newAnchor).toEqual(capturedAt);
+    expect(d.newCount).toBe(0);
+  });
+
+  it("pause/resume cycling at the window edge cannot inflate credit", () => {
+    // The exploit the exact-elapsed rule exists to block: seed, one
+    // credited minute, then flush at 01:31 (29s early — inside the normal
+    // window), resume, repeat. Each cycle must earn exactly its wall time.
+    let anchor: Date | null = null;
+    let count = 0;
+    let tracked = 0;
+    let t = 0;
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const seed = creditCapture(ms(T0, t), anchor, count); // resume re-seeded
+      anchor = seed.newAnchor;
+      count = seed.newCount;
+      tracked += seed.credit;
+      const minute = creditCapture(ms(T0, t + 60_000), anchor, count);
+      anchor = minute.newAnchor;
+      count = minute.newCount;
+      tracked += minute.credit;
+      const flush = creditFinalCapture(ms(T0, t + 91_000), anchor, count);
+      tracked += flush.credit;
+      anchor = null; // resume clears the anchor
+      count = 0;
+      t += 91_000;
+    }
+    // 3 cycles x 91s of wall clock, minus the 3 zero-credit seeds' 0s —
+    // credited time can never exceed wall time.
+    expect(tracked).toBeLessThanOrEqual((3 * 91_000) / 1000);
+    expect(tracked).toBe(3 * (60 + 31));
+  });
+
+  it("never credits more than one interval, however late it lands", () => {
+    // The 04:00 capture was missed entirely; pause at 05:40. The elapsed
+    // 100s clamps to one interval — same ceiling as CREDIT_PER_CAPTURE_S,
+    // so pause/resume cycling can never earn faster than wall clock.
+    const capturedAt = ms(T0, 3 * SCREENSHOT_INTERVAL_MS + 100_000);
+    const d = creditFinalCapture(capturedAt, T0, 3);
+    expect(d.credit).toBe(60);
+    expect(d.newAnchor).toEqual(capturedAt);
+    expect(d.newCount).toBe(0);
+  });
+
+  it("clamps to 0 when the capture lands before the last credited mark", () => {
+    // Every prior capture landed at the early edge of its window, so the
+    // last real capture sits before the credited mark. A flush seconds
+    // later is still behind the mark — credit 0, never negative.
+    const capturedAt = ms(T0, 3 * SCREENSHOT_INTERVAL_MS - 19_000);
+    const d = creditFinalCapture(capturedAt, T0, 3);
+    expect(d.credit).toBe(0);
+  });
+
+  it("a pause/resume cycle earns exactly wall-clock time", () => {
+    // Seed at T0, two full minutes credited, pause at 02:45 → 165s total.
+    let anchor: Date | null = null;
+    let count = 0;
+    let tracked = 0;
+    for (const [deltaMs, isFinal] of [
+      [0, false],
+      [60_000, false],
+      [120_000, false],
+      [165_000, true],
+    ] as const) {
+      const cap = ms(T0, deltaMs);
+      const d: CreditDecision = isFinal
+        ? creditFinalCapture(cap, anchor, count)
+        : creditCapture(cap, anchor, count);
+      tracked += d.credit;
+      anchor = d.newAnchor;
+      count = d.newCount;
+    }
+    expect(tracked).toBe(165);
   });
 });
 

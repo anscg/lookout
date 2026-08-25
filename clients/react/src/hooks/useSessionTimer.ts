@@ -1,12 +1,22 @@
 import { useState, useEffect, useRef } from "react";
-import { SCREENSHOT_INTERVAL_MS } from "@lookout/shared";
+import {
+  SCREENSHOT_INTERVAL_MS,
+  TIMER_INTERPOLATION_SLACK_S,
+} from "@lookout/shared";
 
 /** Max seconds the display may drift ahead of `serverTrackedSeconds`
- *  between credits. One capture interval — if the next capture credits,
- *  the display jumps to the new server value (== frozen value) and
- *  unfreezes smoothly. If captures stall, the freeze stays put so the
- *  user sees something is wrong instead of an inflated count. */
-export const MAX_INTERPOLATION_S = Math.floor(SCREENSHOT_INTERVAL_MS / 1000);
+ *  between credits: one capture interval plus latency slack. If captures
+ *  stall, the freeze stays put so the user sees something is wrong
+ *  instead of an inflated count.
+ *
+ *  The slack exists because credits are earned on the 60s streak grid but
+ *  arrive a confirm round-trip later, and clip uploads make that latency
+ *  jitter by seconds. Capped at exactly one interval, the display froze at
+ *  every xx:00 boundary whenever two confirms arrived more than 60s apart
+ *  (the credited base is always a multiple of 60) — users read the stutter
+ *  as the recorder breaking. See TIMER_INTERPOLATION_SLACK_S. */
+export const MAX_INTERPOLATION_S =
+  Math.floor(SCREENSHOT_INTERVAL_MS / 1000) + TIMER_INTERPOLATION_SLACK_S;
 
 /**
  * The timer's anchor state, for surfaces that tick their own clock
@@ -58,9 +68,10 @@ export function deriveDisplaySeconds(
  *
  * `serverTrackedSeconds` is the ground truth. We interpolate at
  * wall-clock rate between credits for liveness, but the interpolation
- * is **capped at one capture interval**. Display never overshoots the
- * next credit by more than that, so stop/compile reveals at most one
- * minute of drop — no "halving" surprise.
+ * is **capped at one capture interval plus latency slack**
+ * (MAX_INTERPOLATION_S). Display never overshoots the next credit by
+ * more than that, so stop/compile reveals at most about a minute of
+ * drop — no "halving" surprise.
  *
  * `baseRef` ratchets forward (never backward) so a stale-read
  * idempotent retry returning a lower `trackedSeconds` doesn't cause

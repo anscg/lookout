@@ -14,12 +14,13 @@
 }
 
 /* The shell pads panel buttons for text-only items like the clock. An icon
- * plus a five-character time already reads as a unit, so that padding just
- * makes the pill long; halve it to `-minimum-hpadding` and let the label size
- * to its own content (no min-width, so h:mm:ss grows and mm:ss shrinks). */
+ * plus a five-character time already reads as a unit, so the full padding
+ * makes the pill long — but 6px left the contents touching the pill's edge,
+ * so give it a little air. The label still sizes to its own content (no
+ * min-width, so h:mm:ss grows and mm:ss shrinks). */
 #panel .panel-button.lookout-indicator {
-  -natural-hpadding: 6px;
-  -minimum-hpadding: 6px;
+  -natural-hpadding: 10px;
+  -minimum-hpadding: 10px;
 }
 
 /* Paused. Amber rather than the recording red, so a paused session doesn't

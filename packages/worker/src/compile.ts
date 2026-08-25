@@ -434,7 +434,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     // immediately builds its 1-second normalized segment — no barrier
     // between the stages, so early units encode while later units are
     // still downloading. Every unit — legacy JPEG or clip — becomes
-    // exactly one second of 30fps output with identical pinned encoder
+    // exactly one second of SEGMENT_FPS output with identical pinned encoder
     // parameters, so the final timelapse is a stream-copy concatenation
     // instead of one giant whole-session encode. Wall clock scales with
     // units/SEGMENT_CONCURRENCY, and a corrupt unit is caught and skipped

@@ -343,6 +343,12 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
   const handlePause = useCallback(async () => {
     console.log("[session] pausing...");
     setPauseLoading(true);
+    // Stop AND AWAIT the Rust loop before the pause POST: on cancel it
+    // flushes the in-progress partial minute as a `final` capture (pause
+    // at 03:15 resumes at 03:15), and that confirm must land while the
+    // session is still active. The effect-cleanup call to
+    // stop_capture_loop after stopCapturing() is then a no-op.
+    await invoke("stop_capture_loop").catch(console.error);
     capture.stopCapturing();
     invoke("pause_tray_ticker").catch(console.error);
     if (isCamera) camera.stopStream();
@@ -368,10 +374,15 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
   // Stop button: pause session + stop capture + show naming modal
   const handleStopClick = useCallback(async () => {
     console.log("[session] stop clicked, pausing and opening naming modal");
+    setStopLoading(true);
+    // Same ordering as handlePause: let the Rust loop flush the partial
+    // minute before the session leaves "active".
+    await invoke("stop_capture_loop").catch(console.error);
     capture.stopCapturing();
     invoke("pause_tray_ticker").catch(console.error);
     if (isCamera) camera.stopStream();
     await session.pause();
+    setStopLoading(false);
     setIsPrompting(true);
   }, [capture, session, isCamera, camera]);
 

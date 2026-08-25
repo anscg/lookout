@@ -79,8 +79,22 @@ export function scaleFilter(quality: SegmentQuality = "publish"): string {
 export const SCALE_FILTER = scaleFilter("publish");
 
 /** Output framerate of the compiled timelapse. Every capture unit (one
- *  recorded minute) becomes exactly one second of output at this rate. */
-export const SEGMENT_FPS = 30;
+ *  recorded minute) becomes exactly one second of output at this rate.
+ *
+ *  6 matches the capture cadence (CLIP_FRAME_INTERVAL_MS = 10s → 6 frames
+ *  per recorded minute), so each output frame is one captured frame — no
+ *  duplication padding. The distinct-image rate is identical to the old
+ *  30fps output (a unit still shows its ~6 captured images per second);
+ *  what changes is container overhead (5x fewer packets) and that a unit
+ *  carrying MORE than 6 frames (both boundary tick frames, or a stalled
+ *  clip that kept recording) gets resampled down to 6 instead of showing
+ *  every frame.
+ *
+ *  Originals compiled before this change are 30fps. Everything that touches
+ *  an EXISTING artifact must therefore ask the file for its rate
+ *  (`probeFps`) rather than trusting this constant — `cutVideoToKeptRanges`
+ *  does — while fresh builds derive uniformly from here. */
+export const SEGMENT_FPS = 6;
 
 /** How many segment builds run concurrently. Each build is a small
  *  single-threaded ffmpeg (see -threads 1 below), so the parallelism
@@ -165,6 +179,34 @@ export function segmentEncodeArgs(
 /** Publish-tier segment parameters. See segmentEncodeArgs. */
 export const SEGMENT_ENCODE_ARGS = segmentEncodeArgs("publish");
 
+/** Probe a video's frame rate (rounded to integer fps). Used wherever the
+ *  code touches an artifact that may predate the current SEGMENT_FPS —
+ *  originals compiled before the 6fps change are 30fps, and cutting one
+ *  with the wrong frames-per-unit would silently produce a video 5x too
+ *  short while the frame-count verify (built from the same wrong constant)
+ *  still passed. Falls back to SEGMENT_FPS if the probe is unusable. */
+export async function probeFps(filePath: string): Promise<number> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      [
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=r_frame_rate",
+        "-of", "csv=p=0",
+        filePath,
+      ],
+      { timeout: 30_000 },
+    );
+    const [num, den] = stdout.trim().split("/").map(Number);
+    const fps = Math.round(num / (den || 1));
+    if (Number.isFinite(fps) && fps >= 1) return fps;
+  } catch {
+    // fall through to the constant
+  }
+  return SEGMENT_FPS;
+}
+
 /** Count the video frames in a file with ffprobe. */
 export async function probeFrameCount(filePath: string): Promise<number> {
   const { stdout } = await execFileAsync(
@@ -192,8 +234,8 @@ async function verifySegmentFrameCount(filePath: string): Promise<void> {
 }
 
 /**
- * Normalize one capture unit into a 1-second, 30fps MPEG-TS segment with
- * the pinned encoder parameters.
+ * Normalize one capture unit into a 1-second, SEGMENT_FPS MPEG-TS segment
+ * with the pinned encoder parameters.
  *
  * - jpeg unit: the still is held for the full second — identical to the
  *   legacy one-frame-per-minute output.
@@ -222,7 +264,8 @@ export async function buildSegment(
 
   if (format === "jpeg") {
     // -framerate 1 over one still = exactly one second of input; fps
-    // duplicates it onto the 30fps grid, -frames:v hard-caps the length.
+    // duplicates it onto the SEGMENT_FPS grid, -frames:v hard-caps the
+    // length.
     await execFileAsync(
       "ffmpeg",
       [
@@ -243,9 +286,11 @@ export async function buildSegment(
       throw new Error("clip contained no decodable frames");
     }
     // setpts spreads the N decoded frames evenly across [0, 1s); fps
-    // resamples onto the 30fps grid; tpad clone-extends the last frame so
-    // PTS rounding can never come up a frame short; -frames:v caps at
-    // exactly one segment.
+    // resamples onto the SEGMENT_FPS grid (a clip carrying more frames
+    // than that — boundary tick frames, or a stall that kept recording —
+    // is downsampled); tpad clone-extends the last frame so PTS rounding
+    // can never come up a frame short; -frames:v caps at exactly one
+    // segment.
     await execFileAsync(
       "ffmpeg",
       [
@@ -305,7 +350,14 @@ export async function cutVideoToKeptRanges(
 
   const editedPath = path.join(tmpDir, "edited.mp4");
   const keptUnits = keptRanges.reduce((n, r) => n + (r.end - r.start), 0);
-  const expectedFrames = keptUnits * SEGMENT_FPS;
+  // The ORIGINAL's rate, not SEGMENT_FPS: originals compiled before the
+  // 6fps change are 30fps, and their 1s-per-unit grid means frames-per-unit
+  // equals their fps. Using the constant against an old original would copy
+  // a fifth of every kept range — and the verify below, built from the same
+  // constant, would pass it. The edited output keeps the original's rate so
+  // the artifact stays self-consistent for future re-edits.
+  const fps = await probeFps(originalPath);
+  const expectedFrames = keptUnits * fps;
 
   const verify = async (label: string, toleranceFrames: number) => {
     const stat = await fs.stat(editedPath);
@@ -333,7 +385,7 @@ export async function cutVideoToKeptRanges(
             "-ss", String(r.start),
             "-i", originalPath,
             "-c", "copy",
-            "-frames:v", String((r.end - r.start) * SEGMENT_FPS),
+            "-frames:v", String((r.end - r.start) * fps),
             "-avoid_negative_ts", "make_zero",
             "-f", "mpegts",
             "-y",
@@ -381,7 +433,10 @@ export async function cutVideoToKeptRanges(
   }
 
   // Frame-exact single-pass re-encode: keep frames whose pts falls in any
-  // kept [start, end) range, then retime onto a contiguous 30fps grid.
+  // kept [start, end) range, then retime onto a contiguous grid at the
+  // original's own rate (see `fps` above). The GOP stays one second — pinned
+  // by frame count matching the fps — so the output remains aligned for
+  // future edits.
   const keepExpr = keptRanges
     .map((r) => `(gte(t\\,${r.start})*lt(t\\,${r.end}))`)
     .join("+");
@@ -389,13 +444,16 @@ export async function cutVideoToKeptRanges(
     "ffmpeg",
     [
       "-i", originalPath,
-      "-vf", `select='${keepExpr}',setpts=N/(${SEGMENT_FPS}*TB)`,
-      "-r", String(SEGMENT_FPS),
+      "-vf", `select='${keepExpr}',setpts=N/(${fps}*TB)`,
+      "-r", String(fps),
       "-c:v", "libx264",
       "-preset", "fast",
       "-crf", "18",
       "-pix_fmt", "yuv420p",
-      ...SEGMENT_GOP_ARGS,
+      "-g", String(fps),
+      "-keyint_min", String(fps),
+      "-sc_threshold", "0",
+      "-x264-params", "open-gop=0",
       "-movflags", "+faststart",
       "-y",
       editedPath,

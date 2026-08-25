@@ -304,6 +304,90 @@ describe("admin dashboard", () => {
   });
 });
 
+describe("dashboard session cookie (piggybacked on basic auth)", () => {
+  function cookieOf(res: { headers: Record<string, unknown> }): string {
+    const raw = res.headers["set-cookie"];
+    const header = Array.isArray(raw) ? raw[0] : String(raw);
+    return header.split(";")[0]; // "lookout_admin=v1.<exp>.<sig>"
+  }
+
+  it("a basic-authed request sets the session cookie", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    expect(res.statusCode).toBe(200);
+    const header = String(res.headers["set-cookie"]);
+    expect(header).toContain("lookout_admin=v1.");
+    expect(header).toContain("HttpOnly");
+    expect(header).toContain("SameSite=Lax");
+  });
+
+  it("the cookie alone survives a 'refresh' — no re-prompt", async () => {
+    const authed = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    const cookie = cookieOf(authed);
+
+    // The refresh scenario: the browser's basic-auth cache is gone, only
+    // the cookie remains.
+    const page = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { cookie },
+    });
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain("Programs");
+
+    // API calls ride the same cookie.
+    const api = await app.inject({
+      method: "GET",
+      url: "/api/admin/announcement",
+      headers: { cookie },
+    });
+    expect(api.statusCode).toBe(200);
+  });
+
+  it("a tampered or missing cookie still 401s (native prompt returns)", async () => {
+    const authed = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    const tampered = cookieOf(authed).slice(0, -4) + "beef";
+
+    const page = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { cookie: tampered },
+    });
+    expect(page.statusCode).toBe(401);
+    expect(page.headers["www-authenticate"]).toContain("Basic");
+
+    const bare = await app.inject({ method: "GET", url: "/admin" });
+    expect(bare.statusCode).toBe(401);
+  });
+
+  it("a cookie-authed request does not re-issue the cookie", async () => {
+    const authed = await app.inject({
+      method: "GET",
+      url: "/admin",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    const cookie = cookieOf(authed);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/admin/announcement",
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["set-cookie"]).toBeUndefined();
+  });
+});
+
 describe("desktop instant-start endpoints (pairUrl/startUrl)", () => {
   it("sets both endpoints together and exposes them everywhere", async () => {
     const { id } = await createProgram(
@@ -583,6 +667,97 @@ describe("announcements", () => {
       level: "success",
       message: "All good!",
       url: null,
+    });
+  });
+
+  describe("version targeting", () => {
+    it("a maxVersion announcement reaches old versions AND version-less clients", async () => {
+      const set = await setAnnouncement({
+        level: "warning",
+        message: "Please update Lookout.",
+        maxVersion: "0.2.9",
+      });
+      expect(set.statusCode).toBe(201);
+      expect(set.json()).toMatchObject({ maxVersion: "0.2.9", minVersion: null });
+
+      // Old build reporting its version: shown.
+      const old = await app.inject({
+        method: "GET",
+        url: "/api/announcement?client=lookout-desktop&version=0.2.5",
+      });
+      expect(old.json().announcement).toMatchObject({ message: "Please update Lookout." });
+
+      // Pre-reporting build (no query at all): shown — it's the oldest kind.
+      const legacy = await app.inject({ method: "GET", url: "/api/announcement" });
+      expect(legacy.json().announcement).toMatchObject({ message: "Please update Lookout." });
+
+      // New build: not shown.
+      const fresh = await app.inject({
+        method: "GET",
+        url: "/api/announcement?client=lookout-desktop&version=0.3.0",
+      });
+      expect(fresh.json().announcement).toBeNull();
+    });
+
+    it("a minVersion announcement never reaches version-less clients", async () => {
+      await setAnnouncement({
+        level: "info",
+        message: "Try the new editor!",
+        minVersion: "0.3.0",
+      });
+
+      const fresh = await app.inject({
+        method: "GET",
+        url: "/api/announcement?version=0.3.1",
+      });
+      expect(fresh.json().announcement).toMatchObject({ message: "Try the new editor!" });
+
+      const legacy = await app.inject({ method: "GET", url: "/api/announcement" });
+      expect(legacy.json().announcement).toBeNull();
+
+      const old = await app.inject({
+        method: "GET",
+        url: "/api/announcement?version=0.2.9",
+      });
+      expect(old.json().announcement).toBeNull();
+    });
+
+    it("the public payload never carries the targeting bounds", async () => {
+      await setAnnouncement({
+        level: "info",
+        message: "Targeted",
+        minVersion: "0.1.0",
+        maxVersion: "9.9.9",
+      });
+      const pub = await app.inject({
+        method: "GET",
+        url: "/api/announcement?version=1.0.0",
+      });
+      const a = pub.json().announcement;
+      expect(a).toMatchObject({ level: "info", message: "Targeted" });
+      expect(a).not.toHaveProperty("minVersion");
+      expect(a).not.toHaveProperty("maxVersion");
+    });
+
+    it("rejects malformed version bounds", async () => {
+      const bad = await setAnnouncement({
+        level: "info",
+        message: "x",
+        maxVersion: "latest",
+      });
+      expect(bad.statusCode).toBe(400);
+    });
+
+    it("untargeted announcements keep the old behavior exactly", async () => {
+      await setAnnouncement({ level: "info", message: "For everyone" });
+      for (const url of [
+        "/api/announcement",
+        "/api/announcement?version=0.0.1",
+        "/api/announcement?client=lookout-desktop&version=99.0.0",
+      ]) {
+        const res = await app.inject({ method: "GET", url });
+        expect(res.json().announcement).toMatchObject({ message: "For everyone" });
+      }
     });
   });
 });

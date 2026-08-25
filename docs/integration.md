@@ -218,7 +218,7 @@ untrusted** — all timing and time tracking is validated server-side.
 |--------|----------|-------------|
 | GET | `/api/sessions/:token` | Session status (for recovery after refresh) |
 | GET | `/api/sessions/:token/upload-url` | Get presigned PUT URL. Pass `?capturedAt=<iso8601>` to opt the session into credit mode. Activates session on first call. Rate limited: 10/min per session. |
-| POST | `/api/sessions/:token/screenshots` | Confirm upload. Body: `{ screenshotId, width, height, fileSize }`. Returns `{ confirmed, trackedSeconds, nextExpectedAt }`. Server verifies R2 object exists. Rate limited: 20/min per token. |
+| POST | `/api/sessions/:token/screenshots` | Confirm upload. Body: `{ screenshotId, width, height, fileSize, final? }`. Returns `{ confirmed, trackedSeconds, nextExpectedAt }`. Server verifies R2 object exists. Rate limited: 20/min per token. Set `final: true` only on the one capture a client flushes right before pausing/stopping: credit-mode servers then credit the exact seconds elapsed since the last credited mark (clamped to 0–60) instead of the all-or-nothing streak rule, so a pause at 03:15 resumes at 03:15. Flush **before** the pause POST — a paused session rejects confirms. |
 | POST | `/api/sessions/:token/pause` | Pause session |
 | POST | `/api/sessions/:token/resume` | Resume session |
 | POST | `/api/sessions/:token/stop` | Stop session, trigger compilation |

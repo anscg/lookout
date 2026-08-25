@@ -205,13 +205,11 @@ export interface ClipRecorderOptions {
   maxWidth?: number;
   maxHeight?: number;
   jpegQuality?: number;
-  /** Faster cadence for the FIRST clip only. The opening clip is cut after
-   *  CLIP_FIRST_CUT_DELAY_MS (fast session activation), which is shorter
-   *  than one frame interval — so at the normal cadence it would hold a
-   *  single frame. The compiler drops the seed unit from the video anyway,
-   *  so this is about the recorder having something to show and something
-   *  to upload, not about output quality. After the first cut the recorder
-   *  reverts to `frameIntervalMs`. */
+  /** @deprecated Faster cadence for the FIRST clip only, from when the
+   *  opening clip was cut after CLIP_FIRST_CUT_DELAY_MS. The seed tick now
+   *  fires immediately (see useLookout), so there is no opening window to
+   *  densify — useLookout no longer passes this. Kept for API compat;
+   *  after the first cut the recorder reverts to `frameIntervalMs`. */
   openingFrameIntervalMs?: number;
 }
 

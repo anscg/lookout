@@ -44,6 +44,14 @@ export const announcements = pgTable("announcements", {
   message: text("message").notNull(),
   // Optional http(s) URL the banner's action button opens. NULL = no button.
   url: text("url"),
+  // Optional targeting by reported client version (dotted numeric, e.g.
+  // "0.3.1"), both bounds inclusive. NULL = no bound. Clients report their
+  // version on the announcement fetch; a client that reports none (any
+  // build predating version reporting) is treated as version 0 — so a
+  // max_version-targeted "please update" reaches exactly the old builds,
+  // while a min_version-targeted one never shows to them.
+  minVersion: text("min_version"),
+  maxVersion: text("max_version"),
   // Only the latest active row is surfaced; clearing sets this false rather
   // than deleting, so the announcement history is preserved.
   active: boolean("active").notNull().default(true),

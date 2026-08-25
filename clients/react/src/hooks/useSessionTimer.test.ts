@@ -3,10 +3,13 @@
  *
  * The invariants under test:
  *   1. Display never overshoots the server value by more than one
- *      capture interval (60s). Bounds the surprise at stop/compile.
- *   2. When the server credits, the display unfreezes smoothly — the
- *      new server value equals the previously-frozen display value (no
- *      visible jump on recovery).
+ *      capture interval plus latency slack (MAX_INTERPOLATION_S).
+ *      Bounds the surprise at stop/compile. The slack keeps ordinary
+ *      confirm-latency jitter from freezing the clock at every xx:00.
+ *   2. When the server credits, the display re-anchors to the server
+ *      value. In the common case (credit arrives within the slack) the
+ *      display never froze and the hand-off is seamless; only after a
+ *      genuine stall does the snap reveal up to the slack.
  *   3. Snap to server when `isActive` flips false (pause/stop). No
  *      further interpolation past that point.
  *   4. Stale-read protection: a server value LOWER than the current
@@ -20,6 +23,7 @@ import {
   useSessionTimer,
   useSessionTimerState,
   deriveDisplaySeconds,
+  MAX_INTERPOLATION_S,
 } from "./useSessionTimer.js";
 
 // The hook uses `Date.now()` for elapsed-time math and
@@ -81,14 +85,27 @@ describe("useSessionTimer — normal interpolation", () => {
 });
 
 describe("useSessionTimer — freeze (the fix)", () => {
-  it("caps interpolation at one capture interval (60s)", () => {
+  it("caps interpolation at one capture interval plus latency slack", () => {
     const { result } = renderHook(({ s, a }) => useSessionTimer(s, a), {
       initialProps: { s: 0, a: true },
     });
     // Advance well past one interval without any server update
     tickClock(180_000);
-    // Display must be capped at server + 60 even though 180s passed
-    expect(result.current).toBe(60);
+    // Display must be capped at server + MAX even though 180s passed
+    expect(result.current).toBe(MAX_INTERPOLATION_S);
+  });
+
+  it("does NOT freeze at xx:00 while a slightly-late confirm is in flight", () => {
+    // Credits are earned on the 60s grid but arrive a confirm round-trip
+    // later. A cap of exactly 60 froze the display at every minute
+    // boundary for the length of that latency — the reported "recorder
+    // hangs at xx:00". Within the slack, the clock keeps ticking.
+    const { result } = renderHook(({ s, a }) => useSessionTimer(s, a), {
+      initialProps: { s: 60, a: true },
+    });
+    tickClock(65_000); // 5s past the minute, confirm still in flight
+    expect(result.current).toBeGreaterThanOrEqual(124);
+    expect(result.current).toBeLessThanOrEqual(125);
   });
 
   it("stays frozen indefinitely when captures stall", () => {
@@ -96,26 +113,45 @@ describe("useSessionTimer — freeze (the fix)", () => {
       initialProps: { s: 120, a: true },
     });
     tickClock(600_000); // 10 minutes
-    expect(result.current).toBe(180); // 120 + 60 cap
+    expect(result.current).toBe(120 + MAX_INTERPOLATION_S);
   });
 });
 
 describe("useSessionTimer — unfreeze after stall", () => {
-  it("the credit that unfreezes equals the frozen display value (no jump)", () => {
-    // This is the core unfreeze contract. After the cap kicks in,
-    // display = server + 60. When the next credit lands, server jumps
-    // by exactly 60 → display = new_server + 0 = previous display.
+  it("a late credit lands seamlessly while inside the slack", () => {
+    // The common case: the confirm is a few seconds late. The display
+    // ticked through the minute boundary on the slack, and the credit
+    // ratchets base under it without any visible jump.
+    const { result, rerender } = renderHook(
+      ({ s, a }) => useSessionTimer(s, a),
+      { initialProps: { s: 60, a: true } },
+    );
+    tickClock(63_000); // 3s of confirm latency
+    expect(result.current).toBeGreaterThanOrEqual(122);
+    rerender({ s: 120, a: true });
+    // Base jumps to 120 and the anchor resets — no backward movement.
+    expect(result.current).toBe(120);
+  });
+
+  it("after a genuine stall, the credit snaps down at most the slack", () => {
+    // Past the full cap the display is frozen at base + MAX. A credit
+    // that still lands in the server's streak window advances base by
+    // exactly 60, so the snap reveals at most the slack — the same
+    // truth-over-inflation trade the pause snap already makes.
     const { result, rerender } = renderHook(
       ({ s, a }) => useSessionTimer(s, a),
       { initialProps: { s: 60, a: true } },
     );
     tickClock(120_000); // freeze
     const frozenValue = result.current;
-    expect(frozenValue).toBe(120); // 60 + 60 cap
+    expect(frozenValue).toBe(60 + MAX_INTERPOLATION_S);
 
     // Server credit finally arrives — server advances by 60
     rerender({ s: 120, a: true });
-    expect(result.current).toBe(frozenValue);
+    expect(result.current).toBe(120);
+    expect(frozenValue - result.current).toBeLessThanOrEqual(
+      MAX_INTERPOLATION_S - 60,
+    );
   });
 
   it("after unfreeze, interpolation resumes from the new server value", () => {
@@ -156,13 +192,13 @@ describe("useSessionTimer — pause", () => {
     // Mid-interpolation, display is roughly 60 + 45 = 105
     expect(result.current).toBeGreaterThan(100);
     rerender({ s: 60, a: false });
-    // Snap back to server value (max drop = MAX_INTERPOLATION_S = 60)
+    // Snap back to server value (max drop = MAX_INTERPOLATION_S)
     expect(result.current).toBe(60);
   });
 
-  it("max drop on pause is bounded by one interval", () => {
-    // Even after a long stall where display was frozen at +60, the
-    // pause-time snap can only reveal that 60s — never more.
+  it("max drop on pause is bounded by the interpolation cap", () => {
+    // Even after a long stall where display was frozen at the cap, the
+    // pause-time snap can only reveal that much — never more.
     const { result, rerender } = renderHook(
       ({ s, a }) => useSessionTimer(s, a),
       { initialProps: { s: 0, a: true } },
@@ -170,7 +206,7 @@ describe("useSessionTimer — pause", () => {
     tickClock(600_000); // 10 min of stall
     const beforePause = result.current;
     rerender({ s: 0, a: false });
-    expect(beforePause - result.current).toBeLessThanOrEqual(60);
+    expect(beforePause - result.current).toBeLessThanOrEqual(MAX_INTERPOLATION_S);
   });
 
   it("display stays frozen at server value during pause", () => {
@@ -246,10 +282,11 @@ describe("useSessionTimer — latency / delay scenarios", () => {
       ({ s, a }) => useSessionTimer(s, a),
       { initialProps: { s: 60, a: true } },
     );
-    tickClock(90_000); // we're 90s past last sync, but cap holds display at 120
-    expect(result.current).toBe(120);
+    tickClock(90_000); // 90s past last sync; cap holds display at 60 + MAX
+    expect(result.current).toBe(60 + MAX_INTERPOLATION_S);
     rerender({ s: 120, a: true });
-    // Display does not jump backward, does not over-advance
+    // Display re-anchors to the credited value, revealing at most the
+    // latency slack, and never over-advances.
     expect(result.current).toBe(120);
   });
 
@@ -259,11 +296,11 @@ describe("useSessionTimer — latency / delay scenarios", () => {
       { initialProps: { s: 60, a: true } },
     );
     tickClock(300_000); // 5 min stall
-    expect(result.current).toBe(120); // frozen at +60
+    expect(result.current).toBe(60 + MAX_INTERPOLATION_S); // frozen at the cap
     // Network comes back; one credit lands (chain caught up to one
     // interval). Subsequent credits will follow on schedule.
     rerender({ s: 120, a: true });
-    // Display equals frozen value — no visible jump
+    // Display snaps to the credited value — at most the slack revealed
     expect(result.current).toBe(120);
   });
 
@@ -273,7 +310,7 @@ describe("useSessionTimer — latency / delay scenarios", () => {
       initialProps: { s: 0, a: true },
     });
     tickClock(90_000);
-    expect(result.current).toBe(60); // capped at one interval, not 90
+    expect(result.current).toBe(MAX_INTERPOLATION_S); // capped, not 90
   });
 });
 
@@ -293,11 +330,15 @@ describe("deriveDisplaySeconds — shared cross-surface derivation", () => {
     expect(deriveDisplaySeconds(120, ANCHOR, true, ANCHOR + 30_000)).toBe(150);
   });
 
-  it("caps interpolation at one capture interval", () => {
+  it("caps interpolation at one capture interval plus latency slack", () => {
     // The menu bar used to keep counting here while the main window froze
-    // at +60, and the two never reconverged.
-    expect(deriveDisplaySeconds(120, ANCHOR, true, ANCHOR + 90_000)).toBe(180);
-    expect(deriveDisplaySeconds(120, ANCHOR, true, ANCHOR + 600_000)).toBe(180);
+    // at the cap, and the two never reconverged.
+    expect(deriveDisplaySeconds(120, ANCHOR, true, ANCHOR + 90_000)).toBe(
+      120 + MAX_INTERPOLATION_S,
+    );
+    expect(deriveDisplaySeconds(120, ANCHOR, true, ANCHOR + 600_000)).toBe(
+      120 + MAX_INTERPOLATION_S,
+    );
   });
 
   it("drops the interpolated remainder when not active", () => {

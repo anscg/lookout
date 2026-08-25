@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, createHmac, createHash } from "node:crypto";
 import { eq, sql, or, desc } from "drizzle-orm";
 import { parseClientInfo } from "@lookout/shared";
 import { db, schema } from "../db/index.js";
@@ -15,27 +15,113 @@ function safeEqual(a: string, b: string): boolean {
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-// Basic-auth gate for the whole admin plugin. Returns true when the request is
-// authorized; otherwise it has already sent the response.
-function requireBasicAuth(request: FastifyRequest, reply: FastifyReply): boolean {
+// ── Dashboard session cookie ───────────────────────────────────────
+//
+// The dashboard's only login is the browser's native basic-auth prompt, and
+// whether those credentials survive a refresh is up to the browser's auth
+// cache (Safari drops it constantly; some proxies strip the header) — so
+// admins got re-prompted on every reload. There is deliberately NO login
+// form: instead, any successfully basic-authed response piggybacks a signed
+// HttpOnly session cookie, and later requests are accepted on the cookie
+// alone. The prompt appears once, then refreshes ride the cookie for
+// ADMIN_SESSION_MAX_AGE_S. Basic auth keeps working on every route, so
+// scripts, curl, and CI are unchanged.
+
+const ADMIN_COOKIE = "lookout_admin";
+const ADMIN_SESSION_MAX_AGE_S = 30 * 24 * 3600; // 30 days
+
+/** HMAC key derived from the admin credentials. Deliberate: rotating the
+ *  password invalidates every outstanding dashboard session, which is exactly
+ *  what rotating an admin password should do. */
+function cookieKey(): Buffer {
+  return createHash("sha256")
+    .update(`lookout-admin-session:${ADMIN_USERNAME}:${ADMIN_PASSWORD}`)
+    .digest();
+}
+
+function signSession(expiresAtMs: number): string {
+  const sig = createHmac("sha256", cookieKey())
+    .update(String(expiresAtMs))
+    .digest("hex");
+  return `v1.${expiresAtMs}.${sig}`;
+}
+
+function sessionCookieValid(token: string | undefined): boolean {
+  if (!token) return false;
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts[0] !== "v1") return false;
+  const expiresAtMs = Number(parts[1]);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs < Date.now()) return false;
+  const expected = createHmac("sha256", cookieKey())
+    .update(parts[1])
+    .digest("hex");
+  return safeEqual(parts[2], expected);
+}
+
+/** Minimal same-origin cookie read — no cookie plugin dependency for one
+ *  value. Values we set are dot-separated hex, never encoded. */
+function readCookie(request: FastifyRequest, name: string): string | undefined {
+  const header = request.headers.cookie;
+  if (typeof header !== "string") return undefined;
+  for (const part of header.split(";")) {
+    const eqAt = part.indexOf("=");
+    if (eqAt === -1) continue;
+    if (part.slice(0, eqAt).trim() === name) return part.slice(eqAt + 1).trim();
+  }
+  return undefined;
+}
+
+/** Whether the request should get a `Secure` cookie. Direct TLS or a
+ *  TLS-terminating proxy (Coolify/traefik set x-forwarded-proto). */
+function isHttps(request: FastifyRequest): boolean {
+  if (request.protocol === "https") return true;
+  const fwd = request.headers["x-forwarded-proto"];
+  return typeof fwd === "string" && fwd.split(",")[0].trim() === "https";
+}
+
+function setSessionCookie(request: FastifyRequest, reply: FastifyReply): void {
+  const attrs = [
+    `${ADMIN_COOKIE}=${signSession(Date.now() + ADMIN_SESSION_MAX_AGE_S * 1000)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${ADMIN_SESSION_MAX_AGE_S}`,
+  ];
+  if (isHttps(request)) attrs.push("Secure");
+  reply.header("set-cookie", attrs.join("; "));
+}
+
+function validBasicAuth(request: FastifyRequest): boolean {
+  const header = request.headers["authorization"];
+  if (typeof header !== "string" || !header.startsWith("Basic ")) return false;
+  const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
+  const sep = decoded.indexOf(":");
+  if (sep === -1) return false;
+  const user = decoded.slice(0, sep);
+  const pass = decoded.slice(sep + 1);
+  // Evaluate both halves before &&-ing so a wrong username doesn't
+  // short-circuit the password check.
+  const okUser = safeEqual(user, ADMIN_USERNAME!);
+  const okPass = safeEqual(pass, ADMIN_PASSWORD!);
+  return okUser && okPass;
+}
+
+// Auth gate for the whole admin plugin. Returns true when the request is
+// authorized; otherwise it has already sent the 401 (whose WWW-Authenticate
+// makes the browser show its native prompt — the only login there is).
+// Successful Basic auth refreshes the session cookie on the way out, so the
+// prompt is a once-per-ADMIN_SESSION_MAX_AGE_S event, not a per-refresh one.
+function requireAdminAuth(request: FastifyRequest, reply: FastifyReply): boolean {
   if (!ADMIN_ENABLED) {
     reply.code(503).send({ error: "admin disabled" });
     return false;
   }
-
-  const header = request.headers["authorization"];
-  if (typeof header === "string" && header.startsWith("Basic ")) {
-    const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
-    const sep = decoded.indexOf(":");
-    if (sep !== -1) {
-      const user = decoded.slice(0, sep);
-      const pass = decoded.slice(sep + 1);
-      // Evaluate both halves before &&-ing so a wrong username doesn't
-      // short-circuit the password check.
-      const okUser = safeEqual(user, ADMIN_USERNAME!);
-      const okPass = safeEqual(pass, ADMIN_PASSWORD!);
-      if (okUser && okPass) return true;
-    }
+  if (validBasicAuth(request)) {
+    setSessionCookie(request, reply);
+    return true;
+  }
+  if (sessionCookieValid(readCookie(request, ADMIN_COOKIE))) {
+    return true;
   }
 
   reply
@@ -141,12 +227,32 @@ const patchProgramBodySchema = {
 const ANNOUNCEMENT_LEVELS = ["info", "success", "warning", "danger"] as const;
 type AnnouncementLevel = (typeof ANNOUNCEMENT_LEVELS)[number];
 
+// Dotted numeric version, optionally "v"-prefixed: "0.3", "v1.2.3".
+const VERSION_PATTERN = "^v?\\d+(\\.\\d+)*$";
+
 const setAnnouncementBodySchema = {
   type: "object" as const,
   properties: {
     level: { type: "string" as const, enum: ANNOUNCEMENT_LEVELS },
     message: { type: "string" as const, minLength: 1, maxLength: 500 },
     url: { type: "string" as const, maxLength: 2048 },
+    // Optional version targeting, both bounds inclusive against the version
+    // clients report on the announcement fetch. Clients that report none
+    // (builds predating version reporting) count as version 0 — so
+    // maxVersion-only reaches exactly the old builds, minVersion never
+    // shows to them. Empty string = unset (the admin form sends "").
+    minVersion: {
+      anyOf: [
+        { type: "string" as const, pattern: VERSION_PATTERN, maxLength: 64 },
+        { type: "string" as const, maxLength: 0 },
+      ],
+    },
+    maxVersion: {
+      anyOf: [
+        { type: "string" as const, pattern: VERSION_PATTERN, maxLength: 64 },
+        { type: "string" as const, maxLength: 0 },
+      ],
+    },
   },
   required: ["level", "message"] as const,
   additionalProperties: false,
@@ -162,7 +268,7 @@ const programIdParamSchema = {
 
 export async function adminRoutes(app: FastifyInstance) {
   app.addHook("onRequest", async (request, reply) => {
-    if (!requireBasicAuth(request, reply)) {
+    if (!requireAdminAuth(request, reply)) {
       // Response already sent; signal Fastify to stop processing this request.
       return reply;
     }
@@ -181,6 +287,8 @@ export async function adminRoutes(app: FastifyInstance) {
         level: schema.announcements.level,
         message: schema.announcements.message,
         url: schema.announcements.url,
+        minVersion: schema.announcements.minVersion,
+        maxVersion: schema.announcements.maxVersion,
         updatedAt: schema.announcements.updatedAt,
       })
       .from(schema.announcements)
@@ -193,7 +301,15 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // Set the announcement. Deactivates any prior active one and inserts the new
   // one, so there's always at most one active row (history is preserved).
-  app.post<{ Body: { level: AnnouncementLevel; message: string; url?: string } }>(
+  app.post<{
+    Body: {
+      level: AnnouncementLevel;
+      message: string;
+      url?: string;
+      minVersion?: string;
+      maxVersion?: string;
+    };
+  }>(
     "/api/admin/announcement",
     { schema: { body: setAnnouncementBodySchema } },
     async (request, reply) => {
@@ -207,6 +323,8 @@ export async function adminRoutes(app: FastifyInstance) {
       } catch {
         return reply.code(400).send({ error: "url must be an http(s) URL" });
       }
+      const minVersion = request.body.minVersion?.trim() || null;
+      const maxVersion = request.body.maxVersion?.trim() || null;
 
       const announcement = await db.transaction(async (tx) => {
         await tx
@@ -215,12 +333,20 @@ export async function adminRoutes(app: FastifyInstance) {
           .where(eq(schema.announcements.active, true));
         const [created] = await tx
           .insert(schema.announcements)
-          .values({ level: request.body.level, message, url })
+          .values({
+            level: request.body.level,
+            message,
+            url,
+            minVersion,
+            maxVersion,
+          })
           .returning({
             id: schema.announcements.id,
             level: schema.announcements.level,
             message: schema.announcements.message,
             url: schema.announcements.url,
+            minVersion: schema.announcements.minVersion,
+            maxVersion: schema.announcements.maxVersion,
           });
         return created;
       });

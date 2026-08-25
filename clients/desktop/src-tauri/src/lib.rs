@@ -1797,6 +1797,10 @@ struct UploadPayload {
     height: u32,
     /// JPEG preview (base64) of the unit's last frame, for the UI event.
     preview_base64: String,
+    /// Pause/stop flush: the confirm carries `final: true`, and the server
+    /// credits the partial minute since the last credited mark (its
+    /// creditFinalCapture) instead of the all-or-nothing streak rule.
+    is_final: bool,
 }
 
 impl UploadPayload {
@@ -1809,7 +1813,14 @@ impl UploadPayload {
             width,
             height,
             preview_base64: base64,
+            is_final: false,
         }
+    }
+
+    /// Mark this payload as the pause/stop flush capture.
+    fn final_capture(mut self) -> Self {
+        self.is_final = true;
+        self
     }
 
     /// A per-minute clip. The container is whatever the platform encoder
@@ -1826,6 +1837,7 @@ impl UploadPayload {
             width: clip.width,
             height: clip.height,
             preview_base64,
+            is_final: false,
         }
     }
 }
@@ -1969,6 +1981,10 @@ async fn upload_and_confirm(
     });
     if let Some(fc) = payload.frame_count {
         confirm_body["frameCount"] = fc.into();
+    }
+    // Only sent when true: pre-final servers reject unknown confirm fields.
+    if payload.is_final {
+        confirm_body["final"] = true.into();
     }
     let confirm_sent_at_ms = current_unix_ms();
     let confirm_resp: ConfirmResponse = retry_upload_step!("confirm", {
@@ -2350,17 +2366,6 @@ const SLEEP_THRESHOLD_SECS: u64 = CAPTURE_INTERVAL_SECS * 2 + 30; // 150s
 /// produced while the window is focused.
 const DEFAULT_FRAME_INTERVAL_MS: u64 = 10_000;
 
-/// Delay from capture start to the FIRST upload tick. Mirrors
-/// CLIP_FIRST_CUT_DELAY_MS in @lookout/shared.
-///
-/// Deliberately not a multiple of the frame cadence: the opening clip is the
-/// session's seed capture, which credits 0 seconds and which the compiler
-/// drops from the video outright, so its frame density doesn't matter. What
-/// this delay does control is how long the user stares at an unstarted
-/// session — and tying it to the cadence turned every slower cadence into a
-/// 20-second-plus wait.
-const CLIP_FIRST_CUT_DELAY_MS: u64 = 8_000;
-
 /// Consecutive clip-encoder failures tolerated before this capture run gives
 /// up on clips and records plain JPEGs for the rest of the session.
 ///
@@ -2386,12 +2391,22 @@ const MAX_CLIP_ENCODER_FAILURES: u32 = 3;
 /// and must not end the recording.
 const MAX_CONSECUTIVE_PIPEWIRE_FAILURES: u32 = 3;
 
+/// Extra interpolation headroom past one capture interval, absorbing the
+/// confirm round-trip a credit takes to reach the UI. Mirrors
+/// TIMER_INTERPOLATION_SLACK_S in @lookout/shared — keep the two in step.
+/// Without it, any two confirms arriving more than one interval apart
+/// (multi-MB clip uploads jitter by seconds) froze every timer surface
+/// exactly at a xx:00 boundary until the next confirm landed.
+const TIMER_INTERPOLATION_SLACK_SECS: i64 = 15;
+
 /// Max seconds the menu-bar time may run ahead of the last server-credited
 /// `tracked_seconds`. Must equal `MAX_INTERPOLATION_S` in
-/// @lookout/react's useSessionTimer — one capture interval. Without the cap
-/// the menu bar kept counting through a capture stall while the main window
-/// froze at base + 60, and the two never reconverged.
-const MAX_TRAY_INTERPOLATION_SECS: i64 = CAPTURE_INTERVAL_SECS as i64;
+/// @lookout/react's useSessionTimer — one capture interval plus latency
+/// slack. Without the cap the menu bar kept counting through a capture
+/// stall while the main window froze at the same cap, and the two never
+/// reconverged.
+const MAX_TRAY_INTERPOLATION_SECS: i64 =
+    CAPTURE_INTERVAL_SECS as i64 + TIMER_INTERPOLATION_SLACK_SECS;
 
 /// The Rust mirror of `deriveDisplaySeconds` in @lookout/react. Keep the two
 /// in step: the menu bar and the main window each tick their own clock, so any
@@ -3026,22 +3041,19 @@ async fn capture_loop_task(
         .any(|s| matches!(s, CaptureSource::PipeWire { .. }));
     let mut consecutive_capture_failures: u32 = 0;
 
-    // Clips: hold the first upload back so the opening clip has a few frames
-    // and the session activates promptly. Fixed delay, NOT a multiple of the
-    // cadence — see CLIP_FIRST_CUT_DELAY_MS. JPEG mode keeps the legacy
-    // immediate first tick.
-    next_fire = TokioInstant::now()
-        + if clips_mode {
-            Duration::from_millis(CLIP_FIRST_CUT_DELAY_MS)
-        } else {
-            Duration::ZERO
-        };
-
-    // The opening window is shorter than one frame interval, so at the normal
-    // cadence the first clip would hold a single frame. Capture it densely
-    // enough to carry a handful; after the first upload the cadence returns
-    // to the server's value.
-    let opening_frame_dur = Duration::from_millis((CLIP_FIRST_CUT_DELAY_MS / 4).max(500));
+    // The first tick fires immediately in BOTH modes. The first capture is
+    // the streak seed: it credits 0 seconds, and its capturedAt becomes the
+    // session's startedAt and the anchor every later 60s credit mark is
+    // measured from. Clips mode used to hold it back by
+    // CLIP_FIRST_CUT_DELAY_MS so the opening clip carried a few frames —
+    // but the compiler drops the seed unit from the video outright, so
+    // those frames bought nothing, while the delay shifted the entire
+    // credit schedule ~8s past record-press: seconds permanently lost from
+    // tracked time, and a display timer frozen at 1:00 until the first
+    // real credit landed at ~68s. The seed now uploads as a plain JPEG at
+    // t=0 (fast activation — smaller than any clip) and the recorder rolls
+    // through it, so the first FINISHED clip covers the full first minute.
+    next_fire = TokioInstant::now();
     let mut first_upload_done = false;
 
     // The in-flight upload, if any. Uploads run CONCURRENTLY with frame
@@ -3054,6 +3066,11 @@ async fn capture_loop_task(
         None;
     let mut upload_cfg: Option<SessionConfig> = None;
 
+    // Set only by the deliberate cancel path (pause/stop). Gates the final
+    // partial-capture flush below — other exits (source lost, terminated
+    // server-side, not configured) must not attempt it.
+    let mut cancelled = false;
+
     'outer: loop {
         // ── Wait until next_fire, collecting frames along the way ──
         // Frames run at the clip cadence (server-set, 6/min) through the
@@ -3062,17 +3079,12 @@ async fn capture_loop_task(
         // is focus-gated either way (nobody can see it unfocused).
         // sleep_until returns immediately when next_fire is already past
         // (catch-up), which also skips frame collection.
-        let cadence = if first_upload_done {
-            frame_dur
-        } else {
-            opening_frame_dur
-        };
         loop {
             let now = TokioInstant::now();
             if now >= next_fire {
                 break;
             }
-            let wake = std::cmp::min(now + cadence, next_fire);
+            let wake = std::cmp::min(now + frame_dur, next_fire);
             // Third arm: the in-flight upload finishing mid-wait. Its body
             // only records the outcome — applying it (which needs mutable
             // access to upload_handle/next_fire) happens after the select.
@@ -3081,6 +3093,7 @@ async fn capture_loop_task(
                 _ = sleep_until(wake) => {}
                 _ = cancel_rx.changed() => {
                     eprintln!("[capture-loop] cancelled");
+                    cancelled = true;
                     break 'outer;
                 }
                 res = async {
@@ -3260,6 +3273,12 @@ async fn capture_loop_task(
                 let jpeg_bytes = bytes::Bytes::from(jpeg_data);
 
                 // Clips: append the final frame and cut this interval's clip.
+                // On the SEED tick (the immediate first upload) the frame is
+                // appended but the clip is NOT cut: the seed uploads as a
+                // plain JPEG — its content is dropped by the compiler anyway,
+                // and what matters is planting the streak anchor at
+                // record-press — while the recorder keeps rolling so the
+                // first finished clip covers the whole first minute.
                 let clip = if clips_mode {
                     if recorder.is_none() {
                         recorder = clips::ClipRecorder::new(
@@ -3282,21 +3301,25 @@ async fn capture_loop_task(
                             note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
                         }
                     }
-                    match recorder.take().map(|r| r.finish()) {
-                        Some(Ok(c)) => {
-                            // A clip made it out whole — the encoder works,
-                            // so earlier failures were transient.
-                            clip_encoder_failures = 0;
-                            Some(c)
+                    if !first_upload_done {
+                        None
+                    } else {
+                        match recorder.take().map(|r| r.finish()) {
+                            Some(Ok(c)) => {
+                                // A clip made it out whole — the encoder works,
+                                // so earlier failures were transient.
+                                clip_encoder_failures = 0;
+                                Some(c)
+                            }
+                            Some(Err(e)) => {
+                                eprintln!(
+                                    "[capture-loop] clip finalize failed: {e} — uploading JPEG instead"
+                                );
+                                note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
+                                None
+                            }
+                            None => None,
                         }
-                        Some(Err(e)) => {
-                            eprintln!(
-                                "[capture-loop] clip finalize failed: {e} — uploading JPEG instead"
-                            );
-                            note_clip_failure(&mut clip_encoder_failures, &mut clips_mode);
-                            None
-                        }
-                        None => None,
                     }
                 } else {
                     None
@@ -3381,10 +3404,125 @@ async fn capture_loop_task(
             }
         }
 
-        // Whatever happened, the opening window is over — later intervals
-        // are full-length, so the normal cadence applies (a failed first
-        // upload must not run the fast cadence across a 60s retry window).
+        // Whatever happened, the seed tick is spent — every later tick cuts
+        // its clip. (Set even on failure: a failed seed retries on the normal
+        // cadence, and that retry should behave like any other tick.)
         first_upload_done = true;
+    }
+
+    // Pause/stop: flush one last capture flagged `final` so the partial
+    // minute since the last credited mark still credits (the server's
+    // creditFinalCapture) — pausing at 03:15 resumes at 03:15, not 03:00.
+    // Only on deliberate cancellation: the session is still active and
+    // `stop_capture_loop` awaits this task before the UI sends the pause
+    // POST (a paused session rejects confirms).
+    if cancelled {
+        // Settle the in-flight upload FIRST. The final capture resets the
+        // streak anchor; a still-unconfirmed full minute confirmed after
+        // that reset would credit nothing.
+        if let Some(handle) = upload_handle.take() {
+            let cfg = upload_cfg.take().expect("cfg tracks upload_handle");
+            let res = match handle.await {
+                Ok(r) => r,
+                Err(e) => Err(format!("upload task panicked: {e}")),
+            };
+            let _ = apply_upload_result(&app, &cfg, res, &mut next_fire, interval_dur).await;
+        }
+        let config = {
+            let state = app.state::<AppState>();
+            let guard = state.config.lock().unwrap();
+            guard.clone()
+        };
+        if let Some(config) = config {
+            match grab_frame(&app, &sources, max_width, max_height, jpeg_quality, GrabJpeg::Full)
+                .await
+            {
+                Ok(grab) => {
+                    let captured_at = if ENABLE_CREDIT_MODE {
+                        Some(captured_at_now(&app))
+                    } else {
+                        None
+                    };
+                    // Close the in-progress clip with this frame as its last.
+                    // Any encoder trouble degrades to the JPEG, exactly like
+                    // a normal tick.
+                    let clip = match recorder.take() {
+                        Some(mut r) => {
+                            if let Err(e) = r.push_frame(&grab.image) {
+                                eprintln!(
+                                    "[capture-loop] final clip frame append failed: {e}"
+                                );
+                            }
+                            match r.finish() {
+                                Ok(c) => Some(c),
+                                Err(e) => {
+                                    eprintln!(
+                                        "[capture-loop] final clip finalize failed: {e} — flushing JPEG"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        None => None,
+                    };
+                    let jpeg = grab.jpeg.expect("tick grab always requests jpeg");
+                    let jpeg_base64 = base64_encode(&jpeg.data);
+                    let jpeg_bytes = bytes::Bytes::from(jpeg.data);
+                    let result = match clip {
+                        Some(c) => {
+                            match upload_and_confirm(
+                                UploadPayload::clip(c, jpeg_base64.clone()).final_capture(),
+                                captured_at.as_deref(),
+                                &config,
+                                &app,
+                            )
+                            .await
+                            {
+                                Ok(r) => Ok(r),
+                                Err(e) => {
+                                    eprintln!(
+                                        "[capture-loop] final clip upload failed ({e}) — retrying flush as JPEG"
+                                    );
+                                    upload_and_confirm(
+                                        UploadPayload::jpeg(
+                                            jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height,
+                                        )
+                                        .final_capture(),
+                                        captured_at.as_deref(),
+                                        &config,
+                                        &app,
+                                    )
+                                    .await
+                                }
+                            }
+                        }
+                        None => {
+                            upload_and_confirm(
+                                UploadPayload::jpeg(
+                                    jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height,
+                                )
+                                .final_capture(),
+                                captured_at.as_deref(),
+                                &config,
+                                &app,
+                            )
+                            .await
+                        }
+                    };
+                    match result {
+                        Ok(r) => {
+                            eprintln!("[capture-loop] final partial capture flushed");
+                            let _ = app.emit("capture-tick-result", CaptureTickResult::from(r));
+                        }
+                        // Best effort: a failed flush loses only the partial
+                        // minute, which is exactly what happened before the
+                        // flush existed.
+                        Err(e) => eprintln!("[capture-loop] final capture flush failed: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("[capture-loop] final flush capture failed: {e}"),
+            }
+        }
     }
 
     // Never leave a half-recorded clip (or its temp file) behind on
@@ -3515,13 +3653,31 @@ async fn start_capture_loop(
 }
 
 /// Stop the Rust-side capture loop (if running).
+///
+/// Async, and AWAITED by the UI before it sends the pause/stop POST: on
+/// cancellation the loop flushes the in-progress partial minute as a
+/// `final` capture (see the end of `capture_loop_task`), and that confirm
+/// must land while the session is still active — a paused session rejects
+/// it. Bounded so a dead network can't wedge the pause button; on timeout
+/// the flush is abandoned (the partial minute is lost, exactly as it was
+/// before the flush existed).
 #[tauri::command]
-fn stop_capture_loop(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.capture_loop.lock().map_err(|e| e.to_string())?;
-    if let Some(handle) = guard.take() {
+async fn stop_capture_loop(state: State<'_, AppState>) -> Result<(), String> {
+    let handle = {
+        let mut guard = state.capture_loop.lock().map_err(|e| e.to_string())?;
+        guard.take()
+    };
+    if let Some(handle) = handle {
         eprintln!("[capture-loop] stopping");
         let _ = handle.cancel_tx.send(true);
-        handle.join_handle.abort();
+        let mut join = handle.join_handle;
+        if tokio::time::timeout(std::time::Duration::from_secs(20), &mut join)
+            .await
+            .is_err()
+        {
+            eprintln!("[capture-loop] final flush timed out — aborting the loop");
+            join.abort();
+        }
     }
     // Stop the tray timer too
     stop_tray_timer(&state);
@@ -4228,8 +4384,9 @@ mod tray_timer_tests {
     #[test]
     fn cap_matches_the_js_side() {
         // MAX_INTERPOLATION_S in useSessionTimer.ts is
-        // SCREENSHOT_INTERVAL_MS / 1000 = 60.
-        assert_eq!(MAX_TRAY_INTERPOLATION_SECS, 60);
+        // SCREENSHOT_INTERVAL_MS / 1000 + TIMER_INTERPOLATION_SLACK_S
+        // = 60 + 15.
+        assert_eq!(MAX_TRAY_INTERPOLATION_SECS, 75);
     }
 
     #[test]
@@ -4239,12 +4396,18 @@ mod tray_timer_tests {
     }
 
     #[test]
-    fn interpolation_is_capped_at_one_interval() {
+    fn interpolation_is_capped_at_one_interval_plus_slack() {
         // Without the cap the menu bar kept counting through a capture stall
-        // while the main window froze at base + 60, and the two never
+        // while the main window froze at the shared cap, and the two never
         // reconverged — the reported "menu bar shows a different time".
-        assert_eq!(tray_display_seconds(120, 90, true), 180);
-        assert_eq!(tray_display_seconds(120, 600, true), 180);
+        assert_eq!(
+            tray_display_seconds(120, 90, true),
+            120 + MAX_TRAY_INTERPOLATION_SECS
+        );
+        assert_eq!(
+            tray_display_seconds(120, 600, true),
+            120 + MAX_TRAY_INTERPOLATION_SECS
+        );
     }
 
     #[test]

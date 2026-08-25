@@ -16,6 +16,7 @@ import {
   checkRateLimit,
   checkGenericRateLimit,
   creditCapture,
+  creditFinalCapture,
   adoptedCapturedAt,
 } from "../lib/timing.js";
 import { now } from "../lib/clock.js";
@@ -711,6 +712,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       height: number;
       fileSize: number;
       frameCount?: number;
+      final?: boolean;
     };
   }>(
     "/api/sessions/:token/screenshots",
@@ -728,6 +730,10 @@ export async function sessionRoutes(app: FastifyInstance) {
             // Frames inside an uploaded clip. Informational (the worker
             // demuxes for the real count); omitted for jpeg captures.
             frameCount: { type: "integer" as const, minimum: 1, maximum: 600 },
+            // The capture a client flushes at pause/stop so the partial
+            // minute since the last credited mark isn't lost (credit-mode
+            // only — see creditFinalCapture). Old clients never send it.
+            final: { type: "boolean" as const },
           },
           additionalProperties: false,
         },
@@ -761,6 +767,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       const { screenshotId, width, height, fileSize, frameCount } = request.body;
+      const isFinal = request.body.final === true;
 
       // Validate screenshot belongs to this session and isn't already confirmed
       const screenshot = await db.query.screenshots.findFirst({
@@ -866,7 +873,9 @@ export async function sessionRoutes(app: FastifyInstance) {
           const currentTracked = Number(rawRow.tracked_seconds ?? 0);
 
           const cap = screenshot.capturedAt ?? serverNow;
-          const decision = creditCapture(
+          // A final capture (pause/stop flush) credits the partial minute
+          // since the last credited mark instead of all-or-nothing.
+          const decision = (isFinal ? creditFinalCapture : creditCapture)(
             cap,
             streakAnchorAt,
             streakCreditedCount,

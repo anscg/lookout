@@ -139,17 +139,36 @@ export const MAX_FRAMES_PER_CLIP = FRAMES_PER_CLIP * MAX_CLIP_FRAME_OVERRUN;
  *  Default: 3 */
 export const MAX_CLIP_UPLOAD_FAILURES = 3;
 
-/** Wall-clock delay from capture start to the FIRST upload tick.
+/** LEGACY: wall-clock delay from capture start to the FIRST upload tick,
+ *  used by older clip-mode clients still in the field.
  *
- *  Deliberately NOT a multiple of CLIP_FRAME_INTERVAL_MS. The opening clip
- *  is the session's seed capture: it credits 0 seconds and the compiler
- *  drops it from the video entirely (see the worker's dropSeedUnit), so its
- *  frame density is irrelevant. What this delay actually controls is how
- *  long the user waits for the session to activate — tying it to the
- *  cadence turned every slower cadence into a 20-second-plus wait on a
- *  blank recorder.
+ *  Current clients fire the seed tick immediately (like JPEG mode always
+ *  did): the seed capture credits 0 seconds and the compiler drops it from
+ *  the video entirely (see the worker's dropSeedUnit), so delaying it to
+ *  give it frames bought nothing — and it shifted the session's streak
+ *  anchor (and startedAt) 8s past record-press, permanently losing those
+ *  seconds and freezing the display timer at 1:00 until the first credit
+ *  landed. Kept because old desktop/web clients still cut their opening
+ *  clip on this delay and the worker's seed handling documents itself
+ *  against it. Do not add new uses.
  *  Default: 8000 (8 seconds) */
 export const CLIP_FIRST_CUT_DELAY_MS = 8_000;
+
+/** Slack added on top of one capture interval when the display timer
+ *  interpolates ahead of the last server-credited value.
+ *
+ *  Credits are earned on a strict 60s grid (the streak anchor), but they
+ *  reach the UI a confirm round-trip later — and clips are multi-MB
+ *  payloads, so that latency jitters by seconds. With the interpolation
+ *  cap at exactly one interval, any confirm-to-confirm gap over 60s froze
+ *  the display precisely at a xx:00 boundary (the credited base is always
+ *  a multiple of 60) until the next confirm landed — read by users as the
+ *  recorder hanging. This slack absorbs normal upload/confirm latency;
+ *  a genuine stall still freezes the display, just this much later.
+ *  Mirrored by the desktop tray ticker (MAX_TRAY_INTERPOLATION_SECS in
+ *  clients/desktop/src-tauri/src/lib.rs) — keep the two in step.
+ *  Default: 15 */
+export const TIMER_INTERPOLATION_SLACK_S = 15;
 
 /** Per-frame byte budget for a natively-encoded clip frame — the ACTUAL
  *  quality dial, and the reason the native bitrate is derived rather than

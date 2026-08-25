@@ -118,6 +118,10 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
            autocomplete="off" maxlength="500" />
     <input type="url" id="ann-url" placeholder="URL (optional, opens in browser)"
            autocomplete="off" maxlength="2048" />
+    <input type="text" id="ann-min-version" placeholder="Min version (optional, e.g. 0.3.0)"
+           autocomplete="off" maxlength="64" pattern="v?\d+(\.\d+)*" title="Dotted version, e.g. 0.3.0" />
+    <input type="text" id="ann-max-version" placeholder="Max version (optional — clients without a version count as 0)"
+           autocomplete="off" maxlength="64" pattern="v?\d+(\.\d+)*" title="Dotted version, e.g. 0.2.9" />
     <button type="submit">Set announcement</button>
     <button type="button" id="ann-clear" class="danger">Clear</button>
   </form>
@@ -385,11 +389,19 @@ function renderAnnouncement(a) {
     return;
   }
   var color = ANN_COLORS[a.level] || ANN_COLORS.info;
+  var targeting = "";
+  if (a.minVersion || a.maxVersion) {
+    targeting =
+      ' <span class="ann-link">[versions ' +
+      esc(a.minVersion || "0") + " – " + esc(a.maxVersion || "∞") +
+      "]</span>";
+  }
   box.innerHTML =
     '<div class="ann-current" style="border-color:' + color + ';background:' + color + '1a">' +
       '<span class="badge" style="background:' + color + '">' + esc(a.level) + "</span>" +
       '<span class="ann-msg">' + esc(a.message) +
         (a.url ? ' <span class="ann-link">(' + esc(a.url) + ")</span>" : "") +
+        targeting +
       "</span></div>";
 }
 
@@ -403,6 +415,8 @@ async function loadAnnouncement() {
       document.getElementById("ann-level").value = a.level;
       document.getElementById("ann-message").value = a.message;
       document.getElementById("ann-url").value = a.url || "";
+      document.getElementById("ann-min-version").value = a.minVersion || "";
+      document.getElementById("ann-max-version").value = a.maxVersion || "";
     }
   } catch (e) {
     flash(e.message, true);
@@ -417,6 +431,10 @@ document.getElementById("announcement-form").addEventListener("submit", async fu
   try {
     var body = { level: document.getElementById("ann-level").value, message: message };
     if (url) body.url = url;
+    var minV = document.getElementById("ann-min-version").value.trim();
+    var maxV = document.getElementById("ann-max-version").value.trim();
+    if (minV) body.minVersion = minV;
+    if (maxV) body.maxVersion = maxV;
     await api("POST", "/api/admin/announcement", body);
     flash("Announcement set.");
     await loadAnnouncement();

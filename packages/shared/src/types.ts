@@ -277,6 +277,11 @@ export interface ConfirmScreenshotRequest {
   fileSize: number;
   /** Frames inside the uploaded clip. Omit for jpeg captures. */
   frameCount?: number;
+  /** The capture flushed at pause/stop. Credit-mode servers credit the
+   *  partial minute since the last credited mark (creditFinalCapture)
+   *  instead of the all-or-nothing streak rule. Omit on ordinary ticks;
+   *  pre-final servers reject unknown fields, so only send when true. */
+  final?: boolean;
 }
 
 export interface ConfirmScreenshotResponse {

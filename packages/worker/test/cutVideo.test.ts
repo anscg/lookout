@@ -212,3 +212,83 @@ describe.skipIf(!ffmpegAvailable)("cutVideoToKeptRanges", () => {
     ).rejects.toThrow(/no kept ranges/);
   });
 });
+
+/**
+ * Backward compatibility: originals compiled before the 6fps change are
+ * 30fps, and they live in R2 forever — a re-edit of one runs through the
+ * SAME cut code as new videos. The cutter must take its frames-per-unit
+ * from the FILE, not from SEGMENT_FPS: trusting the constant would copy a
+ * fifth of every kept range, and the frame-count verify (derived from the
+ * same constant) would pass the truncated result.
+ */
+describe.skipIf(!ffmpegAvailable)("cutVideoToKeptRanges — legacy 30fps originals", () => {
+  const LEGACY_FPS = 30;
+  let tmpDir: string;
+  let legacyPath: string;
+
+  beforeAll(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-cut-legacy-"));
+    // Build a legacy-shaped original directly: 6 one-second units on the
+    // pinned 1s closed-GOP grid at 30fps, exactly what the old pipeline
+    // published.
+    legacyPath = path.join(tmpDir, "legacy.mp4");
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-f", "lavfi",
+        "-i", `testsrc2=size=640x360:rate=${LEGACY_FPS}:duration=${UNITS}`,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-g", String(LEGACY_FPS),
+        "-keyint_min", String(LEGACY_FPS),
+        "-sc_threshold", "0",
+        "-x264-params", "open-gop=0",
+        "-movflags", "+faststart",
+        "-y", legacyPath,
+      ],
+      { timeout: 120_000 },
+    );
+    expect(await probeFrameCount(legacyPath)).toBe(UNITS * LEGACY_FPS);
+  }, 300_000);
+
+  it("stream-copies kept ranges using the original's own fps", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-cut-legacy-a-"));
+    const edited = await cutVideoToKeptRanges(
+      dir,
+      legacyPath,
+      [
+        { start: 0, end: 2 },
+        { start: 4, end: 6 },
+      ],
+      true,
+    );
+    // 4 kept units × the LEGACY rate — not SEGMENT_FPS.
+    expect(await probeFrameCount(edited)).toBe(4 * LEGACY_FPS);
+  }, 180_000);
+
+  it("is bit-exact on a legacy original", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-cut-legacy-b-"));
+    const kept = [{ start: 1, end: 3 }];
+    const edited = await cutVideoToKeptRanges(dir, legacyPath, kept, true);
+
+    const originalHashes = await frameHashes(legacyPath);
+    const editedHashes = await frameHashes(edited);
+    expect(editedHashes).toEqual(
+      originalHashes.slice(1 * LEGACY_FPS, 3 * LEGACY_FPS),
+    );
+  }, 180_000);
+
+  it("re-encode fallback keeps the legacy original's rate", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-cut-legacy-c-"));
+    const edited = await cutVideoToKeptRanges(
+      dir,
+      legacyPath,
+      [{ start: 2, end: 5 }],
+      false, // force the re-encode path
+    );
+    const frames = await probeFrameCount(edited);
+    expect(Math.abs(frames - 3 * LEGACY_FPS)).toBeLessThanOrEqual(1);
+  }, 180_000);
+});

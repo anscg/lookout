@@ -65,6 +65,11 @@ export interface UploadPayload {
   truncated?: boolean;
   /** JPEG used for the UI preview when `blob` isn't an image. */
   previewBlob?: Blob | null;
+  /** The capture flushed at pause/stop. The server credits the partial
+   *  minute since the last credited mark (see the server's
+   *  creditFinalCapture) instead of the all-or-nothing streak rule, so
+   *  pausing at 03:15 resumes at 03:15 rather than 03:00. */
+  final?: boolean;
 }
 
 export interface UploadConfirmResult {
@@ -215,6 +220,7 @@ export function useUploader(): UploaderResult {
               height: capture.height,
               fileSize: capture.blob.size,
               ...(capture.frameCount ? { frameCount: capture.frameCount } : {}),
+              ...(capture.final ? { final: true } : {}),
             }),
           maxRetries,
           retryDelays,

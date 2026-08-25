@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CLIP_FRAME_INTERVAL_MS,
-  CLIP_FIRST_CUT_DELAY_MS,
   MAX_CLIP_UPLOAD_FAILURES,
 } from "@lookout/shared";
 import { useLookoutContext } from "../LookoutProvider.js";
@@ -60,6 +59,31 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   // Holds either a setInterval ID (legacy bucket-mode fallback) or
   // setTimeout ID (credit-mode self-scheduling chain). Cleared on unmount.
   const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Flushes the in-progress partial minute as a `final` capture, so pausing
+  // at 03:15 resumes at 03:15 instead of 03:00 (the server credits elapsed
+  // since the last credited mark — see its creditFinalCapture). Populated by
+  // the capture effect while a chain is running; pause/stop take it (and
+  // null it) BEFORE the session leaves "active", because a paused session
+  // rejects confirms. Best-effort: a failed flush loses only the partial
+  // minute, which is exactly what happened before the flush existed.
+  const flushFinalCaptureRef = useRef<(() => Promise<void>) | null>(null);
+
+  /** Run the final-capture flush, bounded so a dead network can't wedge the
+   *  pause/stop button. Must complete (or be abandoned) BEFORE the session
+   *  leaves "active" — a paused session rejects the confirm. */
+  const runFinalFlush = useCallback(async () => {
+    const flush = flushFinalCaptureRef.current;
+    flushFinalCaptureRef.current = null;
+    if (!flush) return;
+    try {
+      await Promise.race([
+        flush(),
+        new Promise((resolve) => setTimeout(resolve, 15_000)),
+      ]);
+    } catch (err) {
+      console.warn("[lookout] final capture flush failed:", err);
+    }
+  }, []);
   // Clip recorder for sessions with clips enabled (screen mode only).
   // Null = classic one-JPEG-per-minute captures.
   const clipRecorderRef = useRef<ClipRecorder | null>(null);
@@ -139,17 +163,13 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       const video = screenCapture.getVideo();
       if (video) {
         try {
+          // No openingFrameIntervalMs: the seed tick fires immediately (see
+          // below), so there is no opening window to densify — the first
+          // real clip is the full first minute at the normal cadence.
           clipRecorder = new ClipRecorder(video, frameIntervalMs, {
             maxWidth: config.capture.maxWidth,
             maxHeight: config.capture.maxHeight,
             jpegQuality: config.capture.jpegQuality,
-            // Denser cadence for the short opening clip, which is cut after
-            // CLIP_FIRST_CUT_DELAY_MS — well under one frame interval — so
-            // that first upload carries a few frames rather than one.
-            openingFrameIntervalMs: Math.max(
-              500,
-              Math.round(CLIP_FIRST_CUT_DELAY_MS / 4),
-            ),
           });
           clipRecorder.start();
         } catch (err) {
@@ -260,6 +280,20 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       }
     };
 
+    // The pause/stop flush (see flushFinalCaptureRef). Settles the in-flight
+    // upload FIRST: the final capture resets the streak anchor, and a
+    // still-unconfirmed full minute confirmed after that reset would credit
+    // nothing. Then cuts whatever the recorder holds (or grabs a JPEG) and
+    // uploads it flagged `final`.
+    flushFinalCaptureRef.current = async () => {
+      await settleInFlight();
+      let payload: UploadPayload | null =
+        (await clipRecorderRef.current?.cut().catch(() => null)) ?? null;
+      if (!payload) payload = await takeScreenshotRef.current();
+      if (!payload) return;
+      await uploadWithFallback({ ...payload, final: true });
+    };
+
     const scheduleNext = (nextExpectedAt: string | null) => {
       if (cancelled) return;
       // nextExpectedAt is SERVER wall-clock — subtract our estimate of the
@@ -346,19 +380,22 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       scheduleNext(nextExpectedAt);
     };
 
-    if (clipRecorder) {
-      // Give the opening clip a few frames before the first cut. Fixed, not
-      // a multiple of the frame interval: this delay is how long the user
-      // waits for the session to activate, and the seed clip is dropped
-      // from the compiled video regardless.
-      intervalRef.current = setTimeout(tick, CLIP_FIRST_CUT_DELAY_MS);
-    } else {
-      tick();
-    }
+    // Fire the seed tick immediately, clips or not. The first capture is
+    // the streak seed: it credits 0 seconds, plants the anchor every later
+    // 60s credit mark is measured from, and the compiler drops it from the
+    // video regardless — so its content doesn't matter, but its TIMING is
+    // the session's `startedAt`. The old CLIP_FIRST_CUT_DELAY_MS wait
+    // (giving the opening clip a few frames) shifted the whole credit
+    // schedule ~8s past record-press: those seconds were never credited,
+    // and the display timer sat frozen at 1:00 until the first real credit
+    // landed at ~68s. An immediate cut yields an empty/single-frame clip,
+    // which falls back to a plain JPEG below — exactly the legacy seed.
+    tick();
 
     return () => {
       capturingRef.current = false;
       cancelled = true;
+      flushFinalCaptureRef.current = null;
       if (intervalRef.current !== null) {
         clearTimeout(intervalRef.current);
         intervalRef.current = null;
@@ -402,6 +439,7 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   // but both cases should auto-pause so the server doesn't stay active with no captures.
   useEffect(() => {
     if (!capture.isSharing && session.status === "active") {
+      let flushed: Promise<void> = Promise.resolve();
       if (capturingRef.current) {
         // Mid-session: stream ended while capturing
         capturingRef.current = false;
@@ -409,14 +447,22 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
           clearInterval(intervalRef.current);
           intervalRef.current = null;
         }
-        clipRecorderRef.current?.stop();
-        clipRecorderRef.current = null;
+        // The stream is gone but the recorder still holds the frames it
+        // already grabbed — flush them as the final partial capture before
+        // pausing, then discard the recorder.
+        flushed = runFinalFlush().then(() => {
+          clipRecorderRef.current?.stop();
+          clipRecorderRef.current = null;
+        });
         callbacksRef.current.onShareStop?.();
       }
-      // Both cases: pause the server session so it doesn't accumulate dead time
-      session.pause().catch(() => {});
+      // Both cases: pause the server session so it doesn't accumulate dead
+      // time — after the flush, which a paused session would reject.
+      flushed.finally(() => {
+        session.pause().catch(() => {});
+      });
     }
-  }, [capture.isSharing, session.status, session.pause]);
+  }, [capture.isSharing, session.status, session.pause, runFinalFlush]);
 
   // Sync session status when uploader detects a 409 conflict
   useEffect(() => {
@@ -485,8 +531,10 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
-    // Discard the in-progress clip right away — don't keep grabbing
-    // frames while the pause request is in flight.
+    // Flush the partial minute while the recorder (and the session's
+    // active status) are still alive, THEN discard the recorder — don't
+    // keep grabbing frames while the pause request is in flight.
+    await runFinalFlush();
     clipRecorderRef.current?.stop();
     clipRecorderRef.current = null;
     capturingRef.current = false;
@@ -496,7 +544,7 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     } finally {
       pauseInFlightRef.current = false;
     }
-  }, [session.pause, session.totalActiveSeconds]);
+  }, [session.pause, session.totalActiveSeconds, runFinalFlush]);
 
   const resume = useCallback(async () => {
     if (resumeInFlightRef.current) return;
@@ -517,6 +565,10 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
+    // Flush the partial minute before the stream and the session go away —
+    // the tail of the recording credits (and appears in the video) instead
+    // of being discarded.
+    await runFinalFlush();
     clipRecorderRef.current?.stop();
     clipRecorderRef.current = null;
     capturingRef.current = false;
@@ -530,7 +582,7 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
     } finally {
       stopInFlightRef.current = false;
     }
-  }, [session.stop, session.trackedSeconds, session.totalActiveSeconds, capture.stopSharing]);
+  }, [session.stop, session.trackedSeconds, session.totalActiveSeconds, capture.stopSharing, runFinalFlush]);
 
   // Fetch video URL when session reaches "complete"
   const [videoUrl, setVideoUrl] = useState<string | null>(null);

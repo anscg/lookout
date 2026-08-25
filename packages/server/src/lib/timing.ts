@@ -246,6 +246,56 @@ export function creditCapture(
 }
 
 /**
+ * Credit a FINAL capture — the one a client flushes at pause/stop time so a
+ * partial minute isn't thrown away (pause at 03:15 used to resume at 03:00).
+ *
+ * Clients flag it with `final: true` on the confirm body; old clients never
+ * send the flag and go through `creditCapture` unchanged. The rules:
+ *
+ *   - No anchor (seed): identical to `creditCapture` — there is no credited
+ *     mark to measure a partial minute from, so it seeds with 0.
+ *   - Otherwise: credit the wall-clock elapsed since the LAST credited mark
+ *     (anchor + count·interval), clamped to [0, one interval].
+ *
+ * Deliberately NO in-window full-interval generosity here, even when the
+ * final capture lands inside the normal ±window. In the normal path that
+ * generosity is safe because the anchor never moves on a credit — landing
+ * 29s early doesn't compound, the grid stays put. A final capture RESETS
+ * the anchor (and resume re-seeds it), so passing the in-window rule
+ * through would let a pause at expected−29s bank a full interval and then
+ * restart the grid, inflating ~30% per pause/resume cycle. Exact elapsed,
+ * clamped, is exploit-free: `capturedAt` is validated against the trust
+ * envelope and monotonicity like any other capture, the credit can never
+ * exceed one interval (the CREDIT_PER_CAPTURE_S ceiling), and pause/resume
+ * cycling earns exactly wall-clock time.
+ */
+export function creditFinalCapture(
+  capturedAt: Date,
+  streakAnchorAt: Date | null,
+  streakCreditedCount: number,
+): CreditDecision {
+  const normal = creditCapture(capturedAt, streakAnchorAt, streakCreditedCount);
+  // Seed: the normal rules already do the right thing.
+  if (streakAnchorAt === null) return normal;
+
+  const lastCreditedMarkMs =
+    streakAnchorAt.getTime() + streakCreditedCount * SCREENSHOT_INTERVAL_MS;
+  const elapsedS = Math.floor(
+    (capturedAt.getTime() - lastCreditedMarkMs) / 1000,
+  );
+  return {
+    ...normal,
+    // Reset shape regardless of window: the session is pausing, and
+    // resume re-seeds the anchor anyway.
+    newAnchor: capturedAt,
+    newCount: 0,
+    inWindow: false,
+    credit: Math.min(Math.max(0, elapsedS), CREDIT_PER_CAPTURE_S),
+    nextExpectedAt: new Date(capturedAt.getTime() + SCREENSHOT_INTERVAL_MS),
+  };
+}
+
+/**
  * Simple in-memory rate limiter per session.
  * Tracks upload-url requests per 60-second sliding window.
  */
