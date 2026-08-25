@@ -25,9 +25,18 @@ already read as one unit.
 
 ## The contract
 
-Bus name `com.hackclub.Lookout`, object `/com/hackclub/Lookout/Indicator`,
-interface `com.hackclub.Lookout.Indicator`. The app owns the name; the
-extension watches for it, so either side can start, stop or restart first.
+Bus name `com.hackclub.lookout.Indicator`, object
+`/com/hackclub/Lookout/Indicator`, interface `com.hackclub.Lookout.Indicator`.
+The app owns the name; the extension watches for it, so either side can
+start, stop or restart first.
+
+The name sits under the app's Tauri identifier because a sandboxed build is
+only granted its own app ID and children of it — `com.hackclub.Lookout`, what
+this used to be, differs by one letter and a Flatpak would refuse it. The
+path and interface kept their old spelling: name filtering is the only part
+of this a sandbox polices. The app still owns the old name as well, so a
+shell holding a pre-1.2.0 copy of the extension keeps its pill until the next
+login; that alias goes away once those can't be running any more.
 
 | Member | Direction | Purpose |
 | --- | --- | --- |

@@ -14,7 +14,7 @@ import sys
 
 from gi.repository import Gio, GLib
 
-BUS_NAME = "com.hackclub.Lookout"
+BUS_NAME = "com.hackclub.lookout.Indicator"
 OBJECT_PATH = "/com/hackclub/Lookout/Indicator"
 IFACE_NAME = "com.hackclub.Lookout.Indicator"
 

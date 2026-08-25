@@ -236,26 +236,6 @@ async function getFirstClientInfo(sessionId: string): Promise<string | null> {
   return row?.clientInfo ?? null;
 }
 
-/** First recorded JA4 TLS fingerprint for a session — the ja4 on the earliest
- *  screenshot row that has one. Same "first recorded" rule as
- *  {@link getFirstClientInfo}, but resolved independently (a row may carry one
- *  telemetry field without the other). NULL when the edge never set the JA4
- *  header for this session. */
-async function getFirstJa4(sessionId: string): Promise<string | null> {
-  const [row] = await db
-    .select({ ja4: schema.screenshots.ja4 })
-    .from(schema.screenshots)
-    .where(
-      and(
-        eq(schema.screenshots.sessionId, sessionId),
-        isNotNull(schema.screenshots.ja4),
-      ),
-    )
-    .orderBy(sql`${schema.screenshots.requestedAt} ASC`)
-    .limit(1);
-  return row?.ja4 ?? null;
-}
-
 /** Count total upload-url requests (confirmed + unconfirmed) */
 async function getTotalUploadRequests(sessionId: string): Promise<number> {
   const [{ count }] = await db
@@ -289,7 +269,6 @@ export async function sessionRoutes(app: FastifyInstance) {
       const liveTrackedSeconds = await getTrackedSecondsForSession(session);
       const screenshotCount = await getScreenshotCount(session.id);
       const clientInfo = await getFirstClientInfo(session.id);
-      const ja4 = await getFirstJa4(session.id);
       // Prefer stored value (survives screenshot cleanup), fall back to live count.
       // For credit mode, both paths read sessions.tracked_seconds so they match.
       const rawTrackedSeconds =
@@ -312,7 +291,6 @@ export async function sessionRoutes(app: FastifyInstance) {
           : undefined,
         screenshotCount,
         clientInfo,
-        ja4,
         startedAt: session.startedAt?.toISOString() ?? null,
         totalActiveSeconds: session.totalActiveSeconds,
         createdAt: session.createdAt.toISOString(),
@@ -1357,7 +1335,6 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       const clientInfo = await getFirstClientInfo(session.id);
-      const ja4 = await getFirstJa4(session.id);
 
       // first/last are convenience accessors on the already-ascending array.
       // NOTE: last − first is NOT capture duration — a paused session has gaps
@@ -1368,7 +1345,6 @@ export async function sessionRoutes(app: FastifyInstance) {
         first: timestamps[0] ?? null,
         last: timestamps[timestamps.length - 1] ?? null,
         clientInfo,
-        ja4,
         timestamps,
         cuts,
         cutCount: cutTimestamps.length,

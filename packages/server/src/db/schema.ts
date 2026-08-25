@@ -311,6 +311,13 @@ export const screenshots = pgTable(
     // via JA4_HEADER. Stored opaquely. NULL when the header is absent (local
     // dev, direct-to-origin) or predates this column. Like clientInfo, the
     // session's "first recorded" JA4 is the earliest row that has one.
+    //
+    // INTERNAL ONLY — never return this on a token-authenticated endpoint.
+    // The session token belongs to the person being recorded, so echoing the
+    // observed fingerprint back would hand a forger an oracle: adjust the TLS
+    // stack, re-read, repeat until it matches a genuine client. That defeats
+    // the entire reason the column is harder to forge than clientInfo. It is
+    // exposed on the api-key-authenticated internal session endpoint only.
     ja4: text("ja4"),
     // Credit-mode only. 0 or 60. NULL for bucket-mode rows.
     creditedSeconds: integer("credited_seconds"),

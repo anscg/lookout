@@ -29,7 +29,36 @@ use zbus::object_server::SignalEmitter;
 
 pub const UUID: &str = "lookout-indicator@hackclub.com";
 
-const BUS_NAME: &str = "com.hackclub.Lookout";
+/// The name the app owns for the pill.
+///
+/// It has to be the Tauri identifier or a child of it, rather than something
+/// beside it: a sandbox grants an app its own app ID and `<app-id>.*`, and
+/// matches case-sensitively. This used to be `com.hackclub.Lookout`, one
+/// letter off `com.hackclub.lookout`, which no ordinary session cares about
+/// and a Flatpak refuses outright — the pill would simply never appear, with
+/// nothing in the logs pointing at the name. `.SingleInstance`, the other
+/// name this process owns, is already spelled this way because the plugin
+/// derives it from the identifier; this puts the two back in line.
+///
+/// `bus_name_lives_under_the_app_id` pins it to tauri.conf.json.
+const BUS_NAME: &str = "com.hackclub.lookout.Indicator";
+
+/// What the name used to be, still owned alongside the new one.
+///
+/// The extension.js already loaded into the running shell keeps watching the
+/// name it shipped with, and GNOME only picks up the rewritten copy at the
+/// next login — so moving the name alone would leave the pill dead for the
+/// rest of the session that installed the update. Owning both costs one
+/// D-Bus call and closes that window.
+///
+/// Droppable once no running shell can still hold the pre-1.2.0 extension:
+/// every user has logged out at least once since updating.
+const LEGACY_BUS_NAME: &str = "com.hackclub.Lookout";
+
+/// Unchanged across the rename, deliberately. A sandbox's D-Bus filter
+/// polices well-known NAMES; object paths and interface names are not part
+/// of it, and moving them would have broken the old extension in exchange
+/// for nothing.
 const OBJECT_PATH: &str = "/com/hackclub/Lookout/Indicator";
 
 const METADATA_JSON: &str = include_str!("../gnome-extension/metadata.json");
@@ -177,6 +206,15 @@ async fn serve(app: AppHandle, mut rx: UnboundedReceiver<PillState>) -> zbus::Re
         )?
         .build()
         .await?;
+
+    // Best effort, and never fatal. Two ways this fails and both are fine:
+    // a sandboxed build isn't allowed the name (it is outside the app ID),
+    // and some other process may already hold it. The current extension
+    // watches BUS_NAME either way — this is only here for an old one still
+    // live in the shell.
+    if let Err(err) = connection.request_name(LEGACY_BUS_NAME).await {
+        eprintln!("[gnome-indicator] legacy name {LEGACY_BUS_NAME} not held: {err}");
+    }
 
     let iface = connection
         .object_server()
@@ -334,4 +372,38 @@ fn enable_once(dir: &std::path::Path) -> Result<(), String> {
     // enable, which is better than failing an install that otherwise worked.
     let _ = std::fs::write(marker, "");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression guard for the name this module used to own.
+    ///
+    /// A well-known name outside the app ID costs nothing on an ordinary
+    /// session bus and is refused inside a sandbox, so the failure it
+    /// produces is a pill that quietly never appears on exactly the builds
+    /// hardest to debug. Reading the identifier out of tauri.conf.json
+    /// rather than repeating it here means renaming either one trips this.
+    #[test]
+    fn bus_name_lives_under_the_app_id() {
+        const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_CONF).expect("tauri.conf.json parses");
+        let app_id = conf["identifier"]
+            .as_str()
+            .expect("tauri.conf.json has an identifier");
+
+        assert!(
+            BUS_NAME == app_id || BUS_NAME.starts_with(&format!("{app_id}.")),
+            "bus name {BUS_NAME} sits outside the app ID {app_id}; a sandboxed \
+             build would not be allowed to own it"
+        );
+
+        // The single-instance plugin derives ITS name from the same
+        // identifier (`{app_id}.SingleInstance`). Colliding with it would
+        // lose whichever of the two asked second.
+        assert_ne!(BUS_NAME, format!("{app_id}.SingleInstance"));
+    }
 }

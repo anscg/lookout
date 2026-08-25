@@ -103,8 +103,6 @@ export interface SessionResponse {
   videoWebmUrl?: string | null;
   /** First recorded client telemetry for the session; `null` if none captured. */
   clientInfo?: ClientInfo | null;
-  /** First recorded JA4 TLS fingerprint (edge-observed); `null` if none. */
-  ja4?: string | null;
   /** Whether this session accepts clip uploads. Clients read this BEFORE
    *  the first capture (this endpoint is the session-recovery fetch) so
    *  the very first upload can already be a clip. Absent on pre-clips
@@ -147,8 +145,6 @@ export interface TimingsResponse {
   last: string | null;
   /** First recorded client telemetry for the session; `null` if none captured. */
   clientInfo: ClientInfo | null;
-  /** First recorded JA4 TLS fingerprint (edge-observed); `null` if none. */
-  ja4: string | null;
   /** Kept capture timestamps — captures inside a cut interval are EXCLUDED
    *  so heartbeat forwarders respect edits with no code changes. */
   timestamps: string[];

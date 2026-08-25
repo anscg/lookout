@@ -28,7 +28,15 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const BUS_NAME = 'com.hackclub.Lookout';
+// Under the app's Tauri identifier (`com.hackclub.lookout`), because that is
+// what a sandboxed build is allowed to own — see BUS_NAME in
+// src/gnome_indicator.rs. The path and interface keep their old spelling on
+// purpose: a sandbox filters names, not paths, so renaming them would have
+// broken older copies of this file for nothing.
+//
+// The app also still owns the pre-1.2.0 name, `com.hackclub.Lookout`, so a
+// shell running that older copy keeps its pill until the next login.
+const BUS_NAME = 'com.hackclub.lookout.Indicator';
 const OBJECT_PATH = '/com/hackclub/Lookout/Indicator';
 const IFACE_NAME = 'com.hackclub.Lookout.Indicator';
 
