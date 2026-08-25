@@ -245,7 +245,7 @@ export function useEditorWindowOpen(): string | null {
 export function EditorWindow({ token }: { token: string }) {
   const isMacOS = navigator.userAgent.includes("Mac");
   // Undecorated on Linux, same as the main window, so it owns its corners and
-  // header bar — and follows the GTK theme live.
+  // header bar.
   const appearance = useDesktopAppearance({ undecorated: true });
   const [sessionName, setSessionName] = useState<string | null>(null);
   useWindowFrameState();

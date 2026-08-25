@@ -1,15 +1,15 @@
-//! What the Linux desktop says it should look like.
+//! What the Linux desktop says about this window's chrome.
 //!
-//! A GTK app gets the user's accent colour, window-button layout and UI font
-//! for free, because GTK reads them. Lookout's UI is a webview, so nothing
-//! reaches it unless we go and fetch it — which is most of why the app looks
-//! like a visitor on Linux rather than a resident.
+//! Two questions, both structural rather than cosmetic: which edge the
+//! user's window controls sit on, and whether something else — a compositor
+//! or a shell extension — is already framing every window, in which case
+//! Lookout must not draw a frame of its own.
 //!
-//! Everything here is read through `gsettings`, which is present wherever
+//! The layout is read through `gsettings`, which is present wherever
 //! GSettings is (GNOME, Cinnamon, Budgie, and any session that ships the
 //! schemas). Every read is allowed to fail: a missing binary, a missing
 //! schema, or a desktop that simply has no opinion all land on the same
-//! answer — `None`, meaning "keep Lookout's own default".
+//! answer — GNOME's own default.
 
 use serde::Serialize;
 
@@ -49,66 +49,24 @@ fn close_on_trailing_edge(layout: &str) -> bool {
         .contains(&WindowControl::Close)
 }
 
-/// The colours of the session's actual GTK theme, as CSS hex strings.
-///
-/// Read from the theme rather than assumed, because plenty of people are not
-/// on Adwaita: Yaru, Breeze, Nord, Dracula, Catppuccin and a long tail of
-/// hand-rolled themes all redefine these. Hardcoding Adwaita's greys makes
-/// Lookout the one window on such a desktop that ignores the theme.
-///
-/// Every field is optional and independent: a theme that defines only some
-/// of these leaves the rest on the app's own palette rather than producing a
-/// half-applied mixture.
-#[derive(Serialize, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ThemeColors {
-    /// The window's own background — what a GTK window paints behind content.
-    pub window_bg: Option<String>,
-    /// Text on that background.
-    pub window_fg: Option<String>,
-    /// Content-area background: lists, text views, the recessed surfaces a
-    /// GTK app puts inside a window.
-    pub view_bg: Option<String>,
-    /// The theme's border colour, used for the window outline and popovers.
-    pub border: Option<String>,
-    /// Popover/menu background, an *elevated* surface — normally lighter
-    /// than the window on a dark theme, not darker.
-    pub popover_bg: Option<String>,
-    /// The theme's accent. Takes precedence over the GSettings accent name,
-    /// since a theme that hardcodes its own accent means it.
-    pub accent: Option<String>,
-}
-
 #[derive(Serialize, Default, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopAppearance {
     /// The session accent as a hex string, e.g. `#3584e4`. `None` leaves the
     /// app on its own accent.
     pub accent: Option<String>,
-    /// UI font family, e.g. `Adwaita Sans`. Size and style are stripped —
-    /// the app sizes its own text.
-    pub font_family: Option<String>,
     /// Close sits on the trailing edge of the header bar. False means the
     /// user moved their window controls to the leading edge.
     pub controls_on_right: bool,
-    /// The GTK theme's own colours, where it defines them.
-    pub colors: ThemeColors,
-    /// The radius GTK rounds this theme's windows to, in logical px. `None`
-    /// leaves Lookout on Adwaita's 12.
-    pub window_radius: Option<i32>,
 }
 
 impl DesktopAppearance {
     /// What to assume when the desktop won't say: GNOME's own default —
-    /// close on the trailing edge — and no theme colours, which leaves the
-    /// app's own palette in place.
+    /// close on the trailing edge, and the app's own accent.
     fn fallback() -> Self {
         Self {
             accent: None,
-            font_family: None,
             controls_on_right: true,
-            colors: ThemeColors::default(),
-            window_radius: None,
         }
     }
 }
@@ -143,38 +101,12 @@ fn gsetting(schema: &str, key: &str) -> Option<String> {
         return None;
     }
     let raw = String::from_utf8(out.stdout).ok()?;
-    // GSettings quotes string values: `'blue'`, `'Adwaita Sans 11'`.
+    // GSettings quotes string values: `'appmenu:close'`.
     let trimmed = raw.trim().trim_matches('\'').trim();
     if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.to_string())
-    }
-}
-
-/// Split a Pango font description (`"Adwaita Sans Bold 11"`) down to the
-/// family alone. Pango puts the size last and style keywords just before it,
-/// so peeling those off the end leaves the family.
-#[cfg(any(target_os = "linux", test))]
-fn font_family_from_pango(desc: &str) -> Option<String> {
-    const STYLES: [&str; 12] = [
-        "thin", "ultralight", "light", "semilight", "book", "regular", "medium", "semibold",
-        "bold", "ultrabold", "heavy", "italic",
-    ];
-    let mut parts: Vec<&str> = desc.split_whitespace().collect();
-    while let Some(last) = parts.last() {
-        let lower = last.to_ascii_lowercase();
-        if last.parse::<f32>().is_ok() || STYLES.contains(&lower.as_str()) {
-            parts.pop();
-        } else {
-            break;
-        }
-    }
-    let family = parts.join(" ");
-    if family.is_empty() {
-        None
-    } else {
-        Some(family)
     }
 }
 
@@ -212,122 +144,6 @@ fn parse_button_layout(layout: &str) -> WindowControls {
             trailing: edge(layout),
         },
     }
-}
-
-/// A GTK colour as a CSS hex string.
-///
-/// Alpha is dropped rather than carried into `rgba()`: these are the theme's
-/// *base* surfaces, the app composes its own translucent overlays on top of
-/// them, and a base colour that is itself see-through would let the desktop
-/// show through the window.
-#[cfg(any(target_os = "linux", test))]
-fn rgba_to_hex(red: f64, green: f64, blue: f64) -> String {
-    let channel = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!(
-        "#{:02x}{:02x}{:02x}",
-        channel(red),
-        channel(green),
-        channel(blue)
-    )
-}
-
-/// The GTK named colours to try for each role, best first.
-///
-/// Two generations of naming are in play. libadwaita introduced the
-/// `window_bg_color` family and modern Adwaita-derived GTK3 themes define
-/// them; older and more independent themes only have the classic
-/// `theme_bg_color` set. Trying both is what makes this work across the
-/// whole spread of themes people actually run, and a theme that defines
-/// neither simply leaves that role unset.
-#[cfg(target_os = "linux")]
-const COLOR_ROLES: [(&str, &[&str]); 6] = [
-    ("window_bg", &["window_bg_color", "theme_bg_color"]),
-    ("window_fg", &["window_fg_color", "theme_fg_color"]),
-    ("view_bg", &["view_bg_color", "theme_base_color"]),
-    ("border", &["borders", "unfocused_borders"]),
-    // Only the explicit name, with no fallback. `theme_base_color` looks like
-    // the obvious second choice and is actively wrong: it is a *recessed*
-    // content surface, and on Yaru-dark it is #272727 against a #2c2c2c
-    // window — darker, so every menu would read as a hole punched in the
-    // window rather than a card floating above it. Where a theme doesn't say,
-    // the frontend derives an elevated surface from the window colour.
-    ("popover_bg", &["popover_bg_color"]),
-    ("accent", &["accent_bg_color", "theme_selected_bg_color"]),
-];
-
-/// The radius GTK rounds this theme's windows to, in logical px.
-///
-/// Read from a style context pathed at the `decoration` node, which is the
-/// one that actually carries it — a GtkWindow's own node reports 0, since the
-/// corners belong to the decoration GTK draws around it.
-///
-/// Measured against GTK 3.24: Adwaita answers 8, Yaru 15, System-4-1.0 zero.
-/// The `border-top-*-radius` longhands are "not gettable" and warn if asked,
-/// so only the `border-radius` shorthand may be read.
-///
-/// A theme built for square windows therefore gets square corners, instead of
-/// Lookout being the one rounded window on the desktop. Note that none of the
-/// measured answers is the 12 this app used to hardcode.
-///
-/// MUST be called on the main thread.
-#[cfg(target_os = "linux")]
-fn read_window_radius() -> Option<i32> {
-    use gtk::prelude::StyleContextExt;
-
-    let screen = gtk::gdk::Screen::default()?;
-
-    // An anonymous node named `decoration`: enough for the CSS engine to
-    // match the theme's `decoration { border-radius: … }` rule, without
-    // creating or realizing a widget to hang it off.
-    let path = gtk::WidgetPath::new();
-    let pos = path.append_type(gtk::glib::Type::UNIT);
-    path.iter_set_object_name(pos, Some("decoration"));
-
-    let ctx = gtk::StyleContext::new();
-    ctx.set_screen(&screen);
-    ctx.set_path(&path);
-
-    let radius = ctx
-        .style_property_for_state("border-radius", gtk::StateFlags::NORMAL)
-        .get::<i32>()
-        .ok()?;
-
-    // A theme is allowed to be strange, but not to swallow the window: the
-    // frame only reserves 40px, and a radius past half the window's smaller
-    // side stops being a corner at all.
-    Some(radius.clamp(0, 32))
-}
-
-/// Read the current GTK theme's colours off a realized widget.
-///
-/// `lookup_color` resolves the theme's `@define-color` entries, which are
-/// global to the theme rather than per-widget, so the window we already have
-/// is as good a place to ask from as any — and it avoids creating and
-/// realizing a throwaway widget just to read a palette.
-///
-/// MUST be called on the main thread; GTK is not thread-safe.
-#[cfg(target_os = "linux")]
-fn read_theme_colors(window: &tauri::WebviewWindow) -> Result<ThemeColors, String> {
-    use gtk::prelude::{StyleContextExt, WidgetExt};
-
-    let gtk_window = window.gtk_window().map_err(|e| e.to_string())?;
-    let ctx = gtk_window.style_context();
-
-    let mut found: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
-    for (role, names) in COLOR_ROLES {
-        if let Some(rgba) = names.iter().find_map(|name| ctx.lookup_color(*name)) {
-            found.insert(role, rgba_to_hex(rgba.red(), rgba.green(), rgba.blue()));
-        }
-    }
-
-    Ok(ThemeColors {
-        window_bg: found.remove("window_bg"),
-        window_fg: found.remove("window_fg"),
-        view_bg: found.remove("view_bg"),
-        border: found.remove("border"),
-        popover_bg: found.remove("popover_bg"),
-        accent: found.remove("accent"),
-    })
 }
 
 /// UUID prefixes of the GNOME Shell extensions that draw a frame — rounded
@@ -634,90 +450,32 @@ pub fn shell_draws_window_frame() -> bool {
     })
 }
 
-/// Everything the desktop will tell us about how it wants to look.
-///
-/// Takes the calling window because the GTK theme's colours are read off its
-/// style context — Tauri injects it, so the frontend still calls this with no
-/// arguments.
+/// The desktop's answers to the appearance questions left: the session's
+/// accent colour, and which edge the window controls belong on. The look
+/// itself stays Adwaita — custom GTK themes are deliberately not followed.
 #[tauri::command]
-pub fn desktop_appearance(window: tauri::WebviewWindow) -> DesktopAppearance {
+pub fn desktop_appearance() -> DesktopAppearance {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = window;
         DesktopAppearance::fallback()
     }
 
     #[cfg(target_os = "linux")]
     {
         let mut appearance = DesktopAppearance::fallback();
-
         if let Some(name) = gsetting("org.gnome.desktop.interface", "accent-color") {
             appearance.accent = accent_hex(&name).map(str::to_string);
-        }
-        if let Some(desc) = gsetting("org.gnome.desktop.interface", "font-name") {
-            appearance.font_family = font_family_from_pango(&desc);
         }
         if let Some(layout) = gsetting("org.gnome.desktop.wm.preferences", "button-layout") {
             appearance.controls_on_right = close_on_trailing_edge(&layout);
         }
-        let (colors, radius) = gtk_style_on_main_thread(&window);
-        appearance.colors = colors;
-        appearance.window_radius = radius;
-
         appearance
     }
-}
-
-/// Hop to the main thread for everything GTK has to answer, and bring it back.
-///
-/// One hop for both reads, since they need the same thread and the same
-/// moment. Bounded, and every failure lands on "nothing": the app keeps its
-/// own palette and Adwaita's radius, which looks like Adwaita rather than
-/// looking broken. Losing the theme's colours is worth far less than hanging
-/// the window on a wedged main thread would cost.
-#[cfg(target_os = "linux")]
-fn gtk_style_on_main_thread(window: &tauri::WebviewWindow) -> (ThemeColors, Option<i32>) {
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    let (tx, rx) = mpsc::channel();
-    let target = window.clone();
-    if window
-        .run_on_main_thread(move || {
-            let colors = read_theme_colors(&target).unwrap_or_else(|e| {
-                eprintln!("[linux-chrome] could not read the GTK palette: {e}");
-                ThemeColors::default()
-            });
-            let _ = tx.send((colors, read_window_radius()));
-        })
-        .is_err()
-    {
-        return (ThemeColors::default(), None);
-    }
-
-    rx.recv_timeout(Duration::from_millis(500)).unwrap_or_else(|e| {
-        eprintln!("[linux-chrome] timed out reading the GTK style: {e}");
-        (ThemeColors::default(), None)
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strips_size_and_style_off_a_pango_description() {
-        assert_eq!(font_family_from_pango("Adwaita Sans 11").as_deref(), Some("Adwaita Sans"));
-        assert_eq!(font_family_from_pango("Cantarell Bold 11").as_deref(), Some("Cantarell"));
-        assert_eq!(font_family_from_pango("Inter Display 10.5").as_deref(), Some("Inter Display"));
-        assert_eq!(font_family_from_pango("Cantarell").as_deref(), Some("Cantarell"));
-    }
-
-    #[test]
-    fn a_description_that_is_only_size_and_style_has_no_family() {
-        assert_eq!(font_family_from_pango("Bold 11"), None);
-        assert_eq!(font_family_from_pango(""), None);
-    }
 
     #[test]
     fn reads_the_window_controls_the_user_asked_for() {
@@ -773,17 +531,6 @@ mod tests {
         let layout = parse_button_layout("minimize,close");
         assert!(layout.leading.is_empty());
         assert_eq!(layout.trailing, vec![Minimize, Close]);
-    }
-
-    #[test]
-    fn converts_gtk_colours_to_css_hex() {
-        assert_eq!(rgba_to_hex(0.0, 0.0, 0.0), "#000000");
-        assert_eq!(rgba_to_hex(1.0, 1.0, 1.0), "#ffffff");
-        // Adwaita's #242424 window background.
-        assert_eq!(rgba_to_hex(36.0 / 255.0, 36.0 / 255.0, 36.0 / 255.0), "#242424");
-        // Out-of-gamut values from a theme doing something odd are clamped,
-        // not wrapped round into a different colour.
-        assert_eq!(rgba_to_hex(-0.5, 1.4, 0.5), "#00ff80");
     }
 
     #[test]
