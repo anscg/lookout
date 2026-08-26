@@ -545,9 +545,16 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
   // confirm landed.
   useEffect(() => {
     if (bestTrackedSeconds > 0) {
-      invoke("sync_tray_tracked_seconds", { trackedSeconds: bestTrackedSeconds }).catch(console.error);
+      // anchorAtMs aligns the Rust ticker's interpolation anchor with this
+      // window's (including the confirm-latency carry) — without it the
+      // menu bar/waybar ran a few seconds behind the main timer for the
+      // whole session.
+      invoke("sync_tray_tracked_seconds", {
+        trackedSeconds: bestTrackedSeconds,
+        anchorAtMs: timer.anchorAt,
+      }).catch(console.error);
     }
-  }, [bestTrackedSeconds]);
+  }, [bestTrackedSeconds, timer.anchorAt]);
 
   // Hide tray on unmount or session end
   useEffect(() => {

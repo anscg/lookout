@@ -2602,6 +2602,31 @@ fn sync_tray_timer(state: &AppState, tracked_seconds: i64) {
     }
 }
 
+/// Sync the tray timer AND align its interpolation anchor with the main
+/// window's (epoch ms, from useSessionTimerState's `anchorAt`).
+///
+/// The two surfaces tick independently, and they only show the same seconds
+/// if they interpolate from the same anchor. The main window's anchor sits
+/// up to the carry (confirm latency, ≤ the slack) in the PAST of the moment
+/// the credit arrived — see the carry logic in useSessionTimer — while this
+/// ticker used to re-anchor at its own `Instant::now()`, so the menu
+/// bar/waybar ran a few seconds behind the main window for the whole
+/// session. Accepts equal (not just greater) values so a carry-only anchor
+/// adjustment still propagates.
+fn sync_tray_timer_anchored(state: &AppState, tracked_seconds: i64, anchor_at_unix_ms: i64) {
+    let guard = state.tray_timer.lock().unwrap();
+    if let Some(ref handle) = *guard {
+        let ts = &handle.state;
+        let prev = ts.tracked_seconds.fetch_max(tracked_seconds, Ordering::Relaxed);
+        if tracked_seconds >= prev {
+            let behind_ms = (current_unix_ms() - anchor_at_unix_ms)
+                .clamp(0, MAX_TRAY_INTERPOLATION_SECS * 1000);
+            let mut started = ts.started_at.lock().unwrap();
+            *started = StdInstant::now() - std::time::Duration::from_millis(behind_ms as u64);
+        }
+    }
+}
+
 /// Pause the tray timer. The next tick drops the interpolated remainder and
 /// shows the bare `tracked_seconds`, matching the main window's snap-down.
 fn pause_tray_timer(state: &AppState) {
@@ -3748,9 +3773,15 @@ fn stop_tray_ticker(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn sync_tray_tracked_seconds(
     tracked_seconds: i64,
+    anchor_at_ms: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    sync_tray_timer(&state, tracked_seconds);
+    match anchor_at_ms {
+        // Align the ticker with the main window's interpolation anchor so
+        // the two surfaces show the same seconds.
+        Some(anchor) => sync_tray_timer_anchored(&state, tracked_seconds, anchor),
+        None => sync_tray_timer(&state, tracked_seconds),
+    }
     Ok(())
 }
 
