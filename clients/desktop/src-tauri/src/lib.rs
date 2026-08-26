@@ -3071,6 +3071,11 @@ async fn capture_loop_task(
     // server-side, not configured) must not attempt it.
     let mut cancelled = false;
 
+    // Newest successfully captured frame, retained so the pause/stop flush
+    // never has to grab a fresh one — at most one cadence interval stale,
+    // and already redacted/scaled by the capture path.
+    let mut last_frame: Option<image::DynamicImage> = None;
+
     'outer: loop {
         // ── Wait until next_fire, collecting frames along the way ──
         // Frames run at the clip cadence (server-set, 6/min) through the
@@ -3139,6 +3144,7 @@ async fn capture_loop_task(
             match grab_frame(&app, &sources, max_width, max_height, jpeg_quality, jpeg_mode).await
             {
                 Ok(grab) => {
+                    last_frame = Some(grab.image.clone());
                     if clips_mode {
                         if recorder.is_none() {
                             match clips::ClipRecorder::new(
@@ -3264,6 +3270,7 @@ async fn capture_loop_task(
         match grab_result {
             Ok(grab) => {
                 consecutive_capture_failures = 0;
+                last_frame = Some(grab.image.clone());
                 let capture::RawCaptureResult {
                     data: jpeg_data,
                     width: jpeg_w,
@@ -3433,94 +3440,96 @@ async fn capture_loop_task(
             let guard = state.config.lock().unwrap();
             guard.clone()
         };
-        if let Some(config) = config {
-            match grab_frame(&app, &sources, max_width, max_height, jpeg_quality, GrabJpeg::Full)
-                .await
-            {
-                Ok(grab) => {
-                    let captured_at = if ENABLE_CREDIT_MODE {
-                        Some(captured_at_now(&app))
-                    } else {
+        // DELIBERATELY NO FRESH GRAB HERE. The user is staring at the pause
+        // spinner, and everything this flush needs is already in hand: the
+        // rolling recorder holds the partial minute's frames and
+        // `last_frame` its newest image (≤ one cadence old). Spinning up
+        // another screencast read during teardown was the slowest and most
+        // fragile step of the old flush — it alone could stall the pause
+        // for ~10s and then fail, losing the credit anyway.
+        if let (Some(config), Some(frame)) = (config, last_frame.take()) {
+            let captured_at = if ENABLE_CREDIT_MODE {
+                Some(captured_at_now(&app))
+            } else {
+                None
+            };
+            // Close the in-progress clip as-is; encoder trouble degrades to
+            // the JPEG of the last frame, exactly like a normal tick.
+            let clip = match recorder.take() {
+                Some(r) => match r.finish() {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!(
+                            "[capture-loop] final clip finalize failed: {e} — flushing JPEG"
+                        );
                         None
-                    };
-                    // Close the in-progress clip with this frame as its last.
-                    // Any encoder trouble degrades to the JPEG, exactly like
-                    // a normal tick.
-                    let clip = match recorder.take() {
-                        Some(mut r) => {
-                            if let Err(e) = r.push_frame(&grab.image) {
+                    }
+                },
+                None => None,
+            };
+            let upload = async {
+                let jpeg = capture::encode_frame_jpeg(&frame, jpeg_quality)?;
+                let jpeg_base64 = base64_encode(&jpeg.data);
+                let jpeg_bytes = bytes::Bytes::from(jpeg.data);
+                match clip {
+                    Some(c) => {
+                        match upload_and_confirm(
+                            UploadPayload::clip(c, jpeg_base64.clone()).final_capture(),
+                            captured_at.as_deref(),
+                            &config,
+                            &app,
+                        )
+                        .await
+                        {
+                            Ok(r) => Ok(r),
+                            Err(e) => {
                                 eprintln!(
-                                    "[capture-loop] final clip frame append failed: {e}"
+                                    "[capture-loop] final clip upload failed ({e}) — retrying flush as JPEG"
                                 );
-                            }
-                            match r.finish() {
-                                Ok(c) => Some(c),
-                                Err(e) => {
-                                    eprintln!(
-                                        "[capture-loop] final clip finalize failed: {e} — flushing JPEG"
-                                    );
-                                    None
-                                }
-                            }
-                        }
-                        None => None,
-                    };
-                    let jpeg = grab.jpeg.expect("tick grab always requests jpeg");
-                    let jpeg_base64 = base64_encode(&jpeg.data);
-                    let jpeg_bytes = bytes::Bytes::from(jpeg.data);
-                    let result = match clip {
-                        Some(c) => {
-                            match upload_and_confirm(
-                                UploadPayload::clip(c, jpeg_base64.clone()).final_capture(),
-                                captured_at.as_deref(),
-                                &config,
-                                &app,
-                            )
-                            .await
-                            {
-                                Ok(r) => Ok(r),
-                                Err(e) => {
-                                    eprintln!(
-                                        "[capture-loop] final clip upload failed ({e}) — retrying flush as JPEG"
-                                    );
-                                    upload_and_confirm(
-                                        UploadPayload::jpeg(
-                                            jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height,
-                                        )
-                                        .final_capture(),
-                                        captured_at.as_deref(),
-                                        &config,
-                                        &app,
+                                upload_and_confirm(
+                                    UploadPayload::jpeg(
+                                        jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height,
                                     )
-                                    .await
-                                }
+                                    .final_capture(),
+                                    captured_at.as_deref(),
+                                    &config,
+                                    &app,
+                                )
+                                .await
                             }
                         }
-                        None => {
-                            upload_and_confirm(
-                                UploadPayload::jpeg(
-                                    jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height,
-                                )
-                                .final_capture(),
-                                captured_at.as_deref(),
-                                &config,
-                                &app,
+                    }
+                    None => {
+                        upload_and_confirm(
+                            UploadPayload::jpeg(
+                                jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height,
                             )
-                            .await
-                        }
-                    };
-                    match result {
-                        Ok(r) => {
-                            eprintln!("[capture-loop] final partial capture flushed");
-                            let _ = app.emit("capture-tick-result", CaptureTickResult::from(r));
-                        }
-                        // Best effort: a failed flush loses only the partial
-                        // minute, which is exactly what happened before the
-                        // flush existed.
-                        Err(e) => eprintln!("[capture-loop] final capture flush failed: {e}"),
+                            .final_capture(),
+                            captured_at.as_deref(),
+                            &config,
+                            &app,
+                        )
+                        .await
                     }
                 }
-                Err(e) => eprintln!("[capture-loop] final flush capture failed: {e}"),
+            };
+            // Hard budget on the whole flush: the pause button must never
+            // hang on upload retries. Past it, the partial minute is lost —
+            // exactly what happened before the flush existed.
+            let result =
+                match tokio::time::timeout(std::time::Duration::from_secs(12), upload).await {
+                    Ok(r) => r,
+                    Err(_) => Err("flush timed out after 12s".into()),
+                };
+            match result {
+                Ok(r) => {
+                    eprintln!("[capture-loop] final partial capture flushed");
+                    let _ = app.emit("capture-tick-result", CaptureTickResult::from(r));
+                }
+                // Best effort: a failed flush loses only the partial
+                // minute, which is exactly what happened before the
+                // flush existed.
+                Err(e) => eprintln!("[capture-loop] final capture flush failed: {e}"),
             }
         }
     }
@@ -3670,8 +3679,10 @@ async fn stop_capture_loop(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(handle) = handle {
         eprintln!("[capture-loop] stopping");
         let _ = handle.cancel_tx.send(true);
+        // The flush itself is budgeted at 12s (see capture_loop_task); this
+        // only backstops a loop wedged outside the flush.
         let mut join = handle.join_handle;
-        if tokio::time::timeout(std::time::Duration::from_secs(20), &mut join)
+        if tokio::time::timeout(std::time::Duration::from_secs(15), &mut join)
             .await
             .is_err()
         {
