@@ -3423,119 +3423,115 @@ async fn capture_loop_task(
     // Only on deliberate cancellation: the session is still active and
     // `stop_capture_loop` awaits this task before the UI sends the pause
     // POST (a paused session rejects confirms).
+    //
+    // THE FLUSH IS A SINGLE JPEG, DELIBERATELY. Earlier versions cut and
+    // uploaded the in-progress clip here, and every step of that was a
+    // place for the pause button to die: `ClipRecorder::finish()` blocks on
+    // the OS encoder draining (GStreamer's EOS wait is up to 15s on a slow
+    // or wedged pipeline — and it ran BEFORE any upload budget, so the
+    // stop_capture_loop backstop aborted the whole task mid-finalize and
+    // the credit was lost), the multi-MB clip upload burned retry backoffs,
+    // and the clip→JPEG fallback doubled the round trips. The partial
+    // minute's CREDIT needs one verifiable capture, not a video: encode the
+    // last frame already in memory (~50ms), one small upload, one confirm.
+    // The in-progress clip is discarded below — its frames were only ever
+    // worth one second of timelapse.
     if cancelled {
-        // Settle the in-flight upload FIRST. The final capture resets the
-        // streak anchor; a still-unconfirmed full minute confirmed after
-        // that reset would credit nothing.
+        // Settle the in-flight upload FIRST — the final capture resets the
+        // streak anchor, and a still-unconfirmed full minute confirmed
+        // after that reset would credit nothing. Bounded: if it can't
+        // settle promptly, flush anyway rather than hang the pause (the
+        // task keeps running detached; worst case ITS minute re-confirms
+        // against the reset anchor and loses, which is rarer and smaller
+        // than every pause hanging).
         if let Some(handle) = upload_handle.take() {
             let cfg = upload_cfg.take().expect("cfg tracks upload_handle");
-            let res = match handle.await {
-                Ok(r) => r,
-                Err(e) => Err(format!("upload task panicked: {e}")),
-            };
-            let _ = apply_upload_result(&app, &cfg, res, &mut next_fire, interval_dur).await;
+            let settle_started = StdInstant::now();
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(joined) => {
+                    let res = match joined {
+                        Ok(r) => r,
+                        Err(e) => Err(format!("upload task panicked: {e}")),
+                    };
+                    let _ =
+                        apply_upload_result(&app, &cfg, res, &mut next_fire, interval_dur).await;
+                    eprintln!(
+                        "[capture-loop] flush: settled in-flight upload in {}ms",
+                        settle_started.elapsed().as_millis()
+                    );
+                }
+                Err(_) => eprintln!(
+                    "[capture-loop] flush: in-flight upload still running after 5s — flushing anyway"
+                ),
+            }
         }
         let config = {
             let state = app.state::<AppState>();
             let guard = state.config.lock().unwrap();
             guard.clone()
         };
-        // DELIBERATELY NO FRESH GRAB HERE. The user is staring at the pause
-        // spinner, and everything this flush needs is already in hand: the
-        // rolling recorder holds the partial minute's frames and
-        // `last_frame` its newest image (≤ one cadence old). Spinning up
-        // another screencast read during teardown was the slowest and most
-        // fragile step of the old flush — it alone could stall the pause
-        // for ~10s and then fail, losing the credit anyway.
+        // No fresh grab, no clip: encode the last frame already in memory
+        // and send that. Every stage is timed to stderr so a slow pause
+        // names its own culprit.
         if let (Some(config), Some(frame)) = (config, last_frame.take()) {
             let captured_at = if ENABLE_CREDIT_MODE {
                 Some(captured_at_now(&app))
             } else {
                 None
             };
-            // Close the in-progress clip as-is; encoder trouble degrades to
-            // the JPEG of the last frame, exactly like a normal tick.
-            let clip = match recorder.take() {
-                Some(r) => match r.finish() {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        eprintln!(
-                            "[capture-loop] final clip finalize failed: {e} — flushing JPEG"
-                        );
-                        None
-                    }
-                },
-                None => None,
-            };
+            let flush_started = StdInstant::now();
             let upload = async {
                 let jpeg = capture::encode_frame_jpeg(&frame, jpeg_quality)?;
+                eprintln!(
+                    "[capture-loop] flush: encoded {}KB JPEG in {}ms",
+                    jpeg.data.len() / 1024,
+                    flush_started.elapsed().as_millis()
+                );
                 let jpeg_base64 = base64_encode(&jpeg.data);
                 let jpeg_bytes = bytes::Bytes::from(jpeg.data);
-                match clip {
-                    Some(c) => {
-                        match upload_and_confirm(
-                            UploadPayload::clip(c, jpeg_base64.clone()).final_capture(),
-                            captured_at.as_deref(),
-                            &config,
-                            &app,
-                        )
-                        .await
-                        {
-                            Ok(r) => Ok(r),
-                            Err(e) => {
-                                eprintln!(
-                                    "[capture-loop] final clip upload failed ({e}) — retrying flush as JPEG"
-                                );
-                                upload_and_confirm(
-                                    UploadPayload::jpeg(
-                                        jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height,
-                                    )
-                                    .final_capture(),
-                                    captured_at.as_deref(),
-                                    &config,
-                                    &app,
-                                )
-                                .await
-                            }
-                        }
-                    }
-                    None => {
-                        upload_and_confirm(
-                            UploadPayload::jpeg(
-                                jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height,
-                            )
-                            .final_capture(),
-                            captured_at.as_deref(),
-                            &config,
-                            &app,
-                        )
-                        .await
-                    }
-                }
+                upload_and_confirm(
+                    UploadPayload::jpeg(jpeg_bytes, jpeg_base64, jpeg.width, jpeg.height)
+                        .final_capture(),
+                    captured_at.as_deref(),
+                    &config,
+                    &app,
+                )
+                .await
             };
             // Hard budget on the whole flush: the pause button must never
             // hang on upload retries. Past it, the partial minute is lost —
             // exactly what happened before the flush existed.
             let result =
-                match tokio::time::timeout(std::time::Duration::from_secs(12), upload).await {
+                match tokio::time::timeout(std::time::Duration::from_secs(8), upload).await {
                     Ok(r) => r,
-                    Err(_) => Err("flush timed out after 12s".into()),
+                    Err(_) => Err("flush timed out after 8s".into()),
                 };
             match result {
                 Ok(r) => {
-                    eprintln!("[capture-loop] final partial capture flushed");
+                    eprintln!(
+                        "[capture-loop] flush: final partial capture confirmed in {}ms (tracked {}s)",
+                        flush_started.elapsed().as_millis(),
+                        r.tracked_seconds
+                    );
                     let _ = app.emit("capture-tick-result", CaptureTickResult::from(r));
                 }
                 // Best effort: a failed flush loses only the partial
                 // minute, which is exactly what happened before the
                 // flush existed.
-                Err(e) => eprintln!("[capture-loop] final capture flush failed: {e}"),
+                Err(e) => eprintln!(
+                    "[capture-loop] flush: FAILED after {}ms: {e}",
+                    flush_started.elapsed().as_millis()
+                ),
             }
         }
     }
 
     // Never leave a half-recorded clip (or its temp file) behind on
-    // pause/stop/cancel.
+    // pause/stop/cancel. AFTER the flush on purpose: on Linux, discard()
+    // still waits on the encoder pipeline (a wedged one can block for
+    // seconds), and that wait must never sit between the user and their
+    // credit — if it drags past stop_capture_loop's backstop, the abort
+    // reaps a task whose only remaining work was cleanup.
     if let Some(r) = recorder.take() {
         r.discard();
     }
