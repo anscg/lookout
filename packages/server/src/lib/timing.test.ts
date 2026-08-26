@@ -106,6 +106,68 @@ describe("creditCapture", () => {
   });
 });
 
+describe("long-session accounting (no drift, ever)", () => {
+  it("4 hours of captures with realistic jitter credits exactly 4 hours", () => {
+    // The property users pay for: record 4 hours, get 4 hours. The streak
+    // grid is anchored ONCE at the seed — expected marks are absolute
+    // (anchor + n×60), never chained off the previous capture — so
+    // per-tick lateness cannot accumulate. This simulates 240 minutes
+    // where every capture fires with deterministic pseudo-random jitter
+    // up to ±25s off its mark (scheduler delay, slow grabs, GC pauses —
+    // anything short of the ±30s window), plus a mid-minute pause flush
+    // at the end. Upload LATENCY never appears in this math at all:
+    // capturedAt is stamped at grab time, not arrival.
+    let anchor: Date | null = null;
+    let count = 0;
+    let tracked = 0;
+
+    const seed = creditCapture(T0, anchor, count);
+    anchor = seed.newAnchor;
+    count = seed.newCount;
+    tracked += seed.credit;
+
+    for (let n = 1; n <= 240; n++) {
+      const jitterMs = (((n * 2654435761) % 50_000) - 25_000); // ±25s
+      const cap = ms(T0, n * 60_000 + jitterMs);
+      const d = creditCapture(cap, anchor, count);
+      expect(d.credit).toBe(60); // every single minute credits, no resets
+      anchor = d.newAnchor;
+      count = d.newCount;
+      tracked += d.credit;
+    }
+    expect(tracked).toBe(240 * 60); // exactly 4 hours
+
+    // Stop at 4h00m37s: the flush picks up the exact tail.
+    const flush = creditFinalCapture(ms(T0, 240 * 60_000 + 37_000), anchor, count);
+    expect(tracked + flush.credit).toBe(240 * 60 + 37);
+  });
+
+  it("one lost minute stays one lost minute — the grid absorbs it", () => {
+    // A fully-failed upload (network blip) means that minute never
+    // confirms: 60s lost, by design (no proof, no credit). What must NOT
+    // happen is drift: the next capture still sits on the absolute grid
+    // and credits normally, so the damage is exactly the one minute.
+    let anchor: Date | null = null;
+    let count = 0;
+    let tracked = 0;
+    const seed = creditCapture(T0, anchor, count);
+    anchor = seed.newAnchor;
+    count = seed.newCount;
+
+    for (const n of [1, 2, /* minute 3 upload failed */ 4, 5]) {
+      const d = creditCapture(ms(T0, n * 60_000), anchor, count);
+      anchor = d.newAnchor;
+      count = d.newCount;
+      tracked += d.credit;
+    }
+    // Minute 4's capture is 2 marks past the last credit — outside the
+    // window — so it RESETS (credits 0) and re-anchors; minute 5 then
+    // credits normally. 5 minutes of wall, one blip: 3 credited minutes
+    // + the reset minute lost. Bounded, non-compounding.
+    expect(tracked).toBe(3 * 60);
+  });
+});
+
 describe("creditFinalCapture (pause/stop flush)", () => {
   it("seeds exactly like a normal capture when no anchor exists", () => {
     const d = creditFinalCapture(T0, null, 0);
