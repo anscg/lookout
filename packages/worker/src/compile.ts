@@ -376,8 +376,24 @@ export async function compileTimelapse(sessionId: string): Promise<{
       );
     }
 
-    // Step 1: Sample selection — pick best screenshot per minute bucket
-    // Using raw SQL for DISTINCT ON which Drizzle doesn't support directly
+    // Step 1: Sample selection — pick the best capture per minute of
+    // CAPTURE time. Raw SQL for DISTINCT ON, which Drizzle doesn't support.
+    //
+    // The bucket is derived from captured_at, NOT arrival time. The stored
+    // minute_bucket column is arrival-based (computeMinuteBucket at upload
+    // time), and sampling on it made the video jitter-dependent: an upload
+    // landing >60s after its capture (multi-MB clip, slow uplink, a
+    // retried tick) slid into the NEXT minute's arrival bucket, collided
+    // with that minute's own capture, and DISTINCT ON silently dropped one
+    // — a whole minute of video, present or missing depending on network
+    // weather. captured_at is the cut moment: it sits on the capture grid
+    // however long the upload took. COALESCE keeps pre-credit-mode rows
+    // (captured_at NULL) on the old arrival-based behavior, bit for bit.
+    //
+    // The stored minute_bucket column itself is deliberately untouched —
+    // legacy bucket-mode CREDITING counts distinct values of it; this
+    // change is sampling only. Mirrored (SQL kept in step by hand) by
+    // packages/server/test/unitSampling.integration.test.ts.
     const sampledScreenshots = await db.execute<{
       id: string;
       r2_key: string;
@@ -386,20 +402,26 @@ export async function compileTimelapse(sessionId: string): Promise<{
       captured_at: Date | string | null;
       format: string;
     }>(sql`
-      SELECT DISTINCT ON (minute_bucket) id, r2_key, minute_bucket, requested_at, captured_at, format
-      FROM screenshots
-      WHERE session_id = ${sessionId} AND confirmed = true
-      ORDER BY minute_bucket,
+      SELECT DISTINCT ON (sample_bucket)
+        id, r2_key, sample_bucket AS minute_bucket, requested_at, captured_at, format
+      FROM (
+        SELECT id, r2_key, requested_at, captured_at, format,
+          FLOOR(EXTRACT(EPOCH FROM (
+            COALESCE(captured_at, requested_at) - ${session.startedAt!}::timestamptz
+          )) / 60)::int AS sample_bucket
+        FROM screenshots
+        WHERE session_id = ${sessionId} AND confirmed = true
+      ) units
+      ORDER BY sample_bucket,
         -- Motion beats stills within a bucket. Pause flushes and resume
-        -- seeds are single JPEGs that land mid-bucket — closest to the
-        -- midpoint the distance tiebreak below prefers — while the minute's
-        -- actual clip arrives at the bucket's edge. Without this, a pause
-        -- froze that minute of the timelapse to one still. No-op for
-        -- legacy all-JPEG sessions (every unit ties).
+        -- seeds are single JPEGs that share a bucket with the minute's
+        -- actual clip; without this, a pause froze that minute of the
+        -- timelapse to one still. No-op for legacy all-JPEG sessions
+        -- (every unit ties).
         (format = 'jpeg')::int,
-        ABS(EXTRACT(EPOCH FROM (requested_at - (
+        ABS(EXTRACT(EPOCH FROM (COALESCE(captured_at, requested_at) - (
           ${session.startedAt!}::timestamptz
-          + (minute_bucket * interval '1 minute')
+          + (sample_bucket * interval '1 minute')
           + interval '30 seconds'
         ))))
     `);
