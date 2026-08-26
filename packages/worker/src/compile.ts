@@ -390,6 +390,13 @@ export async function compileTimelapse(sessionId: string): Promise<{
       FROM screenshots
       WHERE session_id = ${sessionId} AND confirmed = true
       ORDER BY minute_bucket,
+        -- Motion beats stills within a bucket. Pause flushes and resume
+        -- seeds are single JPEGs that land mid-bucket — closest to the
+        -- midpoint the distance tiebreak below prefers — while the minute's
+        -- actual clip arrives at the bucket's edge. Without this, a pause
+        -- froze that minute of the timelapse to one still. No-op for
+        -- legacy all-JPEG sessions (every unit ties).
+        (format = 'jpeg')::int,
         ABS(EXTRACT(EPOCH FROM (requested_at - (
           ${session.startedAt!}::timestamptz
           + (minute_bucket * interval '1 minute')
