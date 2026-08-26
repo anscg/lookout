@@ -1512,3 +1512,94 @@ describe("listing a program's sessions", () => {
     expect(res.statusCode).toBe(401);
   });
 });
+
+// ────────────────────────────────────────────────────────────
+// Final captures (pause/stop flush)
+// ────────────────────────────────────────────────────────────
+
+describe("final capture (pause/stop flush)", () => {
+  async function confirmFinal(
+    token: string,
+    screenshotId: string,
+  ): Promise<{ status: number; body: any }> {
+    const r = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${token}/screenshots`,
+      payload: {
+        screenshotId,
+        width: 1920,
+        height: 1080,
+        fileSize: 12345,
+        final: true,
+      },
+    });
+    return { status: r.statusCode, body: r.json() };
+  }
+
+  it("credits the exact partial minute — values the old 0/60 CHECK rejected", async () => {
+    // Regression test for the "paused at 0:13 → 0:00" bug, reproduced live
+    // against staging: the original credit-mode migration constrained
+    // credited_seconds to 0/60, so a partial credit's UPDATE 500ed, the
+    // client retried the 500 until its flush budget expired, and every
+    // mid-minute pause lost its seconds. This walks the exact wire flow
+    // through the real database, where a unit test of the pure credit
+    // function could never see the constraint.
+    const sess = await createSession();
+    // Seed at t0.
+    const up1 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    await confirmUpload(sess.token, up1.body.screenshotId);
+    // Full minute credits 60.
+    advanceVirtualMs(60_000);
+    const up2 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    const c2 = await confirmUpload(sess.token, up2.body.screenshotId);
+    expect(c2.body.trackedSeconds).toBe(60);
+    // Pause 35s into the next minute: the flush credits exactly 35.
+    advanceVirtualMs(35_000);
+    const up3 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    const c3 = await confirmFinal(sess.token, up3.body.screenshotId);
+    expect(c3.status).toBe(200);
+    expect(c3.body.trackedSeconds).toBe(95);
+    const s = await loadSession(sess.id);
+    expect(s?.trackedSeconds).toBe(95);
+  });
+
+  it("pausing seconds after a fresh start credits the opening seconds", async () => {
+    // Pause at 0:13 on a fresh session — the user-reported case.
+    const sess = await createSession();
+    const up1 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    await confirmUpload(sess.token, up1.body.screenshotId);
+    advanceVirtualMs(13_000);
+    const up2 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    const c2 = await confirmFinal(sess.token, up2.body.screenshotId);
+    expect(c2.status).toBe(200);
+    expect(c2.body.trackedSeconds).toBe(13);
+  });
+
+  it("in-window rounding stays disabled for final captures (anti-inflation)", async () => {
+    // Pause at 0:58 — inside the ±30s window where a NORMAL capture rounds
+    // to a full minute. A final capture resets the anchor and resume
+    // re-seeds, so rounding here would inflate ~30% per pause/resume
+    // cycle; exact elapsed only.
+    const sess = await createSession();
+    const up1 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    await confirmUpload(sess.token, up1.body.screenshotId);
+    advanceVirtualMs(58_000);
+    const up2 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    const c2 = await confirmFinal(sess.token, up2.body.screenshotId);
+    expect(c2.status).toBe(200);
+    expect(c2.body.trackedSeconds).toBe(58);
+  });
+
+  it("a confirm without the flag keeps the old all-or-nothing behavior", async () => {
+    // Old clients never send `final` — an out-of-window capture still
+    // resets with 0 credit, bit-for-bit the pre-final behavior.
+    const sess = await createSession();
+    const up1 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    await confirmUpload(sess.token, up1.body.screenshotId);
+    advanceVirtualMs(35_000);
+    const up2 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    const c2 = await confirmUpload(sess.token, up2.body.screenshotId);
+    expect(c2.status).toBe(200);
+    expect(c2.body.trackedSeconds).toBe(0);
+  });
+});

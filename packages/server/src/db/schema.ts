@@ -327,7 +327,12 @@ export const screenshots = pgTable(
     // the entire reason the column is harder to forge than clientInfo. It is
     // exposed on the api-key-authenticated internal session endpoint only.
     ja4: text("ja4"),
-    // Credit-mode only. 0 or 60. NULL for bucket-mode rows.
+    // Credit-mode only. 0–60 (inclusive): 60 for an in-window streak
+    // capture, the exact partial elapsed for a final pause/stop flush
+    // (creditFinalCapture), 0 for seeds and resets. NULL for bucket-mode
+    // rows. Enforced by chk_screenshots_credited_seconds (migration 0029 —
+    // the original 0007 constraint allowed only 0/60 and made every
+    // partial-credit confirm 500).
     creditedSeconds: integer("credited_seconds"),
     // Credit-mode only. Server-predicted capture time at confirm; lets us
     // compute the design-invariant delta (capturedAt - expectedAt) per row.
