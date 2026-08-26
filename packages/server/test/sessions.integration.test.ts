@@ -1592,11 +1592,13 @@ describe("final capture (pause/stop flush)", () => {
 
   it("a confirm without the flag keeps the old all-or-nothing behavior", async () => {
     // Old clients never send `final` — an out-of-window capture still
-    // resets with 0 credit, bit-for-bit the pre-final behavior.
+    // resets with 0 credit, bit-for-bit the pre-final behavior. 95s after
+    // the seed is 35s past the 60s mark, outside the ±30s window (35s
+    // after the seed would be INSIDE it and legitimately credit 60).
     const sess = await createSession();
     const up1 = await postUpload(sess.token, new Date(virtualNow).toISOString());
     await confirmUpload(sess.token, up1.body.screenshotId);
-    advanceVirtualMs(35_000);
+    advanceVirtualMs(95_000);
     const up2 = await postUpload(sess.token, new Date(virtualNow).toISOString());
     const c2 = await confirmUpload(sess.token, up2.body.screenshotId);
     expect(c2.status).toBe(200);
