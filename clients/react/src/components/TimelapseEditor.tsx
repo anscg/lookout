@@ -26,6 +26,12 @@ import {
   unitClockLabel,
   type UnitRegion,
 } from "../hooks/editorMath.js";
+import {
+  openDecoderFrames,
+  openVideoFrames,
+  prefersDecoderFrames,
+  type FilmstripFrames,
+} from "../hooks/filmstripFrames.js";
 import { useEditLease } from "../hooks/useEditLease.js";
 import {
   compileEstimateMs,
@@ -79,9 +85,12 @@ const HEAD_H = 13;
  *  comfortably; the target isn't. */
 const HEAD_HIT = 22;
 /** Upper bound on filmstrip tiles. The real count comes from the track
- *  width (see buildFilmstrip); this only stops an ultra-wide display from
- *  queueing hundreds of seeks. */
+ *  width; this only stops an ultra-wide display from queueing hundreds of
+ *  decodes. */
 const FILMSTRIP_MAX_TILES = 48;
+/** Faulty tiles tolerated before a frame source is written off. One can
+ *  be the recording's own fault; two in a row is the source. */
+const MAX_TILE_FAULTS = 2;
 /** Canvases are sized in device pixels and scaled down by CSS — without
  *  this a 2x display renders every thumbnail at half resolution, which
  *  reads as a blurry, low-quality preview. Capped at 2 because 3x gains
@@ -344,67 +353,36 @@ export function TimelapseEditor({
     return () => v.removeEventListener("timeupdate", onTimeUpdate);
   }, [unitCount, data?.originalVideoUrl]);
 
-  // ── Offscreen frame source: filmstrip + scrubber preview ────
+  // ── Filmstrip frame source ──────────────────────────────────
   //
-  // Both features read pixels out of a <video> via canvas, which needs a
-  // taint-free source. Two strategies, in order:
+  // Getting pixels out of the preview has two independent problems, and
+  // the openers below cover both:
   //
-  //  1. Load with crossOrigin="anonymous". If the presigned GET carries
-  //     CORS headers this succeeds and the canvas stays clean. Note this
-  //     is all-or-nothing: WITHOUT a fallback, a bucket that doesn't send
-  //     those headers fails the load outright and you get no thumbnails
-  //     at all — which is exactly what a missing CORS config looks like.
-  //  2. Otherwise pull the bytes through the app's fetch (on desktop that
-  //     is Tauri's HTTP plugin, which isn't subject to browser CORS at
-  //     all) and hand the video a blob: URL — same-origin by definition.
+  //  1. Reading a <video> through a canvas needs a taint-free source. A
+  //     presigned GET that carries CORS headers can be loaded with
+  //     crossOrigin="anonymous" directly; a bucket that doesn't send them
+  //     fails that load outright (which is exactly what a missing CORS
+  //     config looks like), so the bytes are pulled through the app's own
+  //     fetch — on desktop that is Tauri's HTTP plugin, not subject to
+  //     browser CORS at all — and handed over as a same-origin blob.
+  //  2. WebKitGTK can't be read through a canvas AT ALL while accelerated
+  //     compositing is on: the frames come back empty, or as whatever was
+  //     in that graphics memory. So a third opener decodes the same bytes
+  //     with WebCodecs instead, and on that engine it goes first. See
+  //     hooks/filmstripFrames.ts.
   //
-  // Only if both fail does the timeline degrade to a plain track.
-  const [frameSrc, setFrameSrc] = useState<string | null>(null);
+  // Whichever opener runs, its tiles are checked before they are shown and
+  // the source is dropped if they can't be real frames. Only if all three
+  // fail does the timeline degrade to a plain track.
+  /** The downloaded preview, shared between openers and kept across track
+   *  resizes so a window drag can't re-download it. Held for as long as
+   *  the editor is open, because the decoder needs random access to the
+   *  samples: ~29KB per recorded minute at the preview tier, so single
+   *  digits of MB for a normal session. Only fetched if an opener that
+   *  needs the bytes actually runs. */
+  const previewBytesRef = useRef<Promise<ArrayBuffer | null> | null>(null);
   useEffect(() => {
-    const src = data?.originalVideoUrl;
-    if (!src) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
-
-    const probe = (url: string, useCors: boolean) =>
-      new Promise<boolean>((resolve) => {
-        const probeEl = document.createElement("video");
-        if (useCors) probeEl.crossOrigin = "anonymous";
-        probeEl.muted = true;
-        probeEl.preload = "metadata";
-        probeEl.onloadedmetadata = () => {
-          probeEl.removeAttribute("src");
-          resolve(true);
-        };
-        probeEl.onerror = () => resolve(false);
-        probeEl.src = url;
-      });
-
-    (async () => {
-      if (await probe(src, true)) {
-        if (!cancelled) setFrameSrc(src);
-        return;
-      }
-      console.warn(
-        "[editor] preview video is not CORS-readable; fetching bytes for thumbnails",
-      );
-      try {
-        const res = await fetch(src);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setFrameSrc(objectUrl);
-      } catch (err) {
-        console.error("[editor] no frame source available for thumbnails:", err);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      setFrameSrc(null);
-    };
+    previewBytesRef.current = null;
   }, [data?.originalVideoUrl]);
 
   // Track width drives the filmstrip: tiles are whole frames at the
@@ -435,68 +413,126 @@ export function TimelapseEditor({
    * filmstrip is. Deliberately NOT one tile per minute: at 48 minutes
    * that squeezed each frame into 19px and cropped it to a smear.
    */
-  const [tileAspect, setTileAspect] = useState(16 / 9);
   const [tileWidth, setTileWidth] = useState(Math.round(STRIP_HEIGHT * (16 / 9)));
   useEffect(() => {
-    if (!frameSrc || unitCount === 0 || stripWidth <= 0) return;
+    const src = data?.originalVideoUrl;
+    if (!src || unitCount === 0 || stripWidth <= 0) return;
     let cancelled = false;
-    let v: HTMLVideoElement | null = null;
+    let source: FilmstripFrames | null = null;
+    let blobUrl: string | null = null;
 
     // Debounce: a live window drag fires dozens of resizes, and each
     // regeneration is a series of decoder seeks.
     const timer = setTimeout(() => {
-      v = document.createElement("video");
-      if (!frameSrc.startsWith("blob:")) v.crossOrigin = "anonymous";
-      v.muted = true;
-      v.preload = "auto";
-      v.src = frameSrc;
-      const el = v;
+      const bytes = () => {
+        if (!previewBytesRef.current) {
+          previewBytesRef.current = fetch(src)
+            .then((r) => {
+              if (!r.ok) throw new Error(`HTTP ${r.status}`);
+              return r.arrayBuffer();
+            })
+            .catch((err) => {
+              console.error("[editor] preview download failed:", err);
+              return null;
+            });
+        }
+        return previewBytesRef.current;
+      };
+
+      const viaDecoder = async () => {
+        const buf = await bytes();
+        return buf ? openDecoderFrames(buf) : null;
+      };
+      const viaCorsVideo = () => openVideoFrames(src, { crossOrigin: true });
+      const viaBlobVideo = async () => {
+        const buf = await bytes();
+        if (!buf || cancelled) return null;
+        blobUrl = URL.createObjectURL(new Blob([buf], { type: "video/mp4" }));
+        return openVideoFrames(blobUrl);
+      };
+      const openers = prefersDecoderFrames()
+        ? [viaDecoder, viaCorsVideo, viaBlobVideo]
+        : [viaCorsVideo, viaBlobVideo, viaDecoder];
+
+      /** Tiles for one source, or null if the source should be abandoned. */
+      const render = async (frames: FilmstripFrames): Promise<string[] | null> => {
+        const tileW = Math.max(24, Math.round(STRIP_HEIGHT * frames.aspect));
+        setTileWidth(tileW);
+        const tiles = Math.min(
+          FILMSTRIP_MAX_TILES,
+          Math.max(1, Math.ceil(stripWidth / tileW)),
+        );
+        const duration =
+          Number.isFinite(frames.durationSec) && frames.durationSec > 0
+            ? frames.durationSec
+            : unitCount;
+
+        const dpr = pixelRatio();
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(tileW * dpr);
+        canvas.height = Math.round(STRIP_HEIGHT * dpr);
+        // Every tile is read back for the fault check, which is exactly
+        // the access pattern this hint exists for.
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) return null;
+        ctx.imageSmoothingQuality = "high";
+
+        const thumbs: string[] = [];
+        let faults = 0;
+        for (let i = 0; i < tiles; i++) {
+          if (cancelled) return null;
+          const frac = Math.min(1, ((i + 0.5) * tileW) / stripWidth);
+          const t = Math.max(0, Math.min(duration - 0.05, frac * duration));
+          const outcome = await frames.draw(t, ctx, canvas.width, canvas.height);
+          if (outcome !== "ok") {
+            // One bad tile could be the frame's own fault — a recording
+            // that really was one flat colour for a minute. Two is the
+            // source, so hand over to the next opener. The progressive
+            // publish below starts at the third tile, so a source that
+            // fails this way never puts anything on screen.
+            if (++faults >= MAX_TILE_FAULTS) {
+              console.warn(
+                `[editor] ${frames.kind} frames unusable (${outcome}); trying the next source`,
+              );
+              return null;
+            }
+            continue;
+          }
+          thumbs.push(canvas.toDataURL("image/jpeg", 0.82));
+          if (i % 3 === 2) setFilmstrip([...thumbs]);
+        }
+        return thumbs.length ? thumbs : null;
+      };
 
       void (async () => {
-        try {
-          await new Promise<void>((resolve, reject) => {
-            el.onloadedmetadata = () => resolve();
-            el.onerror = () => reject(new Error("filmstrip video load failed"));
-          });
+        for (const open of openers) {
           if (cancelled) return;
-
-          const aspect = el.videoWidth / Math.max(1, el.videoHeight);
-          setTileAspect(aspect);
-          const tileW = Math.max(24, Math.round(STRIP_HEIGHT * aspect));
-          setTileWidth(tileW);
-
-          const tiles = Math.min(
-            FILMSTRIP_MAX_TILES,
-            Math.max(1, Math.ceil(stripWidth / tileW)),
-          );
-
-          const dpr = pixelRatio();
-          const canvas = document.createElement("canvas");
-          canvas.width = Math.round(tileW * dpr);
-          canvas.height = Math.round(STRIP_HEIGHT * dpr);
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return;
-          ctx.imageSmoothingQuality = "high";
-
-          const thumbs: string[] = [];
-          for (let i = 0; i < tiles; i++) {
-            if (cancelled) return;
-            const frac = Math.min(1, ((i + 0.5) * tileW) / stripWidth);
-            const t = Math.min(el.duration - 0.05, frac * el.duration);
-            await new Promise<void>((resolve) => {
-              el.onseeked = () => resolve();
-              el.currentTime = Math.max(0, t);
-            });
-            ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
-            thumbs.push(canvas.toDataURL("image/jpeg", 0.82));
-            if (i % 3 === 2) setFilmstrip([...thumbs]);
+          source = await open().catch((err) => {
+            console.warn("[editor] filmstrip source failed to open:", err);
+            return null;
+          });
+          if (!source) continue;
+          // Opening is async, so the effect can have been torn down while
+          // it ran — the cleanup below saw a null `source` and had nothing
+          // to close.
+          if (cancelled) {
+            source.close();
+            return;
           }
-          if (!cancelled) setFilmstrip(thumbs);
-        } catch (err) {
-          console.error("[editor] filmstrip generation failed:", err);
-        } finally {
-          el.removeAttribute("src");
-          el.load();
+          const thumbs = await render(source);
+          source.close();
+          source = null;
+          if (cancelled) return;
+          if (thumbs) {
+            setFilmstrip(thumbs);
+            return;
+          }
+        }
+        if (!cancelled) {
+          console.error(
+            "[editor] no usable frame source; the timeline has no thumbnails",
+          );
+          setFilmstrip([]);
         }
       })();
     }, 220);
@@ -504,12 +540,10 @@ export function TimelapseEditor({
     return () => {
       cancelled = true;
       clearTimeout(timer);
-      if (v) {
-        v.removeAttribute("src");
-        v.load();
-      }
+      source?.close();
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
-  }, [frameSrc, unitCount, stripWidth]);
+  }, [data?.originalVideoUrl, unitCount, stripWidth]);
 
   // ── Pointer plumbing ────────────────────────────────────────
   const unitFromEvent = useCallback(
