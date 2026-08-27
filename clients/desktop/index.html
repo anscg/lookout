@@ -115,12 +115,15 @@
           0 8px 28px rgba(0, 0, 0, 0.1);
       }
 
-      /* Linux: prefer the desktop's own UI font over the bundled one, so the
-         app reads as part of the session rather than a page inside it. The
-         exact family the user configured is applied from linuxChrome.ts once
-         GSettings answers; this is what shows until then. */
+      /* Linux: the desktop's own UI font, never the bundled one, so the app
+         reads as part of the session rather than a page inside it.
+         `system-ui` first where WebKitGTK honours it, then GNOME's families
+         for builds that don't, then fontconfig's default sans. Geist is
+         deliberately absent — leaving it ahead of `sans-serif` is what made
+         every machine without Adwaita Sans or Cantarell fall through to the
+         bundled font instead of the system one. */
       html.os-linux body {
-        font-family: 'Adwaita Sans', Cantarell, system-ui, 'Geist', sans-serif;
+        font-family: system-ui, 'Adwaita Sans', Cantarell, sans-serif;
       }
     </style>
   </head>
