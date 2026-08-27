@@ -7,14 +7,21 @@
  *                  --image https://... --program lapse --trigger deep-link \
  *                  --require-unlinked
  *
+ * Lives under src/ so `tsc` compiles it into dist/, which is the only thing
+ * the runtime image copies (Dockerfile.server). In a deployed container there
+ * is no source tree, so run it as:
+ *
+ *   node dist/scripts/tip.js --show
+ *
  * Publishing deactivates the previous tip, so at most one is live; old rows
- * stay as history. Needs DATABASE_URL (a repo-root .env is picked up).
+ * stay as history. Needs DATABASE_URL (a repo-root .env is picked up in dev;
+ * a container already has it in the environment).
  */
 import { eq, desc } from "drizzle-orm";
 
 // Imported lazily: the db module throws at import time without DATABASE_URL,
 // which would make --help fail with a connection error instead of printing.
-const openDb = () => import("../src/db/index.js");
+const openDb = () => import("../db/index.js");
 
 type Flags = Record<string, string | boolean>;
 
