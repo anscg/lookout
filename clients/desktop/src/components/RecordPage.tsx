@@ -28,9 +28,12 @@ interface RecordPageProps {
   token: string;
   onBack: () => void;
   onViewSession: (token: string) => void;
+  /** Called while the source picker is on screen. The tip sheet hangs off
+   *  this; App decides whether one is owed. */
+  onSourcePicker?: () => void;
 }
 
-export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
+export function RecordPage({ token, onBack, onViewSession, onSourcePicker }: RecordPageProps) {
   const isMacOS = navigator.userAgent.includes("Mac");
   const [captureSource, setCaptureSource] = useState<CaptureSource[] | null>(null);
   const [captureFlowDirection, setCaptureFlowDirection] = useState(1);
@@ -152,6 +155,13 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
   const handleResumeFromModal = useCallback(() => {
     setIsPrompting(false);
   }, []);
+
+  // The picker, not the route: the record route stays mounted for the whole
+  // capture, so a late callback would fire over an active recording.
+  useEffect(() => {
+    if (captureSource || sessionCheck !== "ok") return;
+    onSourcePicker?.();
+  }, [captureSource, sessionCheck, onSourcePicker]);
 
   const handleSelectSource = useCallback((source: CaptureSource | CaptureSource[]) => {
     setCaptureFlowDirection(1);

@@ -49,6 +49,7 @@ import {
 import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
 import { useAppUpdate } from "./hooks/useAppUpdate.js";
 import { useAnnouncement } from "./hooks/useAnnouncement.js";
+import { useTip } from "./hooks/useTip.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
 import { UpdatePill } from "./components/UpdatePill.js";
 import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.js";
@@ -62,6 +63,15 @@ import {
   shouldOfferPanel,
 } from "./programPanel.js";
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
+import { TipDrawer } from "./components/TipDrawer.js";
+import {
+  installTipDebug,
+  markTipMoment,
+  recordDeepLinkSession,
+  shouldShowTip,
+  type Tip,
+  type TipMoment,
+} from "./tip.js";
 import { getApiBase } from "./serverConfig.js";
 import { HeaderBar } from "./components/HeaderBar.js";
 import { useBackdropState, useBackgroundBlur, useDesktopAppearance } from "./linuxChrome.js";
@@ -119,6 +129,22 @@ async function fetchSessionStatus(token: string): Promise<string | null> {
     if (!res.ok) return null;
     const data = await res.json();
     return data.status ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which program a session belongs to, or null on error. Separate from the
+ * status call rather than replacing it: different rate-limit buckets, issued
+ * in parallel, and routing must not start depending on the heavier payload.
+ */
+async function fetchSessionProgram(token: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/sessions/${token}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data.program === "string" ? data.program : null;
   } catch {
     return null;
   }
@@ -410,6 +436,46 @@ function MainWindowApp() {
 
   // Admin-authored announcement banner; checked on open and every 15 min.
   const announcement = useAnnouncement();
+  // Whether a tip is published; when it opens is decided per moment against
+  // the session a qualifying deep link bound it to (see tip.ts).
+  const tip = useTip();
+  const [tipOpen, setTipOpen] = useState(false);
+  // Set only by window.__tip.show(), which can hand the sheet a tip the
+  // server never published.
+  const [tipOverride, setTipOverride] = useState<Tip | null>(null);
+  const openTip = useCallback(
+    (moment: TipMoment, token: string | null | undefined) => {
+      if (!tip || !token || !shouldShowTip(tip, moment, token)) return;
+      markTipMoment(tip, moment, token);
+      setTipOverride(null);
+      setTipOpen(true);
+    },
+    [tip],
+  );
+
+  // Never calls markTipMoment: debugging must not burn a real impression.
+  const tipRef = React.useRef(tip);
+  tipRef.current = tip;
+  useEffect(
+    () =>
+      installTipDebug({
+        current: () => tipRef.current,
+        show: (t) => {
+          setTipOverride(t);
+          setTipOpen(true);
+        },
+        hide: () => setTipOpen(false),
+      }),
+    [],
+  );
+
+  // First moment: the source picker, where a deep link to a fresh session
+  // lands. RecordPage reports when the picker is up — the route alone stays
+  // true for the whole capture.
+  const handleSourcePicker = useCallback(() => {
+    if (route.page !== "record") return;
+    openTip("source", route.token);
+  }, [route, openTip]);
 
   // Detect Wayland — filter apps feature is unsupported there
   useEffect(() => {
@@ -711,9 +777,15 @@ function MainWindowApp() {
           await pauseSession(route.token);
         }
 
-        // Check the incoming session's status to decide where to go
-        const status = await fetchSessionStatus(token);
-        console.log(`[app] incoming session status: ${status}`);
+        // Status decides where to go; program decides whether a tip targets
+        // it. In parallel, so the tip lookup adds no latency to recording.
+        const [status, program] = await Promise.all([
+          fetchSessionStatus(token),
+          fetchSessionProgram(token),
+        ]);
+        console.log(`[app] incoming session status: ${status} (program: ${program ?? "none"})`);
+        // Before navigating, so the destination page sees the record.
+        recordDeepLinkSession(program, token);
 
         if (status && ["stopped", "compiling", "complete", "failed"].includes(status)) {
           // Session is finished — go to detail view
@@ -1068,6 +1140,7 @@ function MainWindowApp() {
               tokenStore.addToken(token);
               navigate({ page: "session", token });
             }}
+            onSourcePicker={handleSourcePicker}
           />
         );
       case "session":
@@ -1328,6 +1401,9 @@ function MainWindowApp() {
             setPanel(null);
             setPanelNonce((n) => n + 1);
             gallery.refresh();
+            // Second moment: they just did by hand what the tip offers to
+            // make one click.
+            openTip("panel-done", panel.token);
           }}
           onDismiss={() => {
             // Closing is always free. The ask persists as a card on the
@@ -1338,6 +1414,10 @@ function MainWindowApp() {
           }}
         />
       )}
+
+      {/* Mounted whenever a tip is published, so vaul can animate the exit;
+          opens only when a moment says so. */}
+      <TipDrawer tip={tipOverride ?? tip} open={tipOpen} onClose={() => setTipOpen(false)} />
 
       {/* Instant-start progress: shows while a linked program mints the
           session. Fixed to the viewport, outside the route transition. */}

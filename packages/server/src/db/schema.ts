@@ -63,6 +63,39 @@ export const announcements = pgTable("announcements", {
     .defaultNow(),
 });
 
+// How a client must have met the tip's target program. `deep_link` means the
+// user opened one of its sessions through a lookout:// link, which only the
+// client can know — so the rule ships to it as data.
+export const tipTriggerEnum = pgEnum("tip_trigger", ["any", "deep_link"]);
+
+// A one-shot sheet the desktop app shows over its own UI. Sibling of
+// `announcements`: at most one active row, same version targeting, but rich
+// content and audience rules the CLIENT evaluates. Rows are written by
+// `npm run tip`, so copy, artwork and audience are all data.
+export const tips = pgTable("tips", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  badge: text("badge"),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  imageUrl: text("image_url"),
+  // Program registry `name` this tip is about. NULL = everyone qualifies.
+  program: text("program"),
+  trigger: tipTriggerEnum("trigger").notNull().default("any"),
+  // Skip clients that already paired `program` for instant start.
+  requireUnlinked: boolean("require_unlinked").notNull().default(false),
+  // Inclusive bounds on the client-reported version; a client that reports
+  // none counts as version 0, same as announcements.
+  minVersion: text("min_version"),
+  maxVersion: text("max_version"),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
 // A program is a brand/integration that issues recording sessions (e.g.
 // "Fallout"). It owns a public new-session URL used by the desktop app's
 // program picker, and is the canonical entity that api_keys belong to (one
