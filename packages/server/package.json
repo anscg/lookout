@@ -10,7 +10,7 @@
     "dev": "tsx watch --env-file=../../.env src/index.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "npx --env-file=../../.env drizzle-kit migrate",
-    "tip": "tsx --env-file-if-exists=../../.env scripts/tip.ts",
+    "tip": "tsx --env-file-if-exists=../../.env src/scripts/tip.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
