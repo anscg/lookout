@@ -114,6 +114,8 @@
         flex-direction: column;
         align-items: center;
         gap: 0;
+        width: 100%;
+        max-width: 560px;
       }
 
       .icon {
@@ -194,6 +196,143 @@
         align-items: center;
       }
 
+      #linux { display: none; width: 100%; margin-top: 34px; }
+      #linux.on { display: block; }
+
+      .cmd {
+        position: relative;
+        display: flex;
+        align-items: center;
+        background: #f5f5f7;
+        border: 1px solid rgba(0, 0, 0, 0.07);
+        border-radius: 12px;
+        padding: 14px 52px 14px 18px;
+        text-align: left;
+      }
+
+      .cmd code {
+        flex: 1;
+        min-width: 0;
+        overflow-x: auto;
+        white-space: nowrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13.5px;
+        color: #1d1d1f;
+      }
+
+      .cmd button {
+        position: absolute;
+        right: 10px;
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        border: 0;
+        border-radius: 8px;
+        background: #f5f5f7;
+        color: #86868b;
+        cursor: pointer;
+        transition: color 0.15s, background 0.15s;
+      }
+
+      .cmd button:hover { color: #1d1d1f; background: #ebebed; }
+      .cmd button svg { width: 15px; height: 15px; }
+      .cmd button .tick { display: none; }
+      .cmd button.done { color: #1d1d1f; }
+      .cmd button.done .tick { display: block; }
+      .cmd button.done .sheet { display: none; }
+
+      .manual { margin-top: 18px; text-align: left; }
+
+      .manual summary {
+        cursor: pointer;
+        list-style: none;
+        font-size: 14px;
+        font-weight: 500;
+        color: #6e6e73;
+        text-align: center;
+        padding: 6px;
+      }
+
+      .manual summary::-webkit-details-marker { display: none; }
+      .manual summary:hover { color: #1d1d1f; }
+      .manual summary::after { content: " ↓"; font-size: 12px; }
+      .manual[open] summary::after { content: " ↑"; }
+
+      .manual .body {
+        margin-top: 14px;
+        padding-top: 20px;
+        border-top: 1px solid rgba(0, 0, 0, 0.07);
+      }
+
+      .tabs input { position: absolute; opacity: 0; pointer-events: none; }
+
+      .bar {
+        display: flex;
+        gap: 2px;
+        margin: 0 auto 18px;
+        padding: 3px;
+        width: fit-content;
+        border: 1px solid rgba(0, 0, 0, 0.07);
+        border-radius: 100px;
+      }
+
+      .bar label {
+        padding: 6px 16px;
+        border-radius: 100px;
+        font-size: 13px;
+        font-weight: 500;
+        color: #6e6e73;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: color 0.15s, background 0.15s;
+      }
+
+      .bar label:hover { color: #1d1d1f; }
+      .panel { display: none; }
+
+      #t-deb:checked ~ .bar label[for="t-deb"],
+      #t-rpm:checked ~ .bar label[for="t-rpm"],
+      #t-arch:checked ~ .bar label[for="t-arch"] {
+        background: #f5f5f7;
+        color: #1d1d1f;
+      }
+
+      #t-deb:checked ~ .panels .p-deb,
+      #t-rpm:checked ~ .panels .p-rpm,
+      #t-arch:checked ~ .panels .p-arch { display: block; }
+
+      .manual h3 {
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: #86868b;
+        margin-bottom: 8px;
+      }
+
+      .manual h3:not(:first-of-type) { margin-top: 20px; }
+
+      .hint {
+        font-size: 12.5px;
+        color: #86868b;
+        margin: 0 0 10px;
+        max-width: none;
+      }
+      .manual .cmd { padding: 12px 52px 12px 16px; }
+      .manual .cmd code { font-size: 12.5px; white-space: pre; line-height: 1.7; }
+
+      .manual .note {
+        font-size: 13px;
+        color: #86868b;
+        margin: 16px 0 0;
+        max-width: none;
+        line-height: 1.5;
+      }
+
+      .manual .note a { color: #06c; text-decoration: none; }
+      .manual .note a:hover { text-decoration: underline; }
+
       footer {
         padding: 16px 24px 44px;
         text-align: center;
@@ -262,6 +401,86 @@
           </a>
         </div>
         <div id="dl-other" class="dl-sub"></div>
+
+        <div id="linux">
+          <div class="cmd">
+            <code>curl -fsSL https://lookout.hackclub.com/install.sh | sh</code>
+          </div>
+          <details class="manual">
+            <summary>Manual install</summary>
+            <div class="body">
+              <div class="tabs">
+                <input type="radio" name="mtab" id="t-deb" checked />
+                <input type="radio" name="mtab" id="t-rpm" />
+                <input type="radio" name="mtab" id="t-arch" />
+
+                <div class="bar">
+                  <label for="t-deb">Debian &amp; Ubuntu</label>
+                  <label for="t-rpm">Fedora &amp; RHEL</label>
+                  <label for="t-arch">Arch</label>
+                </div>
+
+                <div class="panels">
+                  <div class="panel p-deb">
+                    <p class="hint">Needs Ubuntu 24.04 or Debian 13 and up.</p>
+                    <h3>Add the repository</h3>
+                    <div class="cmd"><code>sudo install -d /usr/share/keyrings
+sudo curl -fsSL -o /usr/share/keyrings/lookout-archive-keyring.asc \\
+  https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+
+sudo tee /etc/apt/sources.list.d/lookout.sources &gt;/dev/null &lt;&lt;'EOF'
+Types: deb
+URIs: https://pkg.lookout.hackclub.com/deb
+Suites: ./
+Signed-By: /usr/share/keyrings/lookout-archive-keyring.asc
+EOF</code></div>
+                    <h3>Install</h3>
+                    <div class="cmd"><code>sudo apt update &amp;&amp; sudo apt install lookout</code></div>
+                  </div>
+
+                  <div class="panel p-rpm">
+                    <h3>Add the repository</h3>
+                    <div class="cmd"><code>sudo rpm --import https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+
+sudo tee /etc/yum.repos.d/lookout.repo &gt;/dev/null &lt;&lt;'EOF'
+[lookout]
+name=Lookout
+baseurl=https://pkg.lookout.hackclub.com/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+EOF</code></div>
+                    <h3>Install</h3>
+                    <div class="cmd"><code>sudo dnf install lookout</code></div>
+                  </div>
+
+                  <div class="panel p-arch">
+                    <h3>Trust the key</h3>
+                    <div class="cmd"><code>curl -fsSL https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc \\
+  | sudo pacman-key --add -
+sudo pacman-key --lsign-key 1A6D22590D34B83E2D0B3C8DF4806E984D9DA365</code></div>
+                    <h3>Add the repository</h3>
+                    <div class="cmd"><code>sudo tee -a /etc/pacman.conf &gt;/dev/null &lt;&lt;'EOF'
+
+[lookout]
+Server = https://pkg.lookout.hackclub.com/arch/$arch
+EOF</code></div>
+                    <h3>Install</h3>
+                    <div class="cmd"><code>sudo pacman -Sy lookout-bin</code></div>
+                  </div>
+                </div>
+              </div>
+
+              <p class="note">
+                Or download a package directly from the
+                <a href="https://github.com/hackclub/lookout/releases/latest">releases page</a>.
+                Everything published lives at
+                <a href="https://pkg.lookout.hackclub.com">pkg.lookout.hackclub.com</a>.
+              </p>
+            </div>
+          </details>
+        </div>
       </div>
     </main>
 
@@ -301,6 +520,13 @@
         const label = document.getElementById("dl-label");
         const navDl = document.getElementById("nav-dl");
         const otherEl = document.getElementById("dl-other");
+
+        // Linux installs through a package manager, so the one-liner replaces
+        // the download button rather than sitting beside it.
+        const showLinux = () => {
+          document.getElementById("dl-buttons").style.display = "none";
+          document.getElementById("linux").classList.add("on");
+        };
 
         const dlIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
 
@@ -350,11 +576,13 @@
               navDl.innerHTML = navButtons.join("");
             }
           } else if (os === "linux") {
-            label.textContent = "Download for Linux";
+            showLinux();
           }
         } catch (e) {
           // Fallback: buttons already link to releases page
-          if (os !== "unknown") {
+          if (os === "linux") {
+            showLinux();
+          } else if (os !== "unknown") {
             label.textContent = `Download for ${osLabels[os]}`;
           }
         }
@@ -367,6 +595,21 @@
         if (others.length) {
           otherEl.innerHTML = `Also available for ${others.join(", ")}`;
         }
+        document.querySelectorAll(".cmd").forEach((box) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.setAttribute("aria-label", "Copy to clipboard");
+          b.innerHTML =
+            `<svg class="sheet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>` +
+            `<svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+          b.addEventListener("click", () => {
+            navigator.clipboard.writeText(box.querySelector("code").textContent).then(() => {
+              b.classList.add("done");
+              setTimeout(() => b.classList.remove("done"), 1500);
+            });
+          });
+          box.appendChild(b);
+        });
       })();
     </script>
   </body>
