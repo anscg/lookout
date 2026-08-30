@@ -11,8 +11,7 @@ nothing is shown when Lookout isn't recording.
 `metadata.json`, `stylesheet.css` and `icons/lookout.png`, the last one with
 `include_bytes!` — and writes them to
 `~/.local/share/gnome-shell/extensions/<uuid>/` at every startup on GNOME, so
-the install needs no root and works the same from the deb, the rpm and the
-AppImage. It is not a setting to opt into: on GNOME the pill is how a
+the install needs no root and works the same from the deb and the rpm. It is not a setting to opt into: on GNOME the pill is how a
 recording is indicated. The
 extension loads the icon by path from its own directory, so anything added
 here has to be written out there too.

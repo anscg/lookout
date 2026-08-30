@@ -43,7 +43,6 @@
       "dmg",
       "nsis",
       "deb",
-      "appimage",
       "rpm"
     ],
     "macOS": {
@@ -66,6 +65,7 @@
           "/usr/share/lookout/lookout-archive-keyring.asc": "linux/lookout-archive-keyring.asc"
         },
         "depends": [
+          "libc6 (>= 2.39)",
           "gstreamer1.0-pipewire",
           "gstreamer1.0-plugins-base",
           "gstreamer1.0-plugins-good",
