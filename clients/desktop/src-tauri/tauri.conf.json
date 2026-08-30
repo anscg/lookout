@@ -60,6 +60,11 @@
     "linux": {
       "deb": {
         "desktopTemplate": "./linux/lookout.desktop",
+        "postInstallScript": "./linux/postinst.sh",
+        "postRemoveScript": "./linux/postrm.sh",
+        "files": {
+          "/usr/share/lookout/lookout-archive-keyring.asc": "linux/lookout-archive-keyring.asc"
+        },
         "depends": [
           "gstreamer1.0-pipewire",
           "gstreamer1.0-plugins-base",
