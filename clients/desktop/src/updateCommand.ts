@@ -46,14 +46,18 @@ export function instructionsFor(install: LinuxInstall): UpdateInstructions {
   }
 
   if (install.manager === "pacman") {
-    // Plain pacman can't build from the AUR, so someone with neither helper
-    // gets the manual route rather than a command that doesn't exist.
+    // Our repository is configured, so this is an ordinary system upgrade.
+    if (install.enrolled) {
+      return { command: "sudo pacman -Syu", fallback: null };
+    }
+    // Otherwise it came from the AUR. Plain pacman can't build from there, so
+    // someone with no helper gets the manual route rather than a dead command.
     if (install.helper) {
       return { command: `${install.helper} -S lookout-bin`, fallback: null };
     }
     return {
       command: null,
-      fallback: "Rebuild lookout-bin from the AUR to update, or download the latest package.",
+      fallback: "Add the Lookout repository or rebuild lookout-bin from the AUR to update.",
     };
   }
 

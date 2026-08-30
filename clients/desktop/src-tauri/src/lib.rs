@@ -1519,6 +1519,11 @@ fn linux_install_kind() -> LinuxInstall {
         let enrolled = match manager {
             "apt" => std::path::Path::new("/etc/apt/sources.list.d/lookout.sources").exists(),
             "rpm" => std::path::Path::new("/etc/yum.repos.d/lookout.repo").exists(),
+            // pacman has no drop-in directory by default, so the section lives
+            // in pacman.conf itself.
+            "pacman" => std::fs::read_to_string("/etc/pacman.conf")
+                .map(|c| c.lines().any(|l| l.trim() == "[lookout]"))
+                .unwrap_or(false),
             _ => false,
         };
 

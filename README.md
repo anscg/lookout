@@ -7,7 +7,7 @@ There are currently two official clients for this service:
 - [Web React SDK](/clients/react/API.md) - for embedding the recorder in your web app.
 - [Desktop App](https://github.com/hackclub/lookout/releases) - for download on Mac, Windows, and Linux.
   On Linux the packages enroll you in Lookout's repositories as they install, so normal system updates keep
-  it current — `apt`, `dnf`, or `paru -S lookout-bin` on Arch. See [/docs/linux.md](/docs/linux.md).
+  it current — `apt`, `dnf`, or `pacman` on Arch. See [/docs/linux.md](/docs/linux.md).
 
 Lookout also hosts a [small recorder of its own](/clients/hosted) at the `sessionUrl` a new session returns, for cases where sending the user a link is easier than shipping a client.
 

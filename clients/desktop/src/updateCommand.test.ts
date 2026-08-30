@@ -21,6 +21,16 @@ describe("instructionsFor", () => {
     );
   });
 
+  it("treats an enrolled Arch machine as an ordinary system upgrade", () => {
+    expect(instructionsFor(install({ manager: "pacman", enrolled: true })).command).toBe(
+      "sudo pacman -Syu",
+    );
+    // Our repository shadows the AUR package, so it wins over the helper.
+    expect(
+      instructionsFor(install({ manager: "pacman", enrolled: true, helper: "paru" })).command,
+    ).toBe("sudo pacman -Syu");
+  });
+
   it("uses whichever AUR helper is present", () => {
     expect(instructionsFor(install({ manager: "pacman", helper: "paru" })).command).toBe(
       "paru -S lookout-bin",

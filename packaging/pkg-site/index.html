@@ -254,8 +254,22 @@ EOF</pre></div></div>
 
       <div class="panel p-arch">
         <div class="step">
-          <h2>Install from the AUR</h2>
-          <div class="cmd"><div class="scroll"><pre>paru -S lookout-bin</pre></div></div>
+          <h2>Trust the key</h2>
+          <div class="cmd"><div class="scroll"><pre>curl -fsSL https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc \
+  | sudo pacman-key --add -
+sudo pacman-key --lsign-key @FPR_COMPACT@</pre></div></div>
+        </div>
+        <div class="step">
+          <h2>Add the repository</h2>
+          <div class="cmd"><div class="scroll"><pre>sudo tee -a /etc/pacman.conf >/dev/null &lt;&lt;'EOF'
+
+[lookout]
+Server = https://pkg.lookout.hackclub.com/arch/$arch
+EOF</pre></div></div>
+        </div>
+        <div class="step">
+          <h2>Install</h2>
+          <div class="cmd"><div class="scroll"><pre>sudo pacman -Sy lookout-bin</pre></div></div>
         </div>
       </div>
     </div>

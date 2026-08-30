@@ -65,9 +65,11 @@ def main() -> int:
         template.read_text()
         .replace("@VERSION@", html.escape(version))
         .replace("@FINGERPRINT@", html.escape(fpr))
+        # pacman-key --lsign-key takes the fingerprint unspaced.
+        .replace("@FPR_COMPACT@", html.escape(fpr.replace(" ", "")))
         .replace("@TREE@", rows(repo))
     )
-    for token in ("@VERSION@", "@FINGERPRINT@", "@TREE@"):
+    for token in ("@VERSION@", "@FINGERPRINT@", "@FPR_COMPACT@", "@TREE@"):
         if token in page:
             print(f"unsubstituted {token}", file=sys.stderr)
             return 1

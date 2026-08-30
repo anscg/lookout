@@ -80,13 +80,31 @@ sudo dnf install lookout
 
 ## Arch
 
+Arch is the one that isn't self-enrolling: a package editing `pacman.conf` is
+considered rude in a way a Debian postinst isn't, so the repository is added by
+hand once.
+
 ```bash
-paru -S lookout-bin
+curl -fsSL https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc \
+  | sudo pacman-key --add -
+sudo pacman-key --lsign-key 1A6D22590D34B83E2D0B3C8DF4806E984D9DA365
+
+sudo tee -a /etc/pacman.conf >/dev/null <<'EOF'
+
+[lookout]
+Server = https://pkg.lookout.hackclub.com/arch/$arch
+EOF
+
+sudo pacman -Sy lookout-bin
 ```
 
-`lookout-bin` repackages the `.deb`, so `paru -Syu` (or `yay`) updates it with
-everything else. There's no apt or dnf repository involved and nothing is
-written to your sources.
+After that `pacman -Syu` updates it with everything else.
+
+The AUR would be the more idiomatic route, and `packaging/aur/` plus the `aur`
+workflow are ready for it — but AUR registration is closed to new accounts, so
+the repository is what exists today. Both channels use the same package name,
+so a machine with the repository configured takes the prebuilt package and one
+without it can still build `lookout-bin` from the AUR once that opens.
 
 ## The command is `lookout`
 
@@ -117,6 +135,7 @@ Purging removes the repository file, the key, and the marker.
 | --- | --- |
 | `/deb` | flat apt repository — `Packages` and `InRelease` at that level, packages under `pool/` |
 | `/rpm` | dnf repository — `repodata/` plus the signed rpms |
+| `/arch/$arch` | pacman repository — `lookout.db` plus the signed packages, split by architecture |
 | `/lookout-archive-keyring.asc` | the public key for both |
 
 The `packages` workflow builds both from the GitHub release assets and deploys
@@ -148,6 +167,11 @@ dnf verifies signatures on the *packages*, not just the metadata, so the
 workflow re-signs each rpm with `rpmsign` before indexing — they come off the
 releases unsigned — and then reads each signature back with only the public
 half, because `rpmsign` reports success on things dnf later rejects.
+
+pacman wants a detached *binary* signature beside each package, not an armored
+one, and `SigLevel = Required` turns an unverifiable signature into a hard
+failure on every upgrade rather than a warning. So those are read back with the
+public half too.
 
 Rotating the key is disruptive: an enrolled machine has the old public half
 pinned on disk and only learns a new one from a newer package, which it would

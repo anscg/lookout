@@ -71,11 +71,12 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          mkdir -p repo/deb/pool repo/rpm
+          mkdir -p repo/deb/pool repo/rpm arch-in
 
           grab() {
             gh release download "$1" --dir repo/deb/pool --pattern '*.deb' --clobber || return 1
             gh release download "$1" --dir repo/rpm --pattern '*.rpm' --clobber || true
+            gh release download "$1" --dir arch-in --pattern '*.pkg.tar.zst' --clobber || true
           }
 
           # A tag passed in is taken even if its release is still a draft --
@@ -103,6 +104,7 @@ jobs:
           fi
           echo "deb pool: $(ls repo/deb/pool | wc -l) files, $(du -sh repo/deb/pool | cut -f1)"
           echo "rpm pool: $(ls repo/rpm | wc -l) files, $(du -sh repo/rpm | cut -f1)"
+          echo "arch: $(ls arch-in 2>/dev/null | wc -l) files"
 
       # Signing with a key whose public half isn't the one a .deb installs makes
       # every enrolled machine fail apt update with NO_PUBKEY, and the fix can't
@@ -205,6 +207,70 @@ jobs:
       # Runs last of the build steps: it lists what is actually in repo/, and
       # Pages serves no directory indexes, so without it every path under the
       # root that isn't an exact file is a 404 with no way to look around.
+      # pacman keys its repositories on $arch, so the packages are split by
+      # architecture rather than sharing one index the way apt's do.
+      - name: Sign the Arch packages and build the pacman repository
+        env:
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(ls -A arch-in 2>/dev/null || true)" ]; then
+            echo "no .pkg.tar.zst assets on any release -- skipping the pacman repository"
+            exit 0
+          fi
+
+          for p in arch-in/*.pkg.tar.zst; do
+            case "$(basename "$p")" in
+              *aarch64*) a=aarch64 ;;
+              *) a=x86_64 ;;
+            esac
+            mkdir -p "repo/arch/$a"
+            mv "$p" "repo/arch/$a/"
+          done
+
+          # pacman wants detached BINARY signatures beside each package; an
+          # armored one is silently not what it looks for.
+          for p in repo/arch/*/*.pkg.tar.zst; do
+            gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" \
+                --local-user "$SIGNING_FPR" --detach-sign --no-armor -o "$p.sig" "$p"
+          done
+
+          # repo-add ships with pacman, which isn't on this runner.
+          docker run --rm -v "$PWD/repo/arch:/a" archlinux:base-devel bash -euc '
+            for d in /a/*/; do
+              cd "$d"
+              repo-add -q -R lookout.db.tar.gz *.pkg.tar.zst
+            done
+          '
+          sudo chown -R "$(id -u):$(id -g)" repo/arch
+
+          for d in repo/arch/*/; do
+            # repo-add leaves lookout.db and lookout.files as symlinks, which
+            # do not survive being served as static files. Replace them with
+            # the real thing, then sign what clients actually fetch.
+            for n in db files; do
+              [ -e "$d/lookout.$n.tar.gz" ] || continue
+              cp --remove-destination --dereference "$d/lookout.$n.tar.gz" "$d/lookout.$n"
+              for f in "$d/lookout.$n" "$d/lookout.$n.tar.gz"; do
+                gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" \
+                    --local-user "$SIGNING_FPR" --detach-sign --no-armor -o "$f.sig" "$f"
+              done
+            done
+          done
+
+          # Read the signatures back with only the public half, the way pacman
+          # does -- a signature we cannot verify is worse than none, because
+          # SigLevel=Required turns it into a hard failure on every upgrade.
+          gpg --batch --armor --export "$SIGNING_FPR" > pub.asc
+          rm -rf v && mkdir v && chmod 700 v
+          GNUPGHOME=v gpg --batch --quiet --import pub.asc
+          for sig in repo/arch/*/*.sig; do
+            GNUPGHOME=v gpg --batch --verify "$sig" "${sig%.sig}" 2>/dev/null \
+              || { echo "::error::$sig does not verify against the published key" >&2; exit 1; }
+          done
+          rm -rf v pub.asc
+          echo "pacman repository built: $(ls repo/arch)"
+
       - name: Render the homepage
         run: |
           set -euo pipefail
