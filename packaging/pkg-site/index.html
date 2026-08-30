@@ -167,6 +167,24 @@ footer a:hover { color: var(--fg); text-decoration: none; }
   color: var(--muted);
   word-break: break-all;
 }
+.tree { margin-top: 40px; padding-top: 26px; border-top: 1px solid var(--line); }
+.tree ul { margin: 14px 0 0; padding: 0; list-style: none; }
+.tree li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: baseline;
+  /* --i is the nesting depth, set per row by render.py. */
+  padding: 5px 0 5px calc(var(--i, 0) * 20px);
+  border-bottom: 1px solid var(--line);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12.5px;
+}
+.tree li.d { color: var(--fg); font-weight: 500; border-bottom: none; padding-top: 14px; }
+.tree li:first-child { padding-top: 0; }
+.tree a { color: var(--muted); overflow-wrap: anywhere; }
+.tree a:hover { color: var(--accent); }
+.tree span { color: var(--faint); white-space: nowrap; font-size: 11.5px; }
 </style>
 </head>
 <body>
@@ -246,6 +264,13 @@ EOF</pre></div></div>
   <div class="fp">
     <h2>Signing key</h2>
     <code>@FINGERPRINT@</code>
+  </div>
+
+  <div class="tree">
+    <h2>Contents</h2>
+    <ul>
+@TREE@
+    </ul>
   </div>
 
   <footer>
