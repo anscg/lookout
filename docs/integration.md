@@ -221,7 +221,7 @@ untrusted** — all timing and time tracking is validated server-side.
 | POST | `/api/sessions/:token/screenshots` | Confirm upload. Body: `{ screenshotId, width, height, fileSize, final? }`. Returns `{ confirmed, trackedSeconds, nextExpectedAt }`. Server verifies R2 object exists. Rate limited: 20/min per token. Set `final: true` only on the one capture a client flushes right before pausing/stopping: credit-mode servers then credit the exact seconds elapsed since the last credited mark (clamped to 0–60) instead of the all-or-nothing streak rule, so a pause at 03:15 resumes at 03:15. Flush **before** the pause POST — a paused session rejects confirms. |
 | POST | `/api/sessions/:token/pause` | Pause session |
 | POST | `/api/sessions/:token/resume` | Resume session |
-| POST | `/api/sessions/:token/stop` | Stop session, trigger compilation |
+| POST | `/api/sessions/:token/stop` | Stop session, trigger compilation. Accepts a stop at any duration — but the official clients don't offer one until the session has a credited minute, since under that there's no capture unit to compile. A custom client is free to do the same. |
 | GET | `/api/sessions/:token/status` | Poll compilation status |
 | GET | `/api/sessions/:token/video` | Get presigned video URL |
 

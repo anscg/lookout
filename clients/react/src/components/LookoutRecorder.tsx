@@ -9,6 +9,7 @@ import { CameraPreview } from "./CameraPreview.js";
 import { CameraSelector } from "./CameraSelector.js";
 import { RecordingControls } from "./RecordingControls.js";
 import { ProcessingState } from "./ProcessingState.js";
+import { stopGuard } from "../hooks/stopGuard.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
@@ -227,6 +228,8 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
             onStartPreview={actions.startPreview}
             onStartRecording={actions.startSharing}
             onStop={() => setStopPrompt(true)}
+            trackedSeconds={state.trackedSeconds}
+            displaySeconds={state.displaySeconds}
           />
         ) : state.isPreviewing && !state.isSharing ? (
           /* Phase 2: Previewing — show "Start Recording" */
@@ -244,6 +247,8 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
             onResume={actions.resume}
             onStop={() => setStopPrompt(true)}
             captureMode="camera"
+            trackedSeconds={state.trackedSeconds}
+            displaySeconds={state.displaySeconds}
           />
         )}
         {stopPrompt && (
@@ -275,6 +280,8 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
         onResume={actions.resume}
         onStop={() => setStopPrompt(true)}
         captureMode="screen"
+        trackedSeconds={state.trackedSeconds}
+        displaySeconds={state.displaySeconds}
       />
       {stopPrompt && (
         <StopChoiceModal
@@ -296,35 +303,58 @@ function CameraIdleControls({
   onStartPreview,
   onStartRecording,
   onStop,
+  trackedSeconds,
+  displaySeconds,
 }: {
   status: string;
   onStartPreview: () => void;
   onStartRecording: () => void;
   onStop: () => void;
+  trackedSeconds: number;
+  displaySeconds: number;
 }) {
   const isPaused = status === "paused";
+  const { canStop, reason } = stopGuard(trackedSeconds, displaySeconds);
 
   return (
     <div style={{
       display: "flex",
+      flexDirection: "column",
       alignItems: "center",
-      gap: spacing.md,
-      justifyContent: "center",
-      flexWrap: "wrap",
+      gap: spacing.sm,
     }}>
-      {isPaused ? (
-        <>
-          <Button variant="primary" size="lg" onClick={onStartRecording}>
-            Start Camera &amp; Resume
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        gap: spacing.md,
+        justifyContent: "center",
+        flexWrap: "wrap",
+      }}>
+        {isPaused ? (
+          <>
+            <Button variant="primary" size="lg" onClick={onStartRecording}>
+              Start Camera &amp; Resume
+            </Button>
+            <Button
+              variant="danger"
+              size="md"
+              onClick={onStop}
+              disabled={!canStop}
+              title={reason ?? undefined}
+            >
+              Stop Session
+            </Button>
+          </>
+        ) : (
+          <Button variant="success" size="lg" onClick={onStartPreview}>
+            Start Camera
           </Button>
-          <Button variant="danger" size="md" onClick={onStop}>
-            Stop Session
-          </Button>
-        </>
-      ) : (
-        <Button variant="success" size="lg" onClick={onStartPreview}>
-          Start Camera
-        </Button>
+        )}
+      </div>
+      {isPaused && reason && (
+        <span style={{ fontSize: fontSize.sm, color: colors.text.secondary }}>
+          {reason}
+        </span>
       )}
     </div>
   );

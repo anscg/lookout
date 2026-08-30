@@ -26,6 +26,10 @@ interface SourceLostPromptProps {
   onDetails?: () => void;
   /** True while the stop is in flight. */
   stopping?: boolean;
+  /** Why stopping is held back, or null when it isn't — see stopGuard.
+   *  Selecting a source again is always available, so a blocked stop never
+   *  leaves this prompt with no way out. */
+  stopBlockedReason?: string | null;
 }
 
 export function SourceLostPrompt({
@@ -34,6 +38,7 @@ export function SourceLostPrompt({
   onStop,
   onDetails,
   stopping = false,
+  stopBlockedReason = null,
 }: SourceLostPromptProps) {
   const title =
     loss.reason === "revoked" ? "Screen sharing was stopped" : "Lost the screen being captured";
@@ -61,6 +66,8 @@ export function SourceLostPrompt({
               size="md"
               loading={stopping}
               onClick={onStop}
+              disabled={!!stopBlockedReason}
+              title={stopBlockedReason ?? undefined}
               style={{ flex: 1 }}
             >
               Stop recording
@@ -71,6 +78,11 @@ export function SourceLostPrompt({
               </Button>
             )}
           </div>
+          {stopBlockedReason && (
+            <span style={{ fontSize: fontSize.sm, color: colors.text.secondary }}>
+              {stopBlockedReason}
+            </span>
+          )}
         </div>
       </div>
     </Overlay>
