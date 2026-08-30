@@ -4,7 +4,6 @@ import { instructionsFor, type LinuxInstall } from "./updateCommand.js";
 const install = (o: Partial<LinuxInstall>): LinuxInstall => ({
   manager: "unknown",
   enrolled: false,
-  helper: null,
   ...o,
 });
 
@@ -25,19 +24,6 @@ describe("instructionsFor", () => {
     expect(instructionsFor(install({ manager: "pacman", enrolled: true })).command).toBe(
       "sudo pacman -Syu",
     );
-    // Our repository shadows the AUR package, so it wins over the helper.
-    expect(
-      instructionsFor(install({ manager: "pacman", enrolled: true, helper: "paru" })).command,
-    ).toBe("sudo pacman -Syu");
-  });
-
-  it("uses whichever AUR helper is present", () => {
-    expect(instructionsFor(install({ manager: "pacman", helper: "paru" })).command).toBe(
-      "paru -S lookout-bin",
-    );
-    expect(instructionsFor(install({ manager: "pacman", helper: "yay" })).command).toBe(
-      "yay -S lookout-bin",
-    );
   });
 
   // The whole point of detecting the manager: a command that fails is worse
@@ -48,8 +34,8 @@ describe("instructionsFor", () => {
       // there is no candidate to upgrade to.
       install({ manager: "apt", enrolled: false }),
       install({ manager: "rpm", enrolled: false }),
-      // Arch without a helper: plain pacman cannot build from the AUR.
-      install({ manager: "pacman", helper: null }),
+      // Arch with a downloaded package and no repository configured.
+      install({ manager: "pacman" }),
       // Built from source, extracted by hand, or something we don't know.
       install({ manager: "unknown" }),
     ];
@@ -64,10 +50,8 @@ describe("instructionsFor", () => {
     const managers: LinuxInstall["manager"][] = ["apt", "rpm", "pacman", "unknown"];
     for (const manager of managers) {
       for (const enrolled of [true, false]) {
-        for (const helper of [null, "paru"]) {
-          const r = instructionsFor(install({ manager, enrolled, helper }));
-          expect(Boolean(r.command) !== Boolean(r.fallback), `${manager}/${enrolled}/${helper}`).toBe(true);
-        }
+        const r = instructionsFor(install({ manager, enrolled }));
+        expect(Boolean(r.command) !== Boolean(r.fallback), `${manager}/${enrolled}`).toBe(true);
       }
     }
   });

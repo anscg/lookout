@@ -1485,9 +1485,6 @@ pub struct LinuxInstall {
     /// but enrolled nowhere, and for it `apt install lookout` finds no
     /// candidate.
     enrolled: bool,
-    /// The AUR helper on PATH, when the manager is pacman. Plain pacman cannot
-    /// build from the AUR, so without one there is no command to give.
-    helper: Option<String>,
 }
 
 #[tauri::command]
@@ -1527,27 +1524,14 @@ fn linux_install_kind() -> LinuxInstall {
             _ => false,
         };
 
-        let helper = if manager == "pacman" {
-            ["paru", "yay"]
-                .into_iter()
-                .find(|h| {
-                    let probe = format!("command -v {h}");
-                    owns("sh", &["-c", probe.as_str()])
-                })
-                .map(str::to_string)
-        } else {
-            None
-        };
-
         LinuxInstall {
             manager: manager.into(),
             enrolled,
-            helper,
         }
     }
     #[cfg(not(target_os = "linux"))]
     {
-        LinuxInstall { manager: "unknown".into(), enrolled: false, helper: None }
+        LinuxInstall { manager: "unknown".into(), enrolled: false }
     }
 }
 

@@ -9,8 +9,6 @@ export interface LinuxInstall {
   manager: "apt" | "rpm" | "pacman" | "unknown";
   /** Whether our repository is configured for that manager. */
   enrolled: boolean;
-  /** The AUR helper found on PATH, when the manager is pacman. */
-  helper: string | null;
 }
 
 export interface UpdateInstructions {
@@ -50,14 +48,11 @@ export function instructionsFor(install: LinuxInstall): UpdateInstructions {
     if (install.enrolled) {
       return { command: "sudo pacman -Syu", fallback: null };
     }
-    // Otherwise it came from the AUR. Plain pacman can't build from there, so
-    // someone with no helper gets the manual route rather than a dead command.
-    if (install.helper) {
-      return { command: `${install.helper} -S lookout-bin`, fallback: null };
-    }
+    // Installed from a downloaded package. There is no AUR package to point
+    // at, so the way forward is adding the repository.
     return {
       command: null,
-      fallback: "Add the Lookout repository or rebuild lookout-bin from the AUR to update.",
+      fallback: "Add the Lookout repository to get updates, or download the latest package.",
     };
   }
 
