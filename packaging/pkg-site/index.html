@@ -70,6 +70,8 @@ h2 {
   letter-spacing: -0.01em;
 }
 .hint { margin: 0 0 14px; color: var(--muted); font-size: 13.5px; }
+.quick { border-top: 1px solid var(--line); padding-top: 32px; margin-bottom: 34px; }
+.quick .hint { margin: 12px 0 0; }
 .tabs { border-top: 1px solid var(--line); padding-top: 32px; }
 .tabs input { position: absolute; opacity: 0; pointer-events: none; }
 .bar {
@@ -197,6 +199,12 @@ footer a:hover { color: var(--fg); text-decoration: none; }
     <p class="sub" style="margin-top:0">Install Lookout with your package manager.</p>
     <div class="meta"><span class="pill">v@VERSION@</span></div>
   </header>
+
+  <div class="quick">
+    <h2>One line</h2>
+    <div class="cmd"><div class="scroll"><pre>curl -fsSL https://lookout.hackclub.com/install.sh | sh</pre></div></div>
+    <p class="hint">Detects your package manager and shows what it will do before touching anything. Or do it by hand:</p>
+  </div>
 
   <div class="tabs">
     <input type="radio" name="os" id="deb" checked>

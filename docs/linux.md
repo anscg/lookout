@@ -15,6 +15,16 @@ If a newer version is out and you haven't taken it, the app says so and shows
 the exact command for however you installed — it detects that rather than
 guessing.
 
+## One line
+
+```bash
+curl -fsSL https://lookout.hackclub.com/install.sh | sh
+```
+
+Works on apt, dnf, zypper and pacman. It prints what it will do and waits for
+confirmation; `-y` skips the prompt, and it refuses to run unattended without
+it rather than assuming consent.
+
 ## Debian and Ubuntu
 
 ```bash
