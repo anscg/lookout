@@ -72,6 +72,10 @@ export function UpdateDrawer({ update, open, onClose }: UpdateDrawerProps) {
 
       {update.command ? (
         <div
+          // Without this vaul reads a press-and-drag across the command as a
+          // sheet drag, so the text can never be selected. Scoped to this box
+          // so dragging the rest of the sheet still dismisses it.
+          data-vaul-no-drag=""
           style={{
             display: "flex",
             alignItems: "center",
@@ -92,8 +96,16 @@ export function UpdateDrawer({ update, open, onClose }: UpdateDrawerProps) {
               fontSize: fontSize.sm,
               color: colors.text.primary,
               fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-              whiteSpace: "nowrap",
-              overflowX: "auto",
+              // Wrapped rather than scrolled: the window is 480px and these
+              // commands are longer than that, and GTK draws a permanent
+              // scrollbar that both eats a row and hides the end of the very
+              // thing we're asking someone to run.
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+              lineHeight: 1.5,
+              userSelect: "text",
+              WebkitUserSelect: "text",
+              cursor: "text",
             }}
           >
             {update.command}
