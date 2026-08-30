@@ -3,6 +3,11 @@ name: Publish AUR package
 # Pushes lookout-bin to the AUR, so Arch users get updates through paru/yay
 # like any other package.
 #
+# Manual only, and deliberately not wired into release.yml: AUR registration is
+# closed to new accounts, so there is no account to push as and a release-time
+# job would just fail on every tag. Arch is served by the pacman repository
+# instead (see packages.yml). Run this by hand once an account exists.
+#
 # The .deb is the source: it already carries the built binary, the desktop file
 # and the icons, so the PKGBUILD repackages it rather than duplicating the
 # layout. Everything comes off the GitHub release, so this can be run by hand
@@ -14,11 +19,6 @@ on:
       tag:
         description: "Release tag to publish (blank = the newest published release)"
         required: false
-        type: string
-  workflow_call:
-    inputs:
-      tag:
-        required: true
         type: string
 
 concurrency:
