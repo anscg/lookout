@@ -1466,6 +1466,57 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// How Lookout was installed, so the update sheet can print a command that
+/// actually works. Only apt has a repository behind it today — telling a Fedora
+/// user to run `dnf upgrade lookout` would just fail — so everyone else is sent
+/// to the releases page instead.
+#[derive(serde::Serialize)]
+pub struct LinuxInstall {
+    /// "apt", "rpm", "pacman", or "unknown".
+    manager: String,
+    /// Whether our apt source is present. A .deb installed by hand before the
+    /// postinst existed is owned by dpkg but enrolled nowhere, and for it
+    /// `apt install lookout` finds no candidate.
+    enrolled: bool,
+}
+
+#[tauri::command]
+fn linux_install_kind() -> LinuxInstall {
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::{Command, Stdio};
+
+        // Ask each package manager whether it owns our executable. A missing
+        // manager fails to spawn, which is the same answer as "not mine".
+        let owns = |program: &str, args: &[&str]| {
+            Command::new(program)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+
+        let exe = std::env::current_exe().ok();
+        let manager = match exe.as_ref().and_then(|p| p.to_str()) {
+            Some(path) if owns("dpkg", &["-S", path]) => "apt",
+            Some(path) if owns("rpm", &["-qf", path]) => "rpm",
+            Some(path) if owns("pacman", &["-Qo", path]) => "pacman",
+            _ => "unknown",
+        };
+
+        LinuxInstall {
+            manager: manager.into(),
+            enrolled: std::path::Path::new("/etc/apt/sources.list.d/lookout.sources").exists(),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        LinuxInstall { manager: "unknown".into(), enrolled: false }
+    }
+}
+
 #[tauri::command]
 async fn request_screencast(
     #[allow(unused_variables)] state: State<'_, AppState>,
@@ -4029,6 +4080,7 @@ pub fn run() {
             window_shape::sync_window_frame,
             background_blur::sync_background_blur,
             open_external_url,
+            linux_install_kind,
             secret_store::secret_set,
             secret_store::secret_get,
             secret_store::secret_delete,
@@ -4190,9 +4242,9 @@ pub fn run() {
             // custom template, linux/lookout.desktop — Tauri's stock one
             // drops the URL). Registering again at runtime writes a second
             // lookout-desktop-handler.desktop, and the system's "Open with"
-            // chooser then lists two indistinguishable Lookouts. Only
-            // AppImages and dev builds, which install no desktop file,
-            // need runtime registration.
+            // chooser then lists two indistinguishable Lookouts. Only dev
+            // builds, which install no desktop file, need runtime
+            // registration.
             #[cfg(target_os = "linux")]
             {
                 if app.env().appimage.is_some() || cfg!(debug_assertions) {

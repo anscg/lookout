@@ -50,6 +50,7 @@ import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
 import { useAppUpdate } from "./hooks/useAppUpdate.js";
 import { useAnnouncement } from "./hooks/useAnnouncement.js";
 import { useTip } from "./hooks/useTip.js";
+import { useLinuxUpdate } from "./hooks/useLinuxUpdate.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
 import { UpdatePill } from "./components/UpdatePill.js";
 import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.js";
@@ -64,6 +65,7 @@ import {
 } from "./programPanel.js";
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 import { TipDrawer } from "./components/TipDrawer.js";
+import { UpdateDrawer } from "./components/UpdateDrawer.js";
 import {
   installTipDebug,
   markTipMoment,
@@ -436,6 +438,10 @@ function MainWindowApp() {
 
   // Admin-authored announcement banner; checked on open and every 15 min.
   const announcement = useAnnouncement();
+  // Linux only: the in-app updater is off there, so a new release is
+  // surfaced as instructions rather than a download. Held back while the tip
+  // sheet is up so the two never stack.
+  const { update: linuxUpdate, dismiss: dismissLinuxUpdate } = useLinuxUpdate();
   // Whether a tip is published; when it opens is decided per moment against
   // the session a qualifying deep link bound it to (see tip.ts).
   const tip = useTip();
@@ -1418,6 +1424,14 @@ function MainWindowApp() {
       {/* Mounted whenever a tip is published, so vaul can animate the exit;
           opens only when a moment says so. */}
       <TipDrawer tip={tipOverride ?? tip} open={tipOpen} onClose={() => setTipOpen(false)} />
+
+      {/* Opens itself once per release, only on the main page and never over
+          the tip sheet or during a recording. */}
+      <UpdateDrawer
+        update={linuxUpdate}
+        open={Boolean(linuxUpdate) && onMainPage && !tipOpen}
+        onClose={dismissLinuxUpdate}
+      />
 
       {/* Instant-start progress: shows while a linked program mints the
           session. Fixed to the viewport, outside the route transition. */}
