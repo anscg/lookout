@@ -84,6 +84,7 @@
           "/usr/share/lookout/lookout-archive-keyring.asc": "linux/lookout-archive-keyring.asc"
         },
         "depends": [
+          "glibc >= 2.39",
           "pipewire-gstreamer",
           "gstreamer1-plugins-base",
           "gstreamer1-plugins-good",

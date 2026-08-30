@@ -75,8 +75,7 @@ printf 'This will:\n'
 printf '  • add %s to %s\n' "$HOST" "$where"
 printf '  • trust the signing key %s\n' "$KEY_FPR"
 printf '  • install %s with %s\n' "$PKG" "$MGR"
-printf '\n%sUpdates then arrive with the rest of your system updates.%s\n' "$dim" "$r"
-printf '%sNothing else is changed. Uninstall with your package manager.%s\n\n' "$dim" "$r"
+printf '\n%sNothing else is changed. Uninstall with your package manager.%s\n\n' "$dim" "$r"
 
 if [ "$ASSUME_YES" = 0 ]; then
   # Probed in a subshell: a failed `exec` redirection exits a non-interactive

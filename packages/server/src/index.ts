@@ -100,6 +100,21 @@ if (existsSync(publicDir)) {
     wildcard: false,
   });
 
+  // `.sh` resolves to application/x-sh, which browsers download rather than
+  // show — so the one URL we ask people to pipe into a shell is the one they
+  // can't read first.
+  //
+  // Done in onSend, which is the only one of the three that survives:
+  // @fastify/static's own setHeaders is overwritten when it applies send's
+  // headers afterwards, and a dedicated route collides with the per-file route
+  // it registers under `wildcard: false`.
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (request.url.split("?")[0].endsWith(".sh")) {
+      reply.type("text/plain; charset=utf-8");
+    }
+    return payload;
+  });
+
   // Two apps share this origin: the download page at the root, and the
   // hosted recorder under /session — the URL `POST /api/internal/sessions`
   // has always handed back. They have separate builds and separate
