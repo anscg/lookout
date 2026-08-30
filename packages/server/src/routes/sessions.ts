@@ -770,7 +770,8 @@ export async function sessionRoutes(app: FastifyInstance) {
       const isFinal = request.body.final === true;
       // Belt-and-braces telemetry for the flag itself: Fastify strips
       // unknown body fields (removeAdditional), so if a client SENT final
-      // and a proxy or an old schema ate it, this is the only trace.
+      // and a proxy or an old schema ate it, this is the only trace. Also
+      // persisted on the row below, for the compiler.
       if (isFinal) {
         request.log.info({ screenshotId }, "confirm carries final=true");
       }
@@ -900,6 +901,7 @@ export async function sessionRoutes(app: FastifyInstance) {
               height,
               fileSizeBytes: fileSize,
               frameCount: frameCount ?? null,
+              isFinal,
               creditedSeconds: decision.credit,
               expectedAt: decision.expectedAt,
             })
@@ -963,6 +965,9 @@ export async function sessionRoutes(app: FastifyInstance) {
             height,
             fileSizeBytes: fileSize,
             frameCount: frameCount ?? null,
+            // Irrelevant to bucket-mode crediting, but the compiler skips
+            // flushes in both modes.
+            isFinal,
           })
           .where(eq(schema.screenshots.id, screenshotId));
 

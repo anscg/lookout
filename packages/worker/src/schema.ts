@@ -106,6 +106,8 @@ export const screenshots = pgTable(
     // Client-attested capture time; NULL for pre-migration rows (fall back
     // to requestedAt — same coalesce the timings endpoint uses).
     capturedAt: timestamp("captured_at", { withTimezone: true }),
+    // The pause/stop flush capture. Excluded from the unit sampler.
+    isFinal: boolean("is_final").notNull().default(false),
     // Credit-mode only: 0 or 60. NULL for bucket-mode rows.
     creditedSeconds: integer("credited_seconds"),
     createdAt: timestamp("created_at", { withTimezone: true })

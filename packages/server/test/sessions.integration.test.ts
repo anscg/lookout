@@ -54,6 +54,10 @@ async function loadSession(id: string) {
   return db.query.sessions.findFirst({ where: (t, { eq }) => eq(t.id, id) });
 }
 
+async function loadScreenshot(id: string) {
+  return db.query.screenshots.findFirst({ where: (t, { eq }) => eq(t.id, id) });
+}
+
 async function postUpload(
   token: string,
   capturedAt: string | undefined,
@@ -1603,5 +1607,40 @@ describe("final capture (pause/stop flush)", () => {
     const c2 = await confirmUpload(sess.token, up2.body.screenshotId);
     expect(c2.status).toBe(200);
     expect(c2.body.trackedSeconds).toBe(0);
+  });
+
+  it("persists the flag on the row for the compiler", async () => {
+    // The flag used to be read off the request, credited against, logged
+    // and dropped. The compiler runs long after, and skips flushes when it
+    // samples capture units — it can only do that if this stuck.
+    const sess = await createSession();
+    const up1 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    await confirmUpload(sess.token, up1.body.screenshotId);
+    advanceVirtualMs(35_000);
+    const up2 = await postUpload(sess.token, new Date(virtualNow).toISOString());
+    await confirmFinal(sess.token, up2.body.screenshotId);
+
+    expect(await loadScreenshot(up1.body.screenshotId)).toMatchObject({
+      isFinal: false,
+    });
+    expect(await loadScreenshot(up2.body.screenshotId)).toMatchObject({
+      isFinal: true,
+    });
+  });
+
+  it("persists the flag in bucket mode too", async () => {
+    // Bucket-mode crediting ignores `final` entirely, so the flag takes a
+    // different code path here — and the compiler reads it in both modes.
+    const sess = await createSession();
+    const up1 = await postUpload(sess.token, undefined);
+    await confirmUpload(sess.token, up1.body.screenshotId);
+    const up2 = await postUpload(sess.token, undefined);
+    await confirmFinal(sess.token, up2.body.screenshotId);
+
+    const s = await loadSession(sess.id);
+    expect(s?.trackingMode).toBe("bucket");
+    expect(await loadScreenshot(up2.body.screenshotId)).toMatchObject({
+      isFinal: true,
+    });
   });
 });

@@ -360,6 +360,11 @@ export const screenshots = pgTable(
     // the entire reason the column is harder to forge than clientInfo. It is
     // exposed on the api-key-authenticated internal session endpoint only.
     ja4: text("ja4"),
+    // The pause/stop flush capture — the confirm's `final: true`, kept so the
+    // compiler can skip it (a partial minute must not earn a full second of
+    // video). Set in both tracking modes; false for old clients and every
+    // pre-0031 row.
+    isFinal: boolean("is_final").notNull().default(false),
     // Credit-mode only. 0–60 (inclusive): 60 for an in-window streak
     // capture, the exact partial elapsed for a final pause/stop flush
     // (creditFinalCapture), 0 for seeds and resets. NULL for bucket-mode

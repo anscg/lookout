@@ -405,19 +405,25 @@ export async function compileTimelapse(sessionId: string): Promise<{
       SELECT DISTINCT ON (sample_bucket)
         id, r2_key, sample_bucket AS minute_bucket, requested_at, captured_at, format
       FROM (
-        SELECT id, r2_key, requested_at, captured_at, format,
+        SELECT id, r2_key, requested_at, captured_at, format, is_final,
+          bool_or(NOT is_final) OVER () AS has_ordinary_unit,
           FLOOR(EXTRACT(EPOCH FROM (
             COALESCE(captured_at, requested_at) - ${session.startedAt!}::timestamptz
           )) / 60)::int AS sample_bucket
         FROM screenshots
         WHERE session_id = ${sessionId} AND confirmed = true
       ) units
+      -- A flush covers a fraction of a minute and is credited as such, so it
+      -- can't earn a whole second of video — one unit = one minute = one
+      -- second is the map the editor scrubs against. Ordinary jpeg units are
+      -- whole minutes and stay; a session of nothing but flushes keeps them,
+      -- same escape as dropSeedUnit's single-unit case.
+      WHERE NOT is_final OR NOT has_ordinary_unit
       ORDER BY sample_bucket,
-        -- Motion beats stills within a bucket. Pause flushes and resume
-        -- seeds are single JPEGs that share a bucket with the minute's
-        -- actual clip; without this, a pause froze that minute of the
-        -- timelapse to one still. No-op for legacy all-JPEG sessions
-        -- (every unit ties).
+        -- Motion beats stills within a bucket, for the resume seed that
+        -- shares one with the minute's clip. No-op for legacy all-JPEG
+        -- sessions. Flushes used to lean on this too — they never reach
+        -- here now, and it missed the web client's flush anyway (a clip).
         (format = 'jpeg')::int,
         ABS(EXTRACT(EPOCH FROM (COALESCE(captured_at, requested_at) - (
           ${session.startedAt!}::timestamptz

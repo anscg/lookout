@@ -11,8 +11,10 @@
  *  - Buckets come from CAPTURE time, so upload latency can never slide a
  *    clip into the next minute's bucket and silently drop a minute of
  *    video (the "stitching is unstable" report).
- *  - Motion beats stills within a bucket (a pause-flush JPEG must not
- *    freeze its minute of timelapse).
+ *  - Motion beats stills within a bucket (a resume seed must not freeze its
+ *    minute of timelapse).
+ *  - The pause/stop flush is not a unit at all: it covers a fraction of a
+ *    minute, so a whole second of video would break one-unit-one-minute.
  *  - Legacy rows without captured_at keep the old arrival-based behavior.
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
@@ -44,6 +46,7 @@ async function insertUnit(
     capturedAtS: number | null;
     requestedAtS: number;
     format?: string;
+    isFinal?: boolean;
     label: string;
   },
 ): Promise<string> {
@@ -58,6 +61,7 @@ async function insertUnit(
       minuteBucket: Math.floor(opts.requestedAtS / 60),
       confirmed: true,
       format: opts.format ?? "mp4",
+      isFinal: opts.isFinal ?? false,
       capturedAt: opts.capturedAtS === null ? null : at(opts.capturedAtS),
     })
     .returning({ id: schema.screenshots.id });
@@ -75,13 +79,15 @@ async function sampleUnits(sessionId: string) {
     SELECT DISTINCT ON (sample_bucket)
       id, r2_key, sample_bucket AS minute_bucket, requested_at, captured_at, format
     FROM (
-      SELECT id, r2_key, requested_at, captured_at, format,
+      SELECT id, r2_key, requested_at, captured_at, format, is_final,
+        bool_or(NOT is_final) OVER () AS has_ordinary_unit,
         FLOOR(EXTRACT(EPOCH FROM (
           COALESCE(captured_at, requested_at) - ${T0}::timestamptz
         )) / 60)::int AS sample_bucket
       FROM screenshots
       WHERE session_id = ${sessionId} AND confirmed = true
     ) units
+    WHERE NOT is_final OR NOT has_ordinary_unit
     ORDER BY sample_bucket,
       (format = 'jpeg')::int,
       ABS(EXTRACT(EPOCH FROM (COALESCE(captured_at, requested_at) - (
@@ -109,26 +115,88 @@ describe("unit sampling (worker compile step 1 mirror)", () => {
     expect(rows.map((r) => Number(r.minute_bucket))).toEqual([0, 1, 2]);
   });
 
-  it("a pause-flush JPEG never displaces its minute's motion clip", async () => {
+  it("a resume seed never displaces its minute's motion clip", async () => {
     const sess = await createSession();
     const clip = await insertUnit(sess, { capturedAtS: 120, requestedAtS: 123, label: "clip" });
-    // Pause at 2:30: flush JPEG shares capture-bucket 2 with the clip, and
-    // sits closer to the bucket midpoint — the distance tiebreak alone
+    // Resume at 2:30: the seed JPEG shares capture-bucket 2 with the clip
+    // and sits closer to the bucket midpoint — the distance tiebreak alone
     // would pick it and freeze the minute to a still.
-    await insertUnit(sess, { capturedAtS: 150, requestedAtS: 151, format: "jpeg", label: "flush" });
+    await insertUnit(sess, { capturedAtS: 150, requestedAtS: 151, format: "jpeg", label: "seed" });
 
     const rows = await sampleUnits(sess);
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(clip);
   });
 
-  it("a flush alone in its minute still becomes a unit", async () => {
+  it("a pause flush alone in the last minute is not a unit", async () => {
+    // The reported bug: pause at 2:10 gives the flush bucket 2 to itself,
+    // so the format tiebreak above never sees it and it became a frozen
+    // last second duplicating the end of the previous clip.
+    const sess = await createSession();
+    const clip = await insertUnit(sess, { capturedAtS: 60, requestedAtS: 62, label: "clip" });
+    await insertUnit(sess, {
+      capturedAtS: 130, requestedAtS: 131, format: "jpeg", isFinal: true, label: "flush",
+    });
+
+    const rows = await sampleUnits(sess);
+    expect(rows.map((r) => r.id)).toEqual([clip]);
+  });
+
+  it("a CLIP flush never displaces its minute's real clip", async () => {
+    // The web client's flush cuts the in-progress clip instead of grabbing
+    // a JPEG, so the format tiebreak is blind to it — both rows are clips
+    // and the flush sits nearer the midpoint, which is enough to win.
+    const sess = await createSession();
+    const clip = await insertUnit(sess, { capturedAtS: 120, requestedAtS: 123, label: "clip" });
+    await insertUnit(sess, {
+      capturedAtS: 150, requestedAtS: 151, isFinal: true, label: "clip-flush",
+    });
+
+    const rows = await sampleUnits(sess);
+    expect(rows.map((r) => r.id)).toEqual([clip]);
+  });
+
+  it("a jpeg-fallback session keeps every per-minute still", async () => {
+    // A client that can't encode video uploads one JPEG per minute; those
+    // are whole minutes. The flag is the only thing separating them here.
+    const sess = await createSession();
+    const stills: string[] = [];
+    for (let m = 0; m < 4; m++) {
+      stills.push(
+        await insertUnit(sess, {
+          capturedAtS: m * 60, requestedAtS: m * 60 + 1, format: "jpeg", label: `still-${m}`,
+        }),
+      );
+    }
+    await insertUnit(sess, {
+      capturedAtS: 245, requestedAtS: 246, format: "jpeg", isFinal: true, label: "flush",
+    });
+
+    const rows = await sampleUnits(sess);
+    expect(rows.map((r) => r.id)).toEqual(stills);
+  });
+
+  it("an unflagged flush from an old client still becomes a unit", async () => {
+    // Nothing in a pre-0031 row identifies the flush and there is no
+    // backfill, so old sessions recompile exactly as they did before.
     const sess = await createSession();
     const clip = await insertUnit(sess, { capturedAtS: 60, requestedAtS: 62, label: "clip" });
     const flush = await insertUnit(sess, { capturedAtS: 130, requestedAtS: 131, format: "jpeg", label: "flush" });
 
     const rows = await sampleUnits(sess);
     expect(rows.map((r) => r.id)).toEqual([clip, flush]);
+  });
+
+  it("a session of nothing but flushes keeps them", async () => {
+    // Start, pause immediately, seed confirm never landed. Same escape as
+    // dropSeedUnit's single-unit case — a rough video beats a failed one.
+    const sess = await createSession();
+    const only = await insertUnit(sess, {
+      capturedAtS: 12, requestedAtS: 13, format: "jpeg", isFinal: true, label: "flush",
+    });
+
+    const rows = await sampleUnits(sess);
+    expect(rows.map((r) => r.id)).toEqual([only]);
   });
 
   it("legacy rows without captured_at keep arrival-based buckets", async () => {
