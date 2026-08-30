@@ -176,8 +176,8 @@ footer a:hover { color: var(--fg); text-decoration: none; }
       <img src="https://lookout.hackclub.com/icon.png" alt="" width="44" height="44">
       <h1>Lookout package repositories</h1>
     </div>
-    <p class="sub" style="margin-top:0">Install Lookout with your package manager, and let it keep the app up to date.</p>
-    <div class="meta"><span class="pill">v@VERSION@</span><span>latest release</span></div>
+    <p class="sub" style="margin-top:0">Install Lookout with your package manager.</p>
+    <div class="meta"><span class="pill">v@VERSION@</span></div>
   </header>
 
   <div class="tabs">
@@ -237,7 +237,6 @@ EOF</pre></div></div>
       <div class="panel p-arch">
         <div class="step">
           <h2>Install from the AUR</h2>
-          <p class="hint">No repository to add — <code>paru -Syu</code> updates it with everything else.</p>
           <div class="cmd"><div class="scroll"><pre>paru -S lookout-bin</pre></div></div>
         </div>
       </div>
@@ -246,7 +245,6 @@ EOF</pre></div></div>
 
   <div class="fp">
     <h2>Signing key</h2>
-    <p class="hint">Both repositories are signed by one key. Check it before you trust it.</p>
     <code>@FINGERPRINT@</code>
   </div>
 
