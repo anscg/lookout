@@ -202,6 +202,21 @@ jobs:
               --local-user "$SIGNING_FPR" --detach-sign --armor repo/rpm/repodata/repomd.xml
           echo "dnf repository built"
 
+      - name: Render the homepage
+        run: |
+          set -euo pipefail
+          # The root would 404 otherwise, which is the first thing anyone
+          # pasting the hostname sees.
+          version=$(grep -m1 '^Version:' repo/deb/Packages | awk '{print $2}')
+          fpr=$(gpg --fingerprint --with-colons "$SIGNING_FPR" \
+                | awk -F: '/^fpr:/ {print $10; exit}' \
+                | sed 's/.\{4\}/& /g; s/ $//')
+          sed -e "s/@VERSION@/$version/g" -e "s/@FINGERPRINT@/$fpr/g" \
+            packaging/pkg-site/index.html > repo/index.html
+          grep -q '@VERSION@\|@FINGERPRINT@' repo/index.html \
+            && { echo "::error::unsubstituted placeholder left in the homepage" >&2; exit 1; } || true
+          echo "homepage rendered for $version"
+
       - name: Add Pages metadata
         run: |
           echo pkg.lookout.hackclub.com > repo/CNAME

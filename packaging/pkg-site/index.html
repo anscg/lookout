@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light only">
+<link rel="icon" href="https://lookout.hackclub.com/icon.png">
+<title>Lookout package repositories</title>
+<meta name="description" content="apt, dnf and AUR packages for the Lookout desktop app.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #fff;
+  --fg: #16181d;
+  --muted: #6b7280;
+  --faint: #9ca3af;
+  --line: #e8eaed;
+  --code-bg: #f7f8f9;
+  --accent: #2563eb;
+  --radius: 10px;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  font-feature-settings: "cv05" 1, "cv08" 1, "ss03" 1;
+  -webkit-font-smoothing: antialiased;
+}
+@supports (font-variation-settings: normal) {
+  body { font-family: "Inter var", Inter, -apple-system, sans-serif; }
+}
+.wrap { padding: 64px 56px 96px; }
+header { margin-bottom: 48px; }
+.brand { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.brand img { width: 44px; height: 44px; border-radius: 10px; display: block; }
+h1 {
+  margin: 0;
+  font-size: 27px;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+}
+.sub { margin: 0; color: var(--muted); font-size: 15px; }
+.meta {
+  margin-top: 18px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+.pill {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+}
+h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.hint { margin: 0 0 14px; color: var(--muted); font-size: 13.5px; }
+.tabs { border-top: 1px solid var(--line); padding-top: 32px; }
+.tabs input { position: absolute; opacity: 0; pointer-events: none; }
+.bar {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 3px;
+  width: fit-content;
+}
+.bar label {
+  padding: 5px 14px;
+  border-radius: 7px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .12s, background .12s;
+}
+.bar label:hover { color: var(--fg); }
+.panel { display: none; }
+#deb:checked ~ .bar label[for=deb],
+#rpm:checked ~ .bar label[for=rpm],
+#arch:checked ~ .bar label[for=arch] { background: var(--code-bg); color: var(--fg); }
+#deb:checked ~ .panels .p-deb,
+#rpm:checked ~ .panels .p-rpm,
+#arch:checked ~ .panels .p-arch { display: block; }
+.step { margin-bottom: 26px; }
+.cmd {
+  position: relative;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+/* The scroller is inside, so the copy button stays pinned instead of sliding
+   away with a long command. */
+.cmd .scroll {
+  overflow-x: auto;
+  padding: 13px 46px 13px 15px;
+}
+.cmd pre {
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.75;
+  white-space: pre;
+  color: var(--fg);
+}
+.copy {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  /* Opaque, so a long line scrolls behind it rather than through it. */
+  background: var(--code-bg);
+  color: var(--faint);
+  cursor: pointer;
+  font: inherit;
+  transition: color .12s, border-color .12s;
+}
+.copy:hover { color: var(--fg); border-color: var(--line); }
+.copy svg { width: 14px; height: 14px; display: block; }
+.copy .tick { display: none; }
+.copy.done { color: var(--accent); }
+.copy.done .tick { display: block; }
+.copy.done .sheet { display: none; }
+footer {
+  margin-top: 56px;
+  padding-top: 26px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  font-size: 13.5px;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+footer a { color: var(--muted); }
+footer a:hover { color: var(--fg); text-decoration: none; }
+.fp {
+  margin-top: 40px;
+  padding-top: 26px;
+  border-top: 1px solid var(--line);
+}
+.fp code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <img src="https://lookout.hackclub.com/icon.png" alt="" width="44" height="44">
+      <h1>Lookout package repositories</h1>
+    </div>
+    <p class="sub" style="margin-top:0">Install Lookout with your package manager, and let it keep the app up to date.</p>
+    <div class="meta"><span class="pill">v@VERSION@</span><span>latest release</span></div>
+  </header>
+
+  <div class="tabs">
+    <input type="radio" name="os" id="deb" checked>
+    <input type="radio" name="os" id="rpm">
+    <input type="radio" name="os" id="arch">
+
+    <div class="bar">
+      <label for="deb">Debian &amp; Ubuntu</label>
+      <label for="rpm">Fedora &amp; RHEL</label>
+      <label for="arch">Arch</label>
+    </div>
+
+    <div class="panels">
+      <div class="panel p-deb">
+        <div class="step">
+          <h2>Add the repository</h2>
+          <p class="hint">Needs Ubuntu 24.04 or Debian 13 and up.</p>
+          <div class="cmd"><div class="scroll"><pre>sudo install -d /usr/share/keyrings
+sudo curl -fsSL -o /usr/share/keyrings/lookout-archive-keyring.asc \
+  https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+
+sudo tee /etc/apt/sources.list.d/lookout.sources >/dev/null &lt;&lt;'EOF'
+Types: deb
+URIs: https://pkg.lookout.hackclub.com/deb
+Suites: ./
+Signed-By: /usr/share/keyrings/lookout-archive-keyring.asc
+EOF</pre></div></div>
+        </div>
+        <div class="step">
+          <h2>Install</h2>
+          <div class="cmd"><div class="scroll"><pre>sudo apt update &amp;&amp; sudo apt install lookout</pre></div></div>
+        </div>
+      </div>
+
+      <div class="panel p-rpm">
+        <div class="step">
+          <h2>Add the repository</h2>
+          <div class="cmd"><div class="scroll"><pre>sudo rpm --import https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+
+sudo tee /etc/yum.repos.d/lookout.repo >/dev/null &lt;&lt;'EOF'
+[lookout]
+name=Lookout
+baseurl=https://pkg.lookout.hackclub.com/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+EOF</pre></div></div>
+        </div>
+        <div class="step">
+          <h2>Install</h2>
+          <div class="cmd"><div class="scroll"><pre>sudo dnf install lookout</pre></div></div>
+        </div>
+      </div>
+
+      <div class="panel p-arch">
+        <div class="step">
+          <h2>Install from the AUR</h2>
+          <p class="hint">No repository to add — <code>paru -Syu</code> updates it with everything else.</p>
+          <div class="cmd"><div class="scroll"><pre>paru -S lookout-bin</pre></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fp">
+    <h2>Signing key</h2>
+    <p class="hint">Both repositories are signed by one key. Check it before you trust it.</p>
+    <code>@FINGERPRINT@</code>
+  </div>
+
+  <footer>
+    <a href="https://lookout.hackclub.com">Lookout</a>
+    <a href="https://github.com/hackclub/lookout">Source</a>
+    <a href="https://github.com/hackclub/lookout/releases">All downloads</a>
+    <a href="https://hackclub.com/privacy-and-terms">Privacy &amp; terms</a>
+  </footer>
+</div>
+<script>
+document.querySelectorAll('.cmd').forEach(function (box) {
+  var b = document.createElement('button');
+  b.className = 'copy';
+  b.type = 'button';
+  b.setAttribute('aria-label', 'Copy to clipboard');
+  b.innerHTML = '<svg class="sheet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
+            + '<svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  b.addEventListener('click', function () {
+    navigator.clipboard.writeText(box.querySelector('pre').textContent).then(function () {
+      b.classList.add('done');
+      setTimeout(function () { b.classList.remove('done'); }, 1500);
+    });
+  });
+  box.appendChild(b);
+});
+</script>
+</body>
+</html>
