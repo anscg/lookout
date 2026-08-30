@@ -5,10 +5,10 @@ import { isLinux } from "../platform.js";
 
 /**
  * DOM replica of the macOS native add menu (AddMenu.swift) for Windows/Linux,
- * where a SwiftUI NSPanel isn't available. Same look: translucent blurred
- * panel anchored under the + button, fling-in spring scaled from the top-right,
- * hover/arrow-key selection, Escape or click-away to dismiss. The visual
- * constants mirror the Swift file — update both together.
+ * where a SwiftUI NSPanel isn't available. Same look: a panel anchored under
+ * the + button, fling-in spring scaled from the top-right, hover/arrow-key
+ * selection, Escape or click-away to dismiss. The visual constants mirror the
+ * Swift file — update both together, apart from the material (see below).
  *
  * Linux dresses differently: a GTK popover is an elevated solid panel with
  * a tail pointing back at its anchor, a quiet shadow and roomy 32px rows —
@@ -249,11 +249,11 @@ export function AddMenuPopup({ items, anchor, onSelect }: AddMenuPopupProps) {
           : {
               borderRadius: 14,
               border: `1px solid color-mix(in srgb, ${colors.text.primary} 12%, transparent)`,
-              // Opaque enough that content behind never ghosts through — the
-              // backdrop blur only reads as a soft material at the edges.
-              background: `color-mix(in srgb, ${colors.bg.panel} 86%, transparent)`,
-              backdropFilter: "blur(32px) saturate(1.7)",
-              WebkitBackdropFilter: "blur(32px) saturate(1.7)",
+              // Solid, unlike the Swift file's translucent material: Mica
+              // sits behind a transparent page here, so a backdrop blur has
+              // nothing to soften and translucency just shows the wallpaper
+              // through. Filling it in is what makes it read as a menu.
+              background: colors.bg.panel,
               boxShadow: "0 6px 32px rgba(0, 0, 0, 0.28)",
             }),
         // A GTK popover grows out of its tail — that's the point it's
