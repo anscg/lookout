@@ -45,6 +45,26 @@ case "$(uname -m)" in
   *) die "No packages for $(uname -m). See $RELEASES" ;;
 esac
 
+osr() { [ -r /etc/os-release ] && sed -n "s/^$1=//p" /etc/os-release | tr -d '\"' | head -1; }
+
+# Immutable systems have a package manager that looks usable and isn't: the
+# root filesystem is read-only, or writes land in an overlay a reboot throws
+# away. Better to say so than to half-install and look like it worked.
+if [ -e /run/ostree-booted ]; then
+  die "$(osr NAME) is an ostree system, where packages are layered with
+rpm-ostree rather than installed. Lookout has no build for that yet.
+See $RELEASES"
+fi
+case "$(osr ID)" in
+  steamos)
+    die "SteamOS keeps its root filesystem read-only, so an installed package
+is wiped by the next system update. Lookout has no build for that yet.
+See $RELEASES" ;;
+  ubuntu-core)
+    die "Ubuntu Core installs snaps only. Lookout has no snap yet.
+See $RELEASES" ;;
+esac
+
 # Ordered so a machine with more than one of these gets its primary. Fedora
 # still ships yum as a symlink, and openSUSE has rpm without dnf.
 if   have apt-get; then MGR=apt;    PKG=lookout
