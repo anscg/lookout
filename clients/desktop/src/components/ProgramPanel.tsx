@@ -4,6 +4,7 @@ import { motion } from "motion/react";
 import { WarningCircleIcon, XIcon } from "@phosphor-icons/react";
 import { Button, Spinner, colors, spacing, fontSize, fontWeight, radii } from "@lookout/react";
 import { invoke } from "../logger.js";
+import { backdropFill } from "../backdrop.js";
 import {
   PANEL_HEIGHT_SLACK,
   PANEL_LOAD_TIMEOUT_MS,
@@ -304,7 +305,7 @@ export function ProgramPanel({
           style={{
             position: "absolute",
             inset: 0,
-            background: colors.bg.backdrop,
+            background: backdropFill,
             zIndex: 1,
             pointerEvents: "auto",
           }}
