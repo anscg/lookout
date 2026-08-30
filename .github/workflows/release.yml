@@ -115,12 +115,84 @@ jobs:
           fi
           echo "OK: the package will ship a repository key"
 
+      # Smart App Control evaluates every PE image it loads, not just the one
+      # the user double-clicked. Signing target/release/bundle AFTER the build
+      # only ever reached the NSIS installer -- the app binary was already
+      # sealed inside the archive, unsigned, so Windows blocked it on launch
+      # with "we could not verify its publisher". That shipped in 0.3.11.
+      #
+      # bundle.windows.signCommand fixes the ordering: tauri-bundler signs the
+      # app binary and any sidecar BEFORE they go into the archive, then signs
+      # the installer it produces, then writes the updater .sig over the final
+      # signed bytes. A non-zero exit from the command fails the build.
+      #
+      # The config is generated here rather than committed so a plain
+      # `tauri build` on a dev machine -- which has no signing credentials --
+      # keeps working untouched.
+      - name: Configure Windows code signing
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install artifact-signing-cli --version 0.11.0 --locked
+          command -v artifact-signing-cli >/dev/null || {
+            echo "::error::artifact-signing-cli installed but is not on PATH." >&2
+            exit 1
+          }
+
+          # artifact-signing-cli defaults --signtool-path to one hardcoded SDK
+          # version. Resolve whatever this runner actually ships instead, so a
+          # runner image update cannot silently break signing.
+          signtool=$(find "/c/Program Files (x86)/Windows Kits/10/bin" \
+            -name signtool.exe -path '*/x64/*' 2>/dev/null | sort -V | tail -1)
+          if [ -z "$signtool" ]; then
+            echo "::error::No x64 signtool.exe found under the Windows 10 SDK. artifact-signing-cli would fall back to a hardcoded path that does not exist on this runner." >&2
+            exit 1
+          fi
+
+          # find returns an MSYS path (/c/...). MSYS rewrites those on the way
+          # into a native exe, but this one is written to a JSON file that
+          # tauri reads from pwsh, where no rewriting happens -- so convert it
+          # here. -m gives C:/... rather than C:\..., which Windows accepts and
+          # which needs no escaping to survive the JSON below.
+          command -v cygpath >/dev/null || {
+            echo "::error::cygpath is unavailable, so the signtool path cannot be made native." >&2
+            exit 1
+          }
+          signtool=$(cygpath -m "$signtool")
+          test -f "$signtool"
+          echo "using signtool: $signtool"
+
+          cat > "$GITHUB_WORKSPACE/clients/desktop/src-tauri/tauri.signing.conf.json" <<CONFEOF
+          {
+            "bundle": {
+              "windows": {
+                "signCommand": {
+                  "cmd": "artifact-signing-cli",
+                  "args": [
+                    "-e", "https://eus.codesigning.azure.net",
+                    "-a", "hackclub",
+                    "-c", "hackatime-desktop",
+                    "--signtool-path", "$signtool",
+                    "%1"
+                  ]
+                }
+              }
+            }
+          }
+          CONFEOF
+          cat "$GITHUB_WORKSPACE/clients/desktop/src-tauri/tauri.signing.conf.json"
+
       - name: Build app (with signing)
         if: startsWith(github.ref, 'refs/tags/v')
-        run: npm run tauri build -- ${{ matrix.args }}
+        run: npm run tauri build -- ${{ matrix.args }} ${{ runner.os == 'Windows' && format('--config {0}/clients/desktop/src-tauri/tauri.signing.conf.json', github.workspace) || '' }}
         working-directory: clients/desktop
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Read by artifact-signing-cli via bundle.windows.signCommand.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -321,46 +393,59 @@ jobs:
             done
           fi
 
-      - name: Sign Windows binaries with Trusted Signing
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows' && !contains(matrix.args, 'aarch64')
-        uses: azure/trusted-signing-action@v1.1.0
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: https://eus.codesigning.azure.net/
-          trusted-signing-account-name: hackclub
-          certificate-profile-name: hackatime-desktop
-          files-folder: ${{ github.workspace }}/clients/desktop/src-tauri/target/release/bundle
-          files-folder-filter: msi,exe
-          files-folder-recurse: true
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
+      # 0.3.11 shipped a signed installer wrapped around an UNSIGNED app
+      # binary, and nothing in this pipeline noticed. The installer carrying a
+      # signature says nothing about its payload, so reach inside the archive
+      # and assert every executable it will drop on disk is signed too.
+      - name: Verify the installer and its payload are signed
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        shell: bash
+        working-directory: clients/desktop
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          signtool=$(find "/c/Program Files (x86)/Windows Kits/10/bin" \
+            -name signtool.exe -path '*/x64/*' 2>/dev/null | sort -V | tail -1)
+          test -n "$signtool"
 
-      - name: Sign Windows ARM binaries with Trusted Signing
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows' && contains(matrix.args, 'aarch64')
-        uses: azure/trusted-signing-action@v1.1.0
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: https://eus.codesigning.azure.net/
-          trusted-signing-account-name: hackclub
-          certificate-profile-name: hackatime-desktop
-          files-folder: ${{ github.workspace }}/clients/desktop/src-tauri/target/aarch64-pc-windows-msvc/release/bundle
-          files-folder-filter: msi,exe
-          files-folder-recurse: true
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
+          checked=0
+          for exe in \
+            src-tauri/target/release/bundle/nsis/*-setup.exe \
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*-setup.exe; do
+            echo "=== installer: $exe"
+            # Double slashes keep Git Bash from mangling the flags into paths.
+            "$signtool" verify //pa //v "$exe"
 
-      # Authenticode signing above rewrites the .exe bytes, which invalidates
-      # the updater .sig that `tauri build` generated over the unsigned exe.
-      # Regenerate the .sig against the final signed installer so it matches
-      # what we upload — otherwise the updater's signature check fails on the
-      # client and auto-update is rejected even though the download succeeds.
-      - name: Regenerate updater signatures (Windows, after Authenticode signing)
+            payload=$(mktemp -d)
+            7z x -y -o"$payload" "$exe" > /dev/null
+            # Names are read back OUT of the archive rather than assumed, so a
+            # mainBinaryName change cannot make this pass vacuously. The NSIS
+            # plugin DLLs in $PLUGINSDIR are stock and never ours to sign.
+            inner=$(find "$payload" -name '*.exe' -not -path '*PLUGINSDIR*')
+            if [ -z "$inner" ]; then
+              echo "::error::$exe has no payload executable. The bundle layout changed and this check can no longer prove anything." >&2
+              exit 1
+            fi
+            while read -r f; do
+              echo "--- payload: $(basename "$f")"
+              "$signtool" verify //pa "$f"
+              checked=$((checked + 1))
+            done <<< "$inner"
+            rm -rf "$payload"
+          done
+
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::No NSIS installer matched. Windows artifacts went unverified -- check the bundle path before releasing." >&2
+            exit 1
+          fi
+          echo "OK: installer and $checked payload executable(s) carry a valid signature"
+
+      # signCommand now signs the installer DURING bundling, so the .sig the
+      # bundler writes afterwards already covers the final bytes. This step is
+      # kept as a backstop: it re-signs over whatever is on disk, so if that
+      # ordering ever changes the uploaded .sig still matches the uploaded exe
+      # and auto-update keeps verifying. Re-signing identical bytes is a no-op.
+      - name: Regenerate updater signatures (Windows)
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
         shell: bash
         working-directory: clients/desktop
