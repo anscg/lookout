@@ -78,6 +78,11 @@
       },
       "rpm": {
         "desktopTemplate": "./linux/lookout.desktop",
+        "postInstallScript": "./linux/rpm-postinst.sh",
+        "postRemoveScript": "./linux/rpm-postrm.sh",
+        "files": {
+          "/usr/share/lookout/lookout-archive-keyring.asc": "linux/lookout-archive-keyring.asc"
+        },
         "depends": [
           "pipewire-gstreamer",
           "gstreamer1-plugins-base",

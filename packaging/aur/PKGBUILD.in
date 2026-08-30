@@ -1,0 +1,46 @@
+# Maintainer: Hack Club <lookout@hackclub.com>
+#
+# Generated from PKGBUILD.in by .github/workflows/aur.yml -- edit the template,
+# not the copy pushed to the AUR.
+pkgname=lookout-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Time tracking via periodic screenshots, for Hack Club programs"
+arch=('x86_64' 'aarch64')
+url="https://github.com/hackclub/lookout"
+license=('MIT')
+provides=('lookout')
+conflicts=('lookout')
+options=('!strip' '!debug')
+
+# webkit2gtk-4.1 lists the GStreamer plugins as optdepends, so pacman never
+# pulls them in -- but without them WebKitGTK has no demuxer and no H.264
+# decoder, and the first video the app loads has nothing to play it. pacman has
+# no "recommends", so what the .deb only recommends is a hard dependency here
+# or it is nothing at all.
+depends=('webkit2gtk-4.1' 'gtk3' 'libappindicator-gtk3' 'gstreamer'
+         'gst-plugins-base' 'gst-plugins-good' 'gst-plugins-bad'
+         'gst-plugins-ugly' 'gst-libav' 'gst-plugin-pipewire')
+
+source_x86_64=("$pkgname-$pkgver-x86_64.deb::$url/releases/download/v$pkgver/Lookout_linux-${pkgver}_amd64.deb")
+source_aarch64=("$pkgname-$pkgver-aarch64.deb::$url/releases/download/v$pkgver/Lookout_linux-${pkgver}_arm64.deb")
+sha256sums_x86_64=('@SHA256_X86_64@')
+sha256sums_aarch64=('@SHA256_AARCH64@')
+
+package() {
+  tar -xf data.tar.gz -C "$pkgdir" 2>/dev/null || tar -xf data.tar.xz -C "$pkgdir"
+
+  # The .deb enrolls Debian machines in an apt repository on install. That
+  # would be nonsense here -- pacman owns updates on Arch -- and the packaged
+  # key is only there to serve it.
+  rm -rf "$pkgdir/usr/share/lookout"
+  rmdir "$pkgdir/usr/share" 2>/dev/null || true
+
+  install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
+  ln -sf /usr/share/doc/lookout/copyright "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+
+  # The old binary name, kept working the way the .deb's postinst keeps it.
+  install -dm755 "$pkgdir/usr/bin"
+  [ -e "$pkgdir/usr/bin/lookout" ] && ln -sf lookout "$pkgdir/usr/bin/lookout-desktop"
+  true
+}

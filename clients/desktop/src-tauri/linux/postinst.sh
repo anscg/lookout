@@ -3,7 +3,7 @@
 # updater is deliberately off on Linux, so this is how Linux users get updates.
 set -e
 
-REPO_URL="https://apt.lookout.hackclub.com"
+REPO_URL="https://pkg.lookout.hackclub.com/deb"
 PACKAGED_KEY="/usr/share/lookout/lookout-archive-keyring.asc"
 # Copied out rather than shipped at this path directly: if dpkg owned it,
 # `apt remove` would delete it and leave a sources file apt can't verify.

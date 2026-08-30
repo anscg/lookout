@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Generates the signing key for apt.lookout.hackclub.com. Run once.
+# Generates the signing key for pkg.lookout.hackclub.com, which signs both the
+# apt and dnf repositories. Run once.
 #
 # Rotating later is painful: enrolled machines have the old public half pinned
 # on disk and only learn a new one from a newer .deb, which they'd have to fetch

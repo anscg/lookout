@@ -1,10 +1,15 @@
-name: Publish apt repository
+name: Publish package repositories
 
-# Publishes the flat apt repository at apt.lookout.hackclub.com to Pages.
+# Publishes both repositories to pkg.lookout.hackclub.com via Pages:
+#   /deb  flat apt repository
+#   /rpm  dnf repository
 #
-# Sources every .deb from the GitHub releases rather than from a build, so it
-# runs in a couple of minutes and can be fired by hand at any time -- getting
-# the repository up, or repairing it, does not require cutting a tag.
+# Sources every package from the GitHub releases rather than from a build, so
+# it runs in a couple of minutes and can be fired by hand at any time --
+# getting a repository up, or repairing one, does not require cutting a tag.
+#
+# A Pages deploy replaces the whole site, so both repositories are rebuilt
+# every run. They cannot be published independently.
 
 on:
   workflow_dispatch:
@@ -20,7 +25,7 @@ on:
         type: string
 
 concurrency:
-  group: apt-pages
+  group: pkg-pages
   cancel-in-progress: false
 
 jobs:
@@ -41,7 +46,7 @@ jobs:
       - name: Install repository tooling
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils createrepo-c rpm
 
       - name: Import the signing key
         env:
@@ -60,20 +65,25 @@ jobs:
           echo "SIGNING_FPR=$fpr" >> "$GITHUB_ENV"
           echo "signing with $fpr"
 
-      - name: Collect .debs from the releases
+      - name: Collect packages from the releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          mkdir -p repo/pool
+          mkdir -p repo/deb/pool repo/rpm
+
+          grab() {
+            gh release download "$1" --dir repo/deb/pool --pattern '*.deb' --clobber || return 1
+            gh release download "$1" --dir repo/rpm --pattern '*.rpm' --clobber || true
+          }
 
           # A tag passed in is taken even if its release is still a draft --
-          # release.yml creates drafts, and the repository has to advertise the
-          # version that was just built.
+          # release.yml creates drafts, and the repositories have to advertise
+          # the version that was just built.
           if [ -n "${TAG:-}" ]; then
             echo "including $TAG"
-            gh release download "$TAG" --dir repo/pool --pattern '*.deb' --clobber
+            grab "$TAG"
           fi
 
           # Older versions stay in the pool so that an index someone cached
@@ -84,16 +94,15 @@ jobs:
           gh release list --limit 50 --exclude-drafts --json tagName -q '.[].tagName' \
             | grep -v "^${TAG:-}$" | head -n "$want" | while read -r t; do
                 echo "including $t"
-                gh release download "$t" --dir repo/pool --pattern '*.deb' --clobber \
-                  || echo "  (no .deb assets on $t -- skipping)"
+                grab "$t" || echo "  (no .deb assets on $t -- skipping)"
               done
 
-          if [ -z "$(ls -A repo/pool)" ]; then
+          if [ -z "$(ls -A repo/deb/pool)" ]; then
             echo "::error::No .deb assets found on any release -- nothing to publish." >&2
             exit 1
           fi
-          echo "pool is $(du -sh repo/pool | cut -f1) across $(ls repo/pool | wc -l) files"
-          ls repo/pool
+          echo "deb pool: $(ls repo/deb/pool | wc -l) files, $(du -sh repo/deb/pool | cut -f1)"
+          echo "rpm pool: $(ls repo/rpm | wc -l) files, $(du -sh repo/rpm | cut -f1)"
 
       # Signing with a key whose public half isn't the one a .deb installs makes
       # every enrolled machine fail apt update with NO_PUBKEY, and the fix can't
@@ -103,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           checked=0
-          for deb in repo/pool/*.deb; do
+          for deb in repo/deb/pool/*.deb; do
             if ! dpkg-deb --fsys-tarfile "$deb" \
                  | tar -xO ./usr/share/lookout/lookout-archive-keyring.asc > shipped.asc 2>/dev/null; then
               echo "$(basename "$deb"): no keyring (predates enrollment) -- skipped"
@@ -119,10 +128,10 @@ jobs:
           done
           echo "$checked package(s) carried a keyring, all matching"
 
-      - name: Build the flat repository
+      - name: Build the apt repository
         run: |
           set -euo pipefail
-          cd repo
+          cd repo/deb
           # One index for every arch and kept version; apt filters on each
           # entry's Architecture and picks the highest Version.
           dpkg-scanpackages --multiversion pool > Packages
@@ -138,12 +147,12 @@ jobs:
           echo "--- Release ---"; cat Release
           echo "--- indexed ---"; grep -E '^(Package|Version|Architecture|Filename):' Packages
 
-      - name: Sign the index
+      - name: Sign the apt index
         env:
           APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
-          cd repo
+          cd repo/deb
           # InRelease is what modern apt fetches; Release.gpg for older clients.
           gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" \
               --local-user "$SIGNING_FPR" --clearsign -o InRelease Release
@@ -155,11 +164,50 @@ jobs:
           GNUPGHOME=verify gpg --batch --quiet --import pub.asc
           GNUPGHOME=verify gpg --batch --verify InRelease
           rm -rf verify pub.asc
-          cp ../clients/desktop/src-tauri/linux/lookout-archive-keyring.asc .
+
+      # dnf checks signatures on the packages themselves, not only on the
+      # metadata, so gpgcheck=1 in the .repo file needs every rpm signed. They
+      # arrive off the releases unsigned.
+      - name: Sign the rpms and build the dnf repository
+        env:
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(ls -A repo/rpm)" ]; then
+            echo "no .rpm assets on any release -- publishing the apt repository only"
+            rmdir repo/rpm
+            exit 0
+          fi
+          pass=$(mktemp); printf '%s' "$APT_GPG_PASSPHRASE" > "$pass"
+          trap 'shred -u "$pass" 2>/dev/null || rm -f "$pass"' EXIT
+          rpmsign \
+            --define "_gpg_name $SIGNING_FPR" \
+            --define "_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase-file $pass" \
+            --addsign repo/rpm/*.rpm
+
+          # Read the signature back with only the public half, the way a
+          # client does -- rpmsign reports success on things dnf then rejects.
+          gpg --batch --armor --export "$SIGNING_FPR" > pub.asc
+          rpmkeys --import pub.asc
+          for r in repo/rpm/*.rpm; do
+            rpmkeys --checksig "$r" | grep -q "signatures OK" \
+              || { echo "::error::$(basename "$r") is not verifiably signed" >&2; exit 1; }
+          done
+          rm pub.asc
+          echo "signed and verified $(ls repo/rpm/*.rpm | wc -l) rpm(s)"
+
+          createrepo_c --quiet repo/rpm
+          # repo_gpgcheck=1 verifies this detached signature over the metadata.
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" \
+              --local-user "$SIGNING_FPR" --detach-sign --armor repo/rpm/repodata/repomd.xml
+          echo "dnf repository built"
 
       - name: Add Pages metadata
         run: |
-          echo apt.lookout.hackclub.com > repo/CNAME
+          echo pkg.lookout.hackclub.com > repo/CNAME
+          # One key signs both repositories; served at the root so the install
+          # docs have a single URL to point at.
+          cp clients/desktop/src-tauri/linux/lookout-archive-keyring.asc repo/
           # Redundant for an Actions deploy, which serves files as-is; kept in
           # case the Pages source is ever switched back to a branch.
           touch repo/.nojekyll

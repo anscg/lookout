@@ -12,7 +12,10 @@ const DISMISSED_KEY = "lookout_update_nag_dismissed";
 
 interface LinuxInstall {
   manager: "apt" | "rpm" | "pacman" | "unknown";
+  /** Whether our repository is configured for that manager. */
   enrolled: boolean;
+  /** The AUR helper found on PATH, when the manager is pacman. */
+  helper: string | null;
 }
 
 export interface LinuxUpdate {
@@ -35,27 +38,43 @@ function compareVersions(a: string, b: string): number {
 }
 
 /**
- * Only apt has a repository behind it. Printing `dnf upgrade lookout` to a
- * Fedora user would be a command that fails, which is worse than sending them
- * to the releases page — so everyone else gets the page.
+ * A command is only printed where one will actually work. apt and dnf machines
+ * are enrolled by the package they installed; Arch comes from the AUR, so the
+ * helper is whichever one they have.
  */
 function instructionsFor(install: LinuxInstall): Pick<LinuxUpdate, "command" | "fallback"> {
-  if (install.manager === "apt" && install.enrolled) {
-    return { command: "sudo apt update && sudo apt install lookout", fallback: null };
-  }
   if (install.manager === "apt") {
+    if (install.enrolled) {
+      return { command: "sudo apt update && sudo apt install lookout", fallback: null };
+    }
     // dpkg owns it but nothing enrolled this machine — an older .deb, installed
     // before the package added the repository. `apt install` has no candidate.
     return {
       command: null,
-      fallback: "This copy was installed before Lookout had an apt repository. Download the latest .deb once and every update after it arrives through apt.",
+      fallback:
+        "This copy was installed before Lookout had an apt repository. Download the latest .deb once, and every update after it arrives through apt.",
     };
   }
   if (install.manager === "rpm") {
-    return { command: null, fallback: "Download the latest .rpm to update." };
+    if (install.enrolled) {
+      return { command: "sudo dnf upgrade lookout", fallback: null };
+    }
+    return {
+      command: null,
+      fallback:
+        "This copy was installed before Lookout had a dnf repository. Download the latest .rpm once, and every update after it arrives through dnf.",
+    };
   }
   if (install.manager === "pacman") {
-    return { command: null, fallback: "Download the latest package to update." };
+    // Whichever AUR helper is installed. Plain pacman can't build from the AUR,
+    // so someone with neither gets the manual route rather than a dead command.
+    if (install.helper) {
+      return { command: `${install.helper} -S lookout-bin`, fallback: null };
+    }
+    return {
+      command: null,
+      fallback: "Rebuild lookout-bin from the AUR to update, or download the latest package.",
+    };
   }
   return { command: null, fallback: "Download the latest version to update." };
 }

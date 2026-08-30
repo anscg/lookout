@@ -1,153 +1,191 @@
 # Lookout on Linux
 
-## Updates come from apt, not from the app
+## Updates come from your package manager
 
 The in-app updater is off on Linux on purpose — `latest.json` lists macOS and
 Windows only, so `check()` never finds anything. A package installed by a
 package manager should be updated by that package manager, not by the app
 reaching for `pkexec`.
 
-Instead the `.deb` enrolls the machine in Lookout's apt repository as it
-installs, the same way Chrome's package does, and `apt upgrade` takes it from
-there. Installing the `.deb` from the releases page is all you need to do.
+So each package enrols the machine in the right repository as it installs, the
+way Chrome's does, and normal system updates carry you forward. Installing from
+the releases page is all you need to do.
 
-## Install
+If a newer version is out and you haven't taken it, the app says so and shows
+the exact command for however you installed — it detects that rather than
+guessing.
+
+## Debian and Ubuntu
 
 ```bash
 sudo apt install ./Lookout_linux-*_amd64.deb
 ```
 
 `apt install ./file.deb` rather than `dpkg -i` — Lookout depends on several
-GStreamer packages for screen capture and encoding, and only apt will pull
-them in.
+GStreamer packages for capture and encoding, and only apt will pull them in.
 
-That install writes `/etc/apt/sources.list.d/lookout.sources` and
-`/usr/share/keyrings/lookout-archive-keyring.asc`. Every later version arrives
-through `apt upgrade`.
+That writes `/etc/apt/sources.list.d/lookout.sources`, and every later version
+arrives through `apt upgrade`.
 
 ### Adding the repository by hand
-
-If you would rather enroll first and install from the repository:
 
 ```bash
 sudo install -d /usr/share/keyrings
 sudo curl -fsSL -o /usr/share/keyrings/lookout-archive-keyring.asc \
-  https://apt.lookout.hackclub.com/lookout-archive-keyring.asc
+  https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
 ```
 
-Check the key before trusting it — compare this fingerprint against the one
-published wherever you got this document:
+Check the key before trusting it:
 
 ```bash
 gpg --show-keys --with-fingerprint /usr/share/keyrings/lookout-archive-keyring.asc
 ```
 
-Then:
-
 ```bash
 sudo tee /etc/apt/sources.list.d/lookout.sources >/dev/null <<'EOF'
 Types: deb
-URIs: https://apt.lookout.hackclub.com
+URIs: https://pkg.lookout.hackclub.com/deb
 Suites: ./
 Signed-By: /usr/share/keyrings/lookout-archive-keyring.asc
 EOF
 sudo apt update && sudo apt install lookout
 ```
 
-amd64 and arm64 are both published.
+Requires Ubuntu 24.04+ or Debian 13+ — the package declares `libc6 (>= 2.39)`,
+which is the glibc it is built against, so an older release refuses it cleanly
+instead of installing something that cannot start.
+
+## Fedora and RHEL
+
+```bash
+sudo dnf install ./Lookout_linux-*_x86_64.rpm
+```
+
+That writes `/etc/yum.repos.d/lookout.repo`, and `dnf upgrade` handles the
+rest. By hand:
+
+```bash
+sudo rpm --import https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+sudo tee /etc/yum.repos.d/lookout.repo >/dev/null <<'EOF'
+[lookout]
+name=Lookout
+baseurl=https://pkg.lookout.hackclub.com/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+EOF
+sudo dnf install lookout
+```
+
+## Arch
+
+```bash
+paru -S lookout-bin
+```
+
+`lookout-bin` repackages the `.deb`, so `paru -Syu` (or `yay`) updates it with
+everything else. There's no apt or dnf repository involved and nothing is
+written to your sources.
+
+## The command is `lookout`
+
+`lookout-desktop` also works — the packages symlink the old name to the new one
+so existing scripts and launchers keep working.
 
 ## Opting out of the repository
 
-Delete the sources file and it stays deleted — the package records that it has
-enrolled once and will not put the file back on a later upgrade:
+Delete the file and it stays deleted; the package will not put it back:
 
 ```bash
-sudo rm /etc/apt/sources.list.d/lookout.sources
+sudo rm /etc/apt/sources.list.d/lookout.sources   # or /etc/yum.repos.d/lookout.repo
 ```
 
-To opt out *before* installing, so the `.deb` never adds it in the first place:
+To opt out *before* installing:
 
 ```bash
 echo 'repo_add_once=false' | sudo tee /etc/default/lookout
 ```
 
-`apt purge lookout` removes the sources file, the keyring, and the marker.
+Purging removes the repository file, the key, and the marker.
 
-## Fedora, Arch, and everyone else
+## Maintaining the repositories
 
-No dnf repository or AUR package yet, so `.rpm` and `.pkg.tar.zst` from the
-[releases page](https://github.com/hackclub/lookout/releases) are manual
-installs and manual updates. The app won't prompt you.
+`pkg.lookout.hackclub.com` is one GitHub Pages site holding both:
 
-## Maintaining the repository
+| Path | What |
+| --- | --- |
+| `/deb` | flat apt repository — `Packages` and `InRelease` at that level, packages under `pool/` |
+| `/rpm` | dnf repository — `repodata/` plus the signed rpms |
+| `/lookout-archive-keyring.asc` | the public key for both |
 
-The repository is a flat one — `Packages` and `InRelease` at the site root,
-`.deb` files under `pool/` — built from scratch by the `apt` job in
-`release.yml` on every tag and deployed to GitHub Pages.
+The `packages` workflow builds both from the GitHub release assets and deploys
+them together. Pages allows one custom domain and replaces the whole site per
+deploy, which is why they share a host and cannot be published independently.
 
-A Pages deploy replaces the whole site, so `pool/` is rebuilt on every run:
-the current release comes from the build artifacts, and the previous four from
-their GitHub release assets. Keeping the last five bounds the site at roughly
-140 MB — well under the 1 GB Pages limit — and means a wiped site heals on the
-next release rather than quietly losing versions.
+It can be run by hand at any time (`workflow_dispatch`), so bringing a
+repository up or repairing an index does not need a tag. Both are rebuilt from
+scratch each run, from releases rather than from whatever is currently
+deployed, so a wiped site heals on the next run. The last five releases are
+kept, which bounds the site and keeps `apt install lookout=<version>` working —
+and means an index someone cached before a release still points at a package
+that exists.
 
-Keeping old versions matters for more than rollbacks. Someone who ran
-`apt update` before a release and `apt upgrade` after it has a cached index
-pointing at the previous `.deb`, and would hit a 404 if it disappeared. It also
-keeps pinning working:
+`aur` is separate, since the AUR is its own git host. It renders
+`packaging/aur/PKGBUILD.in` against a release and pushes `lookout-bin`.
+`.SRCINFO` is generated by `makepkg` inside an Arch container rather than
+written by hand, so it cannot drift from the PKGBUILD.
 
-```bash
-sudo apt install lookout=0.3.10
-```
+### Signing
 
-Change `KEEP` in the `apt` job to keep more or fewer.
+One key, generated once by [`scripts/apt-keygen.sh`](../scripts/apt-keygen.sh),
+signs both repositories. Its public half is committed at
+`clients/desktop/src-tauri/linux/lookout-archive-keyring.asc` on purpose: it
+ships inside the packages as the trusted key, and having it in git is what lets
+a locally built package enrol correctly.
 
-The signing key is generated once by
-[`scripts/apt-keygen.sh`](../scripts/apt-keygen.sh). Its public half lives at
-`clients/desktop/src-tauri/linux/lookout-archive-keyring.asc` and is committed
-deliberately: it ships inside the `.deb` as the `Signed-By` keyring, and
-having it in git is what lets a locally built package enroll correctly. The
-private half lives only in repository secrets.
+dnf verifies signatures on the *packages*, not just the metadata, so the
+workflow re-signs each rpm with `rpmsign` before indexing — they come off the
+releases unsigned — and then reads each signature back with only the public
+half, because `rpmsign` reports success on things dnf later rejects.
 
-Rotating that key is disruptive: an enrolled machine has the old public half
-pinned on disk and only learns a new one from a newer `.deb`, which it would
+Rotating the key is disruptive: an enrolled machine has the old public half
+pinned on disk and only learns a new one from a newer package, which it would
 have to fetch from the repository it can no longer verify. Protect the private
 key rather than rotating it.
 
-Required repository secrets — just the two, since Pages needs no credentials
-of its own:
+### Secrets
 
 | Secret | Used by |
 | --- | --- |
-| `APT_GPG_PRIVATE_KEY` | signing `InRelease` |
-| `APT_GPG_PASSPHRASE` | signing `InRelease` |
+| `APT_GPG_PRIVATE_KEY` | signing `InRelease`, `repomd.xml`, and the rpms |
+| `APT_GPG_PASSPHRASE` | the same |
+| `AUR_SSH_PRIVATE_KEY` | pushing to the AUR |
 
-### One-time Pages setup
+### One-time setup
 
-1. Settings → Pages → Source: **GitHub Actions**.
-2. Settings → Pages → Custom domain: `apt.lookout.hackclub.com`, and tick
-   Enforce HTTPS once the certificate is issued.
-3. DNS: `CNAME apt.lookout → hackclub.github.io`.
+1. Settings → Pages → Source: **GitHub Actions**; custom domain
+   `pkg.lookout.hackclub.com`, Enforce HTTPS once the certificate issues.
+2. DNS: `CNAME pkg.lookout → hackclub.github.io`.
+3. For the AUR: create the `lookout-bin` package under a Hack Club AUR account,
+   add an SSH key to it, and put the private half in `AUR_SSH_PRIVATE_KEY`. The
+   workflow pins the AUR's host key rather than trusting it on first use, so if
+   the AUR ever rotates it the push fails closed and `AUR_HOST_KEY_FPR` in
+   `aur.yml` needs updating against the published value.
 
-The workflow writes a `CNAME` file into the deploy as well, so the domain
-survives redeploys.
+Pages sets its own `Cache-Control` (10 minutes) and it can't be overridden.
+That's fine here because a deploy purges the CDN and swaps the site atomically,
+so an index and the packages it references always go live together.
 
-Note that Pages sets its own `Cache-Control` (10 minutes) and it can't be
-overridden. That's tolerable here because a deploy purges the CDN and swaps
-the site atomically, so the index and the packages it references always go
-live together.
+### Guards
 
-After the first deploy, smoke-test it on a machine that has never had the
-repository:
-
-```bash
-sudo apt update && apt-cache policy lookout
-```
-
-Two CI guards, because both failures are silent and both freeze every Linux
-user on one version:
+Three, because each failure is silent and each one freezes Linux users on one
+version:
 
 - a tagged Linux build fails if the shipped keyring is still a placeholder,
   which would ship a package that installs fine and never updates;
-- the `apt` job refuses to publish if the key inside the `.deb` isn't the key
-  signing the index, which would turn every `apt update` into `NO_PUBKEY`.
+- the publish refuses if the key inside a package isn't the key signing the
+  index, which would turn every `apt update` into `NO_PUBKEY`;
+- the clean-Ubuntu check asserts the binary is `/usr/bin/lookout` with the
+  alias beside it, since `mainBinaryName` failing to apply breaks nothing at
+  build time — it just ships a package whose command isn't the documented one.

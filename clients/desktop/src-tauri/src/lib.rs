@@ -1475,17 +1475,19 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 }
 
 /// How Lookout was installed, so the update sheet can print a command that
-/// actually works. Only apt has a repository behind it today — telling a Fedora
-/// user to run `dnf upgrade lookout` would just fail — so everyone else is sent
-/// to the releases page instead.
+/// actually works rather than a plausible one that fails.
 #[derive(serde::Serialize)]
 pub struct LinuxInstall {
     /// "apt", "rpm", "pacman", or "unknown".
     manager: String,
-    /// Whether our apt source is present. A .deb installed by hand before the
-    /// postinst existed is owned by dpkg but enrolled nowhere, and for it
-    /// `apt install lookout` finds no candidate.
+    /// Whether our repository is configured for that manager. A package
+    /// installed by hand before the postinst existed is owned by dpkg or rpm
+    /// but enrolled nowhere, and for it `apt install lookout` finds no
+    /// candidate.
     enrolled: bool,
+    /// The AUR helper on PATH, when the manager is pacman. Plain pacman cannot
+    /// build from the AUR, so without one there is no command to give.
+    helper: Option<String>,
 }
 
 #[tauri::command]
@@ -1514,14 +1516,33 @@ fn linux_install_kind() -> LinuxInstall {
             _ => "unknown",
         };
 
+        let enrolled = match manager {
+            "apt" => std::path::Path::new("/etc/apt/sources.list.d/lookout.sources").exists(),
+            "rpm" => std::path::Path::new("/etc/yum.repos.d/lookout.repo").exists(),
+            _ => false,
+        };
+
+        let helper = if manager == "pacman" {
+            ["paru", "yay"]
+                .into_iter()
+                .find(|h| {
+                    let probe = format!("command -v {h}");
+                    owns("sh", &["-c", probe.as_str()])
+                })
+                .map(str::to_string)
+        } else {
+            None
+        };
+
         LinuxInstall {
             manager: manager.into(),
-            enrolled: std::path::Path::new("/etc/apt/sources.list.d/lookout.sources").exists(),
+            enrolled,
+            helper,
         }
     }
     #[cfg(not(target_os = "linux"))]
     {
-        LinuxInstall { manager: "unknown".into(), enrolled: false }
+        LinuxInstall { manager: "unknown".into(), enrolled: false, helper: None }
     }
 }
 
