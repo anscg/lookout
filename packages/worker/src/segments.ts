@@ -68,11 +68,18 @@ export type SegmentQuality = "publish" | "preview";
 export const PREVIEW_WIDTH = 1280;
 export const PREVIEW_HEIGHT = 720;
 
-/** Scale-with-pillarbox filter for a tier. */
+/** Scale-with-pillarbox filter for a tier. The range/matrix options make
+ *  swscale convert rather than relabel — a jpeg decodes full-range BT.601, a
+ *  clip limited BT.709, and segments have to agree (SEGMENT_COLOR_ARGS).
+ *  Padding after the conversion keeps the pillarbox black at Y=16. */
 export function scaleFilter(quality: SegmentQuality = "publish"): string {
   const [w, h] =
     quality === "preview" ? [PREVIEW_WIDTH, PREVIEW_HEIGHT] : [1920, 1080];
-  return `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`;
+  return (
+    `scale=${w}:${h}:force_original_aspect_ratio=decrease` +
+    `:in_range=auto:out_range=tv:out_color_matrix=bt709` +
+    `,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`
+  );
 }
 
 /** Shared video filter: scale to 1920x1080 with pillarboxing. */
@@ -109,6 +116,13 @@ export const SEGMENT_TIMEOUT_MS = 120_000;
  *  fallback too. */
 export const ASSEMBLE_TIMEOUT_MS = 1_800_000;
 
+/** Every x264 key in one string: a second `-x264-params` replaces the first
+ *  instead of merging, so splitting these up silently drops `open-gop=0`.
+ *  colorprim/transfer are here because `-color_primaries`/`-color_trc` never
+ *  reach the VUI on their own. */
+export const SEGMENT_X264_PARAMS =
+  "open-gop=0:colorprim=bt709:transfer=bt709:colormatrix=bt709";
+
 /** GOP pinning shared by every encode that produces (part of) a compiled
  *  timelapse: a closed GOP of exactly one segment (1 second) starting on an
  *  IDR frame, scene-cut keyframes disabled. This grid is ALSO what makes
@@ -119,7 +133,20 @@ export const SEGMENT_GOP_ARGS = [
   "-g", String(SEGMENT_FPS),
   "-keyint_min", String(SEGMENT_FPS),
   "-sc_threshold", "0",
-  "-x264-params", "open-gop=0",
+  // Carries the colour keys too — see SEGMENT_X264_PARAMS.
+  "-x264-params", SEGMENT_X264_PARAMS,
+];
+
+/** Segments stream-copy concat into a file that carries only the FIRST
+ *  segment's colour tags, so every builder has to write the same ones.
+ *  `-pix_fmt yuv420p` alone doesn't do it: it picks a format, not a range,
+ *  and jpeg units were coming out full-range (white Y=255 against a clip's
+ *  235). scaleFilter converts the pixels; these declare the result. */
+export const SEGMENT_COLOR_ARGS = [
+  "-color_range", "tv",
+  "-colorspace", "bt709",
+  "-color_primaries", "bt709",
+  "-color_trc", "bt709",
 ];
 
 /**
@@ -167,6 +194,7 @@ export function segmentEncodeArgs(
     "-level:v", "4.0",
     ...tier,
     "-pix_fmt", "yuv420p",
+    ...SEGMENT_COLOR_ARGS,
     ...SEGMENT_GOP_ARGS,
     // Segment builds are single-threaded because the parallelism lives at the
     // segment level (SEGMENT_CONCURRENCY). Whole-file encodes — the assembly
