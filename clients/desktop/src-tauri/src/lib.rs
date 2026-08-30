@@ -277,10 +277,18 @@ fn remove_stale_deep_link_handler(app: &AppHandle) {
         return;
     };
     let applications_dir = data_dir.join("applications");
-    let handler_file =
-        applications_dir.join(format!("{}-handler.desktop", exe_name.to_string_lossy()));
-    if handler_file.exists() && std::fs::remove_file(&handler_file).is_ok() {
-        eprintln!("[deep-link] removed stale handler {}", handler_file.display());
+    // The binary is `lookout` now; a machine that ran a build from when it was
+    // `lookout-desktop` still has that one's handler sitting there.
+    let exe_name = exe_name.to_string_lossy().to_string();
+    let mut removed = false;
+    for name in [exe_name.as_str(), "lookout-desktop"] {
+        let handler_file = applications_dir.join(format!("{name}-handler.desktop"));
+        if handler_file.exists() && std::fs::remove_file(&handler_file).is_ok() {
+            eprintln!("[deep-link] removed stale handler {}", handler_file.display());
+            removed = true;
+        }
+    }
+    if removed {
         // Also drop the mimeapps.list default the old register_all() set,
         // which points at the file just deleted. GIO would skip a missing
         // default anyway, but a KDE/XFCE launcher might not.

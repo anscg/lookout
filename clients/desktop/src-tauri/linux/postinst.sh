@@ -11,6 +11,9 @@ KEYRING="/usr/share/keyrings/lookout-archive-keyring.asc"
 SOURCES="/etc/apt/sources.list.d/lookout.sources"
 DEFAULTS="/etc/default/lookout"
 MARKER="/var/lib/lookout/repo-added"
+# The binary used to be installed as lookout-desktop; keep that name working
+# for anyone whose scripts, launchers or muscle memory still use it.
+LEGACY_ALIAS="/usr/bin/lookout-desktop"
 
 repo_add_once=true
 if [ -r "$DEFAULTS" ]; then
@@ -55,11 +58,18 @@ EOF
   echo "lookout: added $REPO_URL to apt sources"
 }
 
+alias_legacy_name() {
+  [ -x /usr/bin/lookout ] || return 0
+  [ -e "$LEGACY_ALIAS" ] && [ ! -L "$LEGACY_ALIAS" ] && return 0
+  ln -sf lookout "$LEGACY_ALIAS"
+}
+
 case "$1" in
   configure)
     # The `|| true` suppresses errexit inside enroll(); a postinst that exits
     # non-zero leaves the package half-configured.
     enroll || true
+    alias_legacy_name || true
     ;;
 esac
 

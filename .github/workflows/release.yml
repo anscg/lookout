@@ -205,6 +205,16 @@ jobs:
               test -n "$bin"
               ldd "$bin" | (grep -i "not found" && exit 1 || true)
 
+              # mainBinaryName renames the cargo output, and nothing in the
+              # build fails if it silently doesn't -- you just get a package
+              # whose command is not the one the docs tell people to run.
+              test "$bin" = /usr/bin/lookout
+              command -v lookout >/dev/null
+              # postinst re-adds the old name for anyone still typing it.
+              test -L /usr/bin/lookout-desktop
+              command -v lookout-desktop >/dev/null
+              echo "binary OK: /usr/bin/lookout, with lookout-desktop aliased to it"
+
               # The postinst adds apt.lookout.hackclub.com, which is how Linux
               # users get updates. Both failure modes here are silent: no
               # enrollment at all, or a Signed-By pointing at a keyring the
@@ -223,7 +233,8 @@ jobs:
                 DEBIAN_FRONTEND=noninteractive apt-get purge -y "$PKG" >/dev/null
                 test ! -e "$src"
                 test ! -e "$keyring"
-                echo "purge OK: the repository is removed with the package"
+                test ! -e /usr/bin/lookout-desktop
+                echo "purge OK: the repository and the alias go with the package"
               else
                 test ! -e "$src"
                 echo "unkeyed build correctly skipped enrollment"
