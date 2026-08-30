@@ -94,14 +94,14 @@ fn show_tauri_tray(time_text: String, app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    // Windows renders the macOS template glyph acceptably against its tray
-    // background. Linux panels don't: Yaru is white in light mode and black
-    // in dark, so a black-on-transparent template is invisible in one of
-    // them either way. Linux gets the same glyph in the app's red instead.
+    // Windows gets the app icon, so the tray entry matches the taskbar and
+    // Start menu. Linux panels can't take a colourful one: Yaru is white in
+    // light mode and black in dark, so the app icon there is the timelapse
+    // glyph in the app's red, which reads against both.
     #[cfg(target_os = "linux")]
     let icon_bytes: &[u8] = include_bytes!("../icons/timelapse_linux.png");
     #[cfg(not(target_os = "linux"))]
-    let icon_bytes: &[u8] = include_bytes!("../icons/timelapse_template.png");
+    let icon_bytes: &[u8] = include_bytes!("../icons/32x32.png");
 
     let icon = Image::from_bytes(icon_bytes).map_err(|e| e.to_string())?;
 
@@ -112,7 +112,6 @@ fn show_tauri_tray(time_text: String, app: AppHandle) -> Result<(), String> {
         // the recorded time is visible there.
         .tooltip(format!("Lookout — {time_text} recorded"))
         .icon(icon)
-        .icon_as_template(true)
         .on_tray_icon_event(move |tray, event| {
             if let TrayIconEvent::Click {
                 button,
