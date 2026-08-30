@@ -18,6 +18,7 @@ import { sessionRoutes } from "./routes/sessions.js";
 import { adminRoutes } from "./routes/admin.js";
 import { programRoutes } from "./routes/programs.js";
 import { announcementRoutes } from "./routes/announcements.js";
+import { tipRoutes } from "./routes/tips.js";
 import { boss } from "./lib/queue.js";
 import { registerTimeoutJobs } from "./lib/timeouts.js";
 
@@ -90,6 +91,7 @@ await app.register(sessionRoutes);
 await app.register(adminRoutes);
 await app.register(programRoutes);
 await app.register(announcementRoutes);
+await app.register(tipRoutes);
 
 // Serve React SPA in production
 const publicDir = join(__dirname, "..", "public");

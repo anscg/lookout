@@ -8,11 +8,13 @@ import { announcementRoutes } from "./routes/announcements.js";
 import { tipRoutes } from "./routes/tips.js";
 
 /**
- * Build a Fastify instance with our routes registered. Used by:
- *   - production entrypoint (`index.ts`) — adds Sentry, static files,
- *     pg-boss start, listen()
- *   - integration tests — drives the in-process app via `app.inject(...)`
- *     without ever opening a socket
+ * Build a Fastify instance with our routes registered. Used by the
+ * integration tests, which drive it via `app.inject(...)` without opening a
+ * socket.
+ *
+ * NOT used by the production entrypoint: index.ts builds its own instance and
+ * repeats this registration list. A route added only here passes every test
+ * and 404s in production, so add it to both.
  *
  * No side effects beyond instantiation. Caller is responsible for closing.
  */
