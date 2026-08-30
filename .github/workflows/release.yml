@@ -144,7 +144,7 @@ jobs:
             exit 1
           }
 
-          # artifact-signing-cli defaults --signtool-path to one hardcoded SDK
+          # artifact-signing-cli defaults --sign-tool-path to one hardcoded SDK
           # version. Resolve whatever this runner actually ships instead, so a
           # runner image update cannot silently break signing.
           signtool=$(find "/c/Program Files (x86)/Windows Kits/10/bin" \
@@ -177,7 +177,7 @@ jobs:
                     "-e", "https://eus.codesigning.azure.net",
                     "-a", "hackclub",
                     "-c", "hackatime-desktop",
-                    "--signtool-path", "$signtool",
+                    "--sign-tool-path", "$signtool",
                     "%1"
                   ]
                 }
@@ -199,7 +199,7 @@ jobs:
           if ! artifact-signing-cli \
               -e https://eus.codesigning.azure.net \
               -a hackclub -c hackatime-desktop \
-              --signtool-path "$signtool" "$probe"; then
+              --sign-tool-path "$signtool" "$probe"; then
             echo "::error::artifact-signing-cli could not sign a probe binary. The output above is the real reason the build would fail; tauri only reports 'failed to run artifact-signing-cli'." >&2
             exit 1
           fi

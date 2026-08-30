@@ -65,7 +65,7 @@ jobs:
           artifact-signing-cli \
             -e https://eus.codesigning.azure.net \
             -a hackclub -c hackatime-desktop \
-            --signtool-path "$signtool" "$probe"
+            --sign-tool-path "$signtool" "$probe"
           rc=$?
           set +x
           echo "=== exit code: $rc ==="
