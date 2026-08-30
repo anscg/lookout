@@ -1,0 +1,175 @@
+name: Publish apt repository
+
+# Publishes the flat apt repository at apt.lookout.hackclub.com to Pages.
+#
+# Sources every .deb from the GitHub releases rather than from a build, so it
+# runs in a couple of minutes and can be fired by hand at any time -- getting
+# the repository up, or repairing it, does not require cutting a tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (blank = the newest published release)"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+concurrency:
+  group: apt-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      KEEP: "5"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install repository tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils
+
+      - name: Import the signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APT_GPG_PRIVATE_KEY:-}" ]; then
+            echo "::error::APT_GPG_PRIVATE_KEY is not set. Run scripts/apt-keygen.sh and add the secrets." >&2
+            exit 1
+          fi
+          export GNUPGHOME="$(mktemp -d)"
+          chmod 700 "$GNUPGHOME"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          printf '%s\n' "$APT_GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          fpr=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr:/ {print $10; exit}')
+          echo "SIGNING_FPR=$fpr" >> "$GITHUB_ENV"
+          echo "signing with $fpr"
+
+      - name: Collect .debs from the releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p repo/pool
+
+          # A tag passed in is taken even if its release is still a draft --
+          # release.yml creates drafts, and the repository has to advertise the
+          # version that was just built.
+          if [ -n "${TAG:-}" ]; then
+            echo "including $TAG"
+            gh release download "$TAG" --dir repo/pool --pattern '*.deb' --clobber
+          fi
+
+          # Older versions stay in the pool so that an index someone cached
+          # before this release still points at a .deb that exists, and so
+          # `apt install lookout=<version>` keeps working.
+          want="$KEEP"
+          [ -n "${TAG:-}" ] && want=$((KEEP - 1))
+          gh release list --limit 50 --exclude-drafts --json tagName -q '.[].tagName' \
+            | grep -v "^${TAG:-}$" | head -n "$want" | while read -r t; do
+                echo "including $t"
+                gh release download "$t" --dir repo/pool --pattern '*.deb' --clobber \
+                  || echo "  (no .deb assets on $t -- skipping)"
+              done
+
+          if [ -z "$(ls -A repo/pool)" ]; then
+            echo "::error::No .deb assets found on any release -- nothing to publish." >&2
+            exit 1
+          fi
+          echo "pool is $(du -sh repo/pool | cut -f1) across $(ls repo/pool | wc -l) files"
+          ls repo/pool
+
+      # Signing with a key whose public half isn't the one a .deb installs makes
+      # every enrolled machine fail apt update with NO_PUBKEY, and the fix can't
+      # be delivered through apt. Releases from before the keyring shipped carry
+      # no key at all, which is fine -- they just never enrolled anyone.
+      - name: Verify shipped keyrings match the signing key
+        run: |
+          set -euo pipefail
+          checked=0
+          for deb in repo/pool/*.deb; do
+            if ! dpkg-deb --fsys-tarfile "$deb" \
+                 | tar -xO ./usr/share/lookout/lookout-archive-keyring.asc > shipped.asc 2>/dev/null; then
+              echo "$(basename "$deb"): no keyring (predates enrollment) -- skipped"
+              continue
+            fi
+            fpr=$(gpg --batch --with-colons --show-keys shipped.asc | awk -F: '/^fpr:/ {print $10; exit}')
+            if [ "$fpr" != "$SIGNING_FPR" ]; then
+              echo "::error::$(basename "$deb") ships key $fpr, but the repository is signed by $SIGNING_FPR. Publishing this would make apt update fail on every enrolled machine." >&2
+              exit 1
+            fi
+            echo "$(basename "$deb"): key matches"
+            checked=$((checked + 1))
+          done
+          echo "$checked package(s) carried a keyring, all matching"
+
+      - name: Build the flat repository
+        run: |
+          set -euo pipefail
+          cd repo
+          # One index for every arch and kept version; apt filters on each
+          # entry's Architecture and picks the highest Version.
+          dpkg-scanpackages --multiversion pool > Packages
+          gzip -9kf Packages
+          xz -9kf Packages
+          # After the compressed indices exist -- Release carries their hashes.
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=Lookout \
+            -o APT::FTPArchive::Release::Label=Lookout \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+            release . > Release
+          echo "--- Release ---"; cat Release
+          echo "--- indexed ---"; grep -E '^(Package|Version|Architecture|Filename):' Packages
+
+      - name: Sign the index
+        env:
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          cd repo
+          # InRelease is what modern apt fetches; Release.gpg for older clients.
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" \
+              --local-user "$SIGNING_FPR" --clearsign -o InRelease Release
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" \
+              --local-user "$SIGNING_FPR" -abs -o Release.gpg Release
+          # Verify with only the public half, the way a client would.
+          gpg --batch --armor --export "$SIGNING_FPR" > pub.asc
+          rm -rf verify && mkdir verify && chmod 700 verify
+          GNUPGHOME=verify gpg --batch --quiet --import pub.asc
+          GNUPGHOME=verify gpg --batch --verify InRelease
+          rm -rf verify pub.asc
+          cp ../clients/desktop/src-tauri/linux/lookout-archive-keyring.asc .
+
+      - name: Add Pages metadata
+        run: |
+          echo apt.lookout.hackclub.com > repo/CNAME
+          # Redundant for an Actions deploy, which serves files as-is; kept in
+          # case the Pages source is ever switched back to a branch.
+          touch repo/.nojekyll
+          find repo -type f | sort
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
