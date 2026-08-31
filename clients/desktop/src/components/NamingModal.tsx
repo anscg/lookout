@@ -12,17 +12,23 @@ interface NamingModalProps {
    *  data has to be final the first time they see it. */
   onEditAndSave: (name: string | null) => void;
   onResume: () => void;
+  /** The session has no full minute yet, so there is no timelapse to name
+   *  or edit. Say so and drop those options — but keep Stop, because
+   *  someone who opened a session by mistake is entitled to leave. See
+   *  isTooShortToCompile. */
+  tooShort?: boolean;
 }
 
-export function NamingModal({ loading, onConfirm, onEditAndSave, onResume }: NamingModalProps) {
+export function NamingModal({ loading, onConfirm, onEditAndSave, onResume, tooShort = false }: NamingModalProps) {
   const [name, setName] = useState("");
   const [choice, setChoice] = useState<"stop" | "edit" | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (tooShort) return; // no input to focus
     // Focus the input when modal opens
     setTimeout(() => inputRef.current?.focus(), 50);
-  }, []);
+  }, [tooShort]);
 
   return (
     <div data-lookout-overlay="" style={{
@@ -42,12 +48,14 @@ export function NamingModal({ loading, onConfirm, onEditAndSave, onResume }: Nam
       >
         <Card padding={spacing.xxl} style={{ width: "100%", height: "auto", background: "var(--color-bg-panel)", textAlign: "center", boxShadow: "0 10px 40px rgba(0,0,0,0.5)" }}>
         <h3 style={{ fontSize: fontSize.xl, fontWeight: fontWeight.bold, color: colors.text.primary, margin: 0, marginBottom: spacing.sm }}>
-          Name your timelapse
+          {tooShort ? "Nothing to save yet" : "Name your timelapse"}
         </h3>
         <p style={{ fontSize: fontSize.md, color: colors.text.secondary, margin: 0, marginBottom: spacing.lg }}>
-          Give it a name, or skip to use the default.
+          {tooShort
+            ? "A timelapse needs a minute of recording. Stop now and this session ends without one."
+            : "Give it a name, or skip to use the default."}
         </p>
-        <input
+        {!tooShort && <input
           ref={inputRef}
           type="text"
           value={name}
@@ -72,7 +80,35 @@ export function NamingModal({ loading, onConfirm, onEditAndSave, onResume }: Nam
             marginBottom: spacing.lg,
             opacity: loading ? 0.5 : 1,
           }}
-        />
+        />}
+        {tooShort ? (
+          // Carrying on is the useful answer, so it leads — but leaving
+          // stays one click away.
+          <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
+            <Button
+              variant="success"
+              size="lg"
+              fullWidth
+              disabled={loading}
+              onClick={onResume}
+            >
+              Keep recording
+            </Button>
+            <Button
+              variant="ghost"
+              size="md"
+              fullWidth
+              loading={loading && choice === "stop"}
+              disabled={loading && choice !== "stop"}
+              onClick={() => {
+                setChoice("stop");
+                onConfirm(name);
+              }}
+            >
+              Stop anyway
+            </Button>
+          </div>
+        ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
           <Button
             variant="primary"
@@ -112,6 +148,7 @@ export function NamingModal({ loading, onConfirm, onEditAndSave, onResume }: Nam
             </Button>
           </div>
         </div>
+        )}
         </Card>
       </motion.div>
     </div>

@@ -15,6 +15,11 @@ export interface StopChoiceModalProps {
   /** Show a name field (the desktop app names timelapses at stop time). */
   withName?: boolean;
   loading?: boolean;
+  /** The session has no full minute yet, so there is no timelapse to save.
+   *  Swaps the copy and drops the options that assume one — but keeps a way
+   *  out, because someone who opened a session by mistake is entitled to
+   *  leave. See isTooShortToCompile. */
+  tooShort?: boolean;
 }
 
 /**
@@ -30,6 +35,7 @@ export function StopChoiceModal({
   onEditAndSave,
   withName = false,
   loading = false,
+  tooShort = false,
 }: StopChoiceModalProps) {
   const [name, setName] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -41,8 +47,10 @@ export function StopChoiceModal({
 
   const value = () => name.trim() || null;
 
+  const title = tooShort ? "Nothing to save yet" : "Finish this timelapse?";
+
   return (
-    <Overlay label="Finish this timelapse?" width={420}>
+    <Overlay label={title} width={420}>
       <div style={{ overflow: "auto" }}>
         <Card
           padding={spacing.xxl}
@@ -62,7 +70,7 @@ export function StopChoiceModal({
               marginBottom: spacing.sm,
             }}
           >
-            Finish this timelapse?
+            {title}
           </h3>
           <p
             style={{
@@ -72,12 +80,14 @@ export function StopChoiceModal({
               marginBottom: spacing.lg,
             }}
           >
-            {onEditAndSave
-              ? "Save it as recorded, or review it first and cut out anything you'd rather not share."
-              : "This ends the recording and compiles your timelapse."}
+            {tooShort
+              ? "A timelapse needs a minute of recording. Stop now and this session ends without one."
+              : onEditAndSave
+                ? "Save it as recorded, or review it first and cut out anything you'd rather not share."
+                : "This ends the recording and compiles your timelapse."}
           </p>
 
-          {withName && (
+          {withName && !tooShort && (
             <input
               ref={inputRef}
               type="text"
@@ -110,7 +120,7 @@ export function StopChoiceModal({
           )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
-            {onEditAndSave && (
+            {onEditAndSave && !tooShort && (
               <Button
                 variant="primary"
                 size="lg"
@@ -125,9 +135,22 @@ export function StopChoiceModal({
                 Edit &amp; save
               </Button>
             )}
+            {/* With nothing to save, carrying on is the useful answer, so it
+                leads — but leaving stays one click away. */}
+            {tooShort && (
+              <Button
+                variant="primary"
+                size="lg"
+                fullWidth
+                disabled={loading}
+                onClick={onResume}
+              >
+                Keep recording
+              </Button>
+            )}
             <Button
-              variant={onEditAndSave ? "secondary" : "primary"}
-              size="lg"
+              variant={onEditAndSave && !tooShort ? "secondary" : tooShort ? "ghost" : "primary"}
+              size={tooShort ? "md" : "lg"}
               fullWidth
               loading={loading && choice === "stop"}
               disabled={loading && choice !== "stop"}
@@ -136,17 +159,19 @@ export function StopChoiceModal({
                 onStopAndSave(value());
               }}
             >
-              Stop &amp; save
+              {tooShort ? "Stop anyway" : "Stop & save"}
             </Button>
-            <Button
-              variant="ghost"
-              size="md"
-              fullWidth
-              disabled={loading}
-              onClick={onResume}
-            >
-              Keep recording
-            </Button>
+            {!tooShort && (
+              <Button
+                variant="ghost"
+                size="md"
+                fullWidth
+                disabled={loading}
+                onClick={onResume}
+              >
+                Keep recording
+              </Button>
+            )}
           </div>
         </Card>
       </div>

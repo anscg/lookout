@@ -510,14 +510,15 @@ recording, stop and save, or edit and save. Choosing to edit stops the
 session with a hold, so it compiles without publishing, and swaps the view
 for a `<TimelapseEditor>` until the user publishes.
 
-Stop is held back until the session has one credited minute
-(`MIN_STOPPABLE_TRACKED_SECONDS`). Below that there is no capture unit to
-compile — the seed capture is dropped from the video and the flush on the
-way out is a single still — so the button is disabled with a line saying
-how much longer to record. The gate reads the server's tracked count, not
-the on-screen clock, so it lifts a confirm round trip after 1:00 rather
-than exactly on it. `POST /stop` itself is unchanged and still accepts a
-stop at any duration; this is a client-side gate only.
+Under one credited minute (`MIN_STOPPABLE_TRACKED_SECONDS`) there is no
+capture unit to compile — the seed capture is dropped from the video and
+the flush on the way out is a single still. The modal says so and leads
+with "Keep recording", dropping the name field and "Edit & save"; stopping
+stays available as "Stop anyway", because someone who opened a session by
+mistake should be able to leave. The threshold reads the server's tracked
+count, not the on-screen clock, which interpolates past 1:00 before that
+minute exists as a capture unit. `POST /stop` is unchanged and accepts a
+stop at any duration.
 
 **Renders based on status:**
 - `loading` — spinner
@@ -583,8 +584,6 @@ Action buttons for start/pause/resume/stop, adapts to current state.
 | `onResume` | `() => void` | Resume callback |
 | `onStop` | `() => void` | Stop callback |
 | `loading` | `boolean?` | Show loading state on buttons |
-| `trackedSeconds` | `number?` | Server-credited seconds. Pass it to disable Stop until the session has a minute worth compiling. Omit and Stop is always offered. |
-| `displaySeconds` | `number?` | The on-screen clock. Only used to count down to the unlock. |
 
 ---
 
@@ -788,6 +787,7 @@ recorders.
 | `onEditAndSave` | `((name: string \| null) => void)?` | Stop with a hold, then edit. Omit to hide the option |
 | `withName` | `boolean?` | Show a name field (default `false`) |
 | `loading` | `boolean?` | Disable inputs while the stop is in flight |
+| `tooShort` | `boolean?` | The session has no full minute yet, so there is no timelapse to save. Swaps the copy, drops the name field and "Edit & save", leads with "Keep recording" and offers "Stop anyway". Pass `isTooShortToCompile(trackedSeconds)`. |
 
 ---
 

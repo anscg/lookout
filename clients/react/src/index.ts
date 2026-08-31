@@ -66,8 +66,7 @@ export {
 export type { SessionTimerState } from "./hooks/useSessionTimer.js";
 export { computeBestTrackedSeconds } from "./hooks/computeBestTracked.js";
 export type { BestTrackedInputs } from "./hooks/computeBestTracked.js";
-export { stopGuard } from "./hooks/stopGuard.js";
-export type { StopGuard } from "./hooks/stopGuard.js";
+export { isTooShortToCompile } from "./hooks/tooShortToCompile.js";
 
 // Gallery hooks
 export { useTokenStore } from "./hooks/useTokenStore.js";

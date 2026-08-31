@@ -6,7 +6,7 @@ import {
   useSession,
   useSessionTimerState,
   computeBestTrackedSeconds,
-  stopGuard,
+  isTooShortToCompile,
   formatTime,
   Button,
   ErrorDisplay,
@@ -207,16 +207,9 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
   );
   const displaySeconds = timer.displaySeconds;
 
-  // Under a minute there is no capture unit to compile — see stopGuard.
-  // Read from a ref in the handler: the tray listener closes over
-  // handleStopClick, and a menu-bar Stop must be judged against the time
-  // banked NOW, not whenever that listener was last re-bound.
-  const { canStop, reason: stopBlockedReason } = stopGuard(
-    bestTrackedSeconds,
-    displaySeconds,
-  );
-  const canStopRef = useRef(canStop);
-  canStopRef.current = canStop;
+  // Under a minute there is nothing for the compile to work with. Stop
+  // still works — the naming modal says so instead. See isTooShortToCompile.
+  const tooShort = isTooShortToCompile(bestTrackedSeconds);
 
   // Read the baseline from a ref inside async handlers: `session.resume()`
   // awaits a round trip that itself refreshes `session.trackedSeconds`, so the
@@ -406,18 +399,6 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
 
   // Stop button: pause session + stop capture + show naming modal
   const handleStopClick = useCallback(async () => {
-    // The on-screen buttons are already disabled below this threshold; the
-    // menu-bar Stop is a plain native item with no disabled state, so it
-    // lands here. Bring the window forward rather than doing nothing —
-    // the reason for the refusal is written next to the Stop button.
-    if (!canStopRef.current) {
-      console.warn("[session] stop ignored — nothing compilable banked yet");
-      const win = getCurrentWindow();
-      void win.unminimize().catch(() => {});
-      void win.show().catch(() => {});
-      void win.setFocus().catch(() => {});
-      return;
-    }
     console.log("[session] stop clicked, pausing and opening naming modal");
     // Freeze the clock at the click, exactly like handlePause.
     setTimerHoldAt(Date.now());
@@ -793,80 +774,65 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
       )}
 
       {/* Buttons — half-and-half at bottom */}
-      <div style={{ flexShrink: 0 }}>
-        <div style={{ display: "flex", gap: spacing.md }}>
-          {controlMode === "recording" && (
-            <>
-              <Button
-                variant="warning"
-                size="lg"
-                loading={pauseLoading}
-                onClick={handlePause}
-                disabled={stopLoading || isPrompting}
-                fullWidth
-                style={{ flex: 1 }}
-              >
-                Pause
-              </Button>
-              <Button
-                variant="danger"
-                size="lg"
-                loading={stopLoading}
-                onClick={handleStopClick}
-                disabled={pauseLoading || stopLoading || isPrompting || !canStop}
-                title={stopBlockedReason ?? undefined}
-                fullWidth
-                style={{ flex: 1 }}
-              >
-                Stop
-              </Button>
-            </>
-          )}
+      <div style={{ flexShrink: 0, display: "flex", gap: spacing.md }}>
+        {controlMode === "recording" && (
+          <>
+            <Button
+              variant="warning"
+              size="lg"
+              loading={pauseLoading}
+              onClick={handlePause}
+              disabled={stopLoading || isPrompting}
+              fullWidth
+              style={{ flex: 1 }}
+            >
+              Pause
+            </Button>
+            <Button
+              variant="danger"
+              size="lg"
+              loading={stopLoading}
+              onClick={handleStopClick}
+              disabled={pauseLoading || stopLoading || isPrompting}
+              fullWidth
+              style={{ flex: 1 }}
+            >
+              Stop
+            </Button>
+          </>
+        )}
 
-          {controlMode === "paused" && (
-            <>
-              <Button
-                variant="success"
-                size="lg"
-                loading={resumeLoading}
-                onClick={handleResume}
-                disabled={stopLoading || isPrompting || !!capture.sourceLost}
-                fullWidth
-                style={{ flex: 1 }}
-              >
-                Resume
-              </Button>
-              <Button
-                variant="danger"
-                size="lg"
-                loading={stopLoading}
-                onClick={handleStopClick}
-                disabled={resumeLoading || stopLoading || isPrompting || !canStop}
-                title={stopBlockedReason ?? undefined}
-                fullWidth
-                style={{ flex: 1 }}
-              >
-                Stop
-              </Button>
-            </>
-          )}
-        </div>
-
-        {/* A greyed-out Stop with no explanation reads as a broken app. */}
-        {stopBlockedReason && (
-          <p style={{
-            margin: `${spacing.sm}px 0 0 0`,
-            textAlign: "center",
-            fontSize: fontSize.sm,
-            color: colors.text.secondary,
-          }}>
-            {stopBlockedReason}
-          </p>
+        {controlMode === "paused" && (
+          <>
+            <Button
+              variant="success"
+              size="lg"
+              loading={resumeLoading}
+              onClick={handleResume}
+              disabled={stopLoading || isPrompting || !!capture.sourceLost}
+              fullWidth
+              style={{ flex: 1 }}
+            >
+              Resume
+            </Button>
+            <Button
+              variant="danger"
+              size="lg"
+              loading={stopLoading}
+              onClick={handleStopClick}
+              disabled={resumeLoading || stopLoading || isPrompting}
+              fullWidth
+              style={{ flex: 1 }}
+            >
+              Stop
+            </Button>
+          </>
         )}
       </div>
 
       {isPrompting && (
         <NamingModal
+          tooShort={tooShort}
           loading={stopLoading}
           onConfirm={handleConfirmStop}
           onEditAndSave={handleEditAndSave}
@@ -883,7 +849,6 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
           loss={capture.sourceLost}
           onReselect={reselectSource}
           onStop={handleStopClick}
-          stopBlockedReason={stopBlockedReason}
           onDetails={
             capture.sourceLost.detail
               ? () => setCaptureErrorDetail(capture.sourceLost!.detail!)

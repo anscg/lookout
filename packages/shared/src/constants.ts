@@ -57,8 +57,7 @@ export const STREAK_WINDOW_MS = 30_000;
  *  Default: 60 */
 export const CREDIT_PER_CAPTURE_S = 60;
 
-/** Server-credited seconds a session must have banked before a client
- *  offers Stop.
+/** Server-credited seconds below which a session has no timelapse in it.
  *
  *  Under one capture unit there is nothing to compile. The seed capture
  *  opens the recording rather than closing a minute, so the worker drops
@@ -67,10 +66,11 @@ export const CREDIT_PER_CAPTURE_S = 60;
  *  out. The timelapse that falls out is one frozen frame — or, with the
  *  seed alone, nothing the compile can use at all.
  *
- *  Enforced in the clients only: the server still accepts a stop at any
- *  duration, because programs (and the internal force-stop) must be able
- *  to end a session they didn't record. A session left below the
- *  threshold is reaped by the usual auto-stop.
+ *  Clients say so in the stop confirmation; they do NOT block the stop.
+ *  Someone who opened a session by mistake has to be able to leave, and
+ *  the server accepts a stop at any duration regardless — programs and
+ *  the internal force-stop must be able to end a session they didn't
+ *  record.
  *  Default: 60 (one capture unit) */
 export const MIN_STOPPABLE_TRACKED_SECONDS = CREDIT_PER_CAPTURE_S;
 
