@@ -179,6 +179,11 @@ export function useAppUpdate(): { phase: UpdatePhase; restart: () => void } {
       // every line after it is dead code there. The attempt counter and the
       // relaunch cooldown both have to be on disk before we jump, or a
       // failing installer would be retried on every launch forever.
+      //
+      // That installer runs with /S (updater.windows.installMode: "quiet"),
+      // so it draws no window — the app just vanishes and comes back. With
+      // "passive" it flashes a progress-bar window, which looked broken when
+      // the launch auto-install fired it unprompted.
       const prior = readPending();
       const spent =
         prior && compareVersions(prior.version, update.version) === 0 ? prior.attempts : 0;

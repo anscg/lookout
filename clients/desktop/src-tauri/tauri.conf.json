@@ -39,6 +39,8 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
+    "copyright": "© Hack Club, a 501(c)(3) nonprofit (EIN: 81-2908499)",
+    "homepage": "https://lookout.hackclub.com",
     "targets": [
       "app",
       "dmg",
@@ -49,6 +51,14 @@
     "macOS": {
       "entitlements": "./Entitlements.plist",
       "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "nsis/header.bmp",
+        "sidebarImage": "nsis/sidebar.bmp"
+      }
     },
     "icon": [
       "icons/32x32.png",
@@ -110,7 +120,7 @@
         "https://github.com/hackclub/lookout/releases/latest/download/latest.json"
       ],
       "windows": {
-        "installMode": "passive"
+        "installMode": "quiet"
       }
     }
   }
