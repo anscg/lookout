@@ -405,25 +405,33 @@ export async function compileTimelapse(sessionId: string): Promise<{
       SELECT DISTINCT ON (sample_bucket)
         id, r2_key, sample_bucket AS minute_bucket, requested_at, captured_at, format
       FROM (
-        SELECT id, r2_key, requested_at, captured_at, format, is_final,
-          bool_or(NOT is_final) OVER () AS has_ordinary_unit,
-          FLOOR(EXTRACT(EPOCH FROM (
-            COALESCE(captured_at, requested_at) - ${session.startedAt!}::timestamptz
-          )) / 60)::int AS sample_bucket
-        FROM screenshots
-        WHERE session_id = ${sessionId} AND confirmed = true
+        SELECT *, bool_or(NOT skipped) OVER () AS has_ordinary_unit
+        FROM (
+          SELECT id, r2_key, requested_at, captured_at, format,
+            -- A seed credits 0 and has no expected mark. A drift RESET also
+            -- credits 0 but records the mark it missed, and covers real
+            -- screen time, so it keeps its second. IS TRUE for the NULLs on
+            -- bucket-mode rows, which are neither.
+            (is_final OR (credited_seconds = 0 AND expected_at IS NULL))
+              IS TRUE AS skipped,
+            FLOOR(EXTRACT(EPOCH FROM (
+              COALESCE(captured_at, requested_at) - ${session.startedAt!}::timestamptz
+            )) / 60)::int AS sample_bucket
+          FROM screenshots
+          WHERE session_id = ${sessionId} AND confirmed = true
+        ) base
       ) units
-      -- A flush covers a fraction of a minute and is credited as such, so it
-      -- can't earn a whole second of video — one unit = one minute = one
-      -- second is the map the editor scrubs against. Ordinary jpeg units are
-      -- whole minutes and stay; a session of nothing but flushes keeps them,
-      -- same escape as dropSeedUnit's single-unit case.
-      WHERE NOT is_final OR NOT has_ordinary_unit
+      -- A capture earns a video second exactly when it earned a full minute
+      -- of tracked time. Seeds credit 0 — the session's first capture AND
+      -- every resume's — and the pause/stop flush credits a partial minute,
+      -- so neither can hold a second the editor maps to a whole minute.
+      -- Ordinary jpeg units are whole minutes and stay. A session with
+      -- nothing else keeps what it has, rather than compiling to nothing.
+      WHERE NOT skipped OR NOT has_ordinary_unit
       ORDER BY sample_bucket,
-        -- Motion beats stills within a bucket, for the resume seed that
-        -- shares one with the minute's clip. No-op for legacy all-JPEG
-        -- sessions. Flushes used to lean on this too — they never reach
-        -- here now, and it missed the web client's flush anyway (a clip).
+        -- Motion beats stills within a bucket. Credit-mode seeds and
+        -- flushes never reach here now; this still covers the bucket-mode
+        -- ones, which carry no credit to recognise them by.
         (format = 'jpeg')::int,
         ABS(EXTRACT(EPOCH FROM (COALESCE(captured_at, requested_at) - (
           ${session.startedAt!}::timestamptz
@@ -446,12 +454,14 @@ export async function compileTimelapse(sessionId: string): Promise<{
       };
     }
 
-    // The seed capture opens the recording instead of closing a minute: it
-    // credits 0 tracked seconds, and in clips mode its clip spans only the
-    // ~8s before the first cut. Including it made the video one second
-    // longer than the tracked minute count and put a slow-motion second at
-    // the head of every timelapse. See dropSeedUnit.
-    const unitRows = dropSeedUnit(sampledScreenshots.rows);
+    // Credit-mode seeds are already gone above, identified by their credit
+    // signature rather than their position — that is what catches the ones a
+    // RESUME plants mid-session. Bucket-mode rows carry no per-row credit to
+    // recognise, so their seed is still dropped positionally.
+    const unitRows =
+      session.trackingMode === "credit"
+        ? sampledScreenshots.rows
+        : dropSeedUnit(sampledScreenshots.rows);
 
     // Mark sampled screenshots. The seed is deliberately NOT marked: it is
     // not in the video, so its R2 object is cleaned up with the other

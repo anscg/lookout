@@ -13,8 +13,9 @@
  *    video (the "stitching is unstable" report).
  *  - Motion beats stills within a bucket (a resume seed must not freeze its
  *    minute of timelapse).
- *  - The pause/stop flush is not a unit at all: it covers a fraction of a
- *    minute, so a whole second of video would break one-unit-one-minute.
+ *  - Neither the pause/stop flush nor a seed is a unit at all. A capture
+ *    earns a video second exactly when it earned a full minute of tracked
+ *    time, which is what the editor's video-time map assumes.
  *  - Legacy rows without captured_at keep the old arrival-based behavior.
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
@@ -47,6 +48,9 @@ async function insertUnit(
     requestedAtS: number;
     format?: string;
     isFinal?: boolean;
+    /** Credit-mode columns. Omitted = a bucket-mode row (both NULL). */
+    creditedSeconds?: number;
+    expectedAtS?: number | null;
     label: string;
   },
 ): Promise<string> {
@@ -62,6 +66,11 @@ async function insertUnit(
       confirmed: true,
       format: opts.format ?? "mp4",
       isFinal: opts.isFinal ?? false,
+      creditedSeconds: opts.creditedSeconds ?? null,
+      expectedAt:
+        opts.expectedAtS === undefined || opts.expectedAtS === null
+          ? null
+          : at(opts.expectedAtS),
       capturedAt: opts.capturedAtS === null ? null : at(opts.capturedAtS),
     })
     .returning({ id: schema.screenshots.id });
@@ -79,15 +88,19 @@ async function sampleUnits(sessionId: string) {
     SELECT DISTINCT ON (sample_bucket)
       id, r2_key, sample_bucket AS minute_bucket, requested_at, captured_at, format
     FROM (
-      SELECT id, r2_key, requested_at, captured_at, format, is_final,
-        bool_or(NOT is_final) OVER () AS has_ordinary_unit,
-        FLOOR(EXTRACT(EPOCH FROM (
-          COALESCE(captured_at, requested_at) - ${T0}::timestamptz
-        )) / 60)::int AS sample_bucket
-      FROM screenshots
-      WHERE session_id = ${sessionId} AND confirmed = true
+      SELECT *, bool_or(NOT skipped) OVER () AS has_ordinary_unit
+      FROM (
+        SELECT id, r2_key, requested_at, captured_at, format,
+          (is_final OR (credited_seconds = 0 AND expected_at IS NULL))
+            IS TRUE AS skipped,
+          FLOOR(EXTRACT(EPOCH FROM (
+            COALESCE(captured_at, requested_at) - ${T0}::timestamptz
+          )) / 60)::int AS sample_bucket
+        FROM screenshots
+        WHERE session_id = ${sessionId} AND confirmed = true
+      ) base
     ) units
-    WHERE NOT is_final OR NOT has_ordinary_unit
+    WHERE NOT skipped OR NOT has_ordinary_unit
     ORDER BY sample_bucket,
       (format = 'jpeg')::int,
       ABS(EXTRACT(EPOCH FROM (COALESCE(captured_at, requested_at) - (
@@ -197,6 +210,67 @@ describe("unit sampling (worker compile step 1 mirror)", () => {
 
     const rows = await sampleUnits(sess);
     expect(rows.map((r) => r.id)).toEqual([only]);
+  });
+
+  it("a resume seed is not a unit either", async () => {
+    // Every resume plants a fresh seed: credit 0, no expected mark, and a
+    // plain JPEG on both clients. dropSeedUnit only ever caught the FIRST
+    // one, so this became a frozen second wherever no clip shared its
+    // bucket — the same bug as the flush, one row later.
+    const sess = await createSession();
+    const seed = await insertUnit(sess, {
+      capturedAtS: 0, requestedAtS: 1, format: "jpeg", creditedSeconds: 0, label: "seed",
+    });
+    const clip = await insertUnit(sess, {
+      capturedAtS: 60, requestedAtS: 62, creditedSeconds: 60, expectedAtS: 60, label: "clip",
+    });
+    // Pause at 1:30, resume at 2:05 — the resume seed has bucket 2 alone.
+    await insertUnit(sess, {
+      capturedAtS: 90, requestedAtS: 91, format: "jpeg", isFinal: true,
+      creditedSeconds: 30, expectedAtS: 120, label: "flush",
+    });
+    const resumeSeed = await insertUnit(sess, {
+      capturedAtS: 125, requestedAtS: 126, format: "jpeg", creditedSeconds: 0, label: "resume-seed",
+    });
+    const clip2 = await insertUnit(sess, {
+      capturedAtS: 185, requestedAtS: 187, creditedSeconds: 60, expectedAtS: 185, label: "clip2",
+    });
+
+    const rows = await sampleUnits(sess);
+    expect(rows.map((r) => r.id)).toEqual([clip, clip2]);
+    expect(rows.map((r) => r.id)).not.toContain(seed);
+    expect(rows.map((r) => r.id)).not.toContain(resumeSeed);
+  });
+
+  it("a drift reset keeps its second", async () => {
+    // A capture that lands outside the streak window credits 0 like a seed,
+    // but it covers real screen time and records the mark it missed. Only
+    // the missing expected_at separates the two, so this is the row the
+    // exclusion must not touch.
+    const sess = await createSession();
+    const seed = await insertUnit(sess, {
+      capturedAtS: 0, requestedAtS: 1, format: "jpeg", creditedSeconds: 0, label: "seed",
+    });
+    const drifted = await insertUnit(sess, {
+      capturedAtS: 95, requestedAtS: 96, creditedSeconds: 0, expectedAtS: 60, label: "reset",
+    });
+
+    const rows = await sampleUnits(sess);
+    expect(rows.map((r) => r.id)).toEqual([drifted]);
+    expect(rows.map((r) => r.id)).not.toContain(seed);
+  });
+
+  it("bucket-mode rows match neither exclusion", async () => {
+    // credited_seconds and expected_at are NULL for the whole legacy path,
+    // and a NULL comparison must not quietly exclude every row. The seed is
+    // still dropped, but positionally, by dropSeedUnit in the worker.
+    const sess = await createSession();
+    const a = await insertUnit(sess, { capturedAtS: 0, requestedAtS: 1, format: "jpeg", label: "old-seed" });
+    const b = await insertUnit(sess, { capturedAtS: 60, requestedAtS: 61, format: "jpeg", label: "old-b" });
+    const c = await insertUnit(sess, { capturedAtS: 120, requestedAtS: 121, format: "jpeg", label: "old-c" });
+
+    const rows = await sampleUnits(sess);
+    expect(rows.map((r) => r.id)).toEqual([a, b, c]);
   });
 
   it("legacy rows without captured_at keep arrival-based buckets", async () => {

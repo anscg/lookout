@@ -13,9 +13,14 @@ import type { KeptRange } from "@lookout/shared";
 const execFileAsync = promisify(execFile);
 
 /**
- * Drop the session's seed capture from the units that become video.
- * `rows` must be ordered by minute bucket ascending (the `DISTINCT ON`
- * contract in the compiler), so the seed is simply the first entry.
+ * Drop a BUCKET-MODE session's seed capture from the units that become
+ * video. `rows` must be ordered by minute bucket ascending (the
+ * `DISTINCT ON` contract in the compiler), so the seed is the first entry.
+ *
+ * Positional because bucket-mode rows carry no per-row credit to recognise
+ * a seed by, which also means this only ever catches the session's FIRST
+ * one. Credit-mode sessions drop seeds in the sampler instead, by credit
+ * signature — that is what catches the ones a resume plants mid-session.
  *
  * The seed is the capture that STARTS the recording rather than closing a
  * recorded minute, and it is special in two measurable ways:
