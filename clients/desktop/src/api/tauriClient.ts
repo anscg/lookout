@@ -60,11 +60,27 @@ function toError(e: unknown): Error {
   return e instanceof Error ? e : new Error(String(e));
 }
 
+/** What the old `[net]` fetch log recorded, minus the token: the endpoint
+ *  and the outcome. Failures carry the Rust side's full message, which
+ *  names the URL, the HTTP status and the server's error body. */
+function describeArgs(args: Record<string, unknown>): string {
+  const parts: string[] = [];
+  if (typeof args.apiBaseUrl === "string") parts.push(args.apiBaseUrl);
+  if (typeof args.token === "string") parts.push(`token ${args.token.slice(0, 8)}…`);
+  return parts.join(" ");
+}
+
 async function call<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  const what = `[api] ${command} ${describeArgs(args)}`.trimEnd();
+  console.log(what);
   try {
-    return await invoke<T>(command, args);
+    const result = await invoke<T>(command, args);
+    console.debug(`${what} → ok`);
+    return result;
   } catch (e) {
-    throw toError(e);
+    const err = toError(e);
+    console.error(`${what} → FAILED: ${err.message}`);
+    throw err;
   }
 }
 

@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/react";
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { confirm, message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "./logger.js";
@@ -210,6 +210,14 @@ function MainWindowApp() {
   }, [isMacOS]);
   const [isWayland, setIsWayland] = useState(false);
   const { route, navigate } = useHashRouter();
+  // Memoised on the token: SessionDetail keys its fetch effects and its
+  // compiling poll off the client's identity, so a fresh object per render
+  // would re-fire them on every parent re-render.
+  const detailToken = route.page === "session" ? route.token : null;
+  const detailClient = useMemo(
+    () => (detailToken ? sessionClient(detailToken) : null),
+    [detailToken],
+  );
   const tokenStore = useTokenStore();
   const appUpdate = useAppUpdate();
   const gallery = useGallery({
@@ -1170,7 +1178,7 @@ function MainWindowApp() {
             key={`${route.token}:${editNonce}`}
             token={route.token}
             apiBaseUrl={API_BASE}
-            client={sessionClient(route.token)}
+            client={detailClient ?? undefined}
             onEdit={() => { void openEditorWindow(route.token); }}
             onRecordingFinished={({ redirectUrl, panelUrl, panelResolved }) => {
               // The recording is over, so if the program wants something, ask
