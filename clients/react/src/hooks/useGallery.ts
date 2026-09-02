@@ -1,9 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
-import type { SessionSummary } from "@lookout/shared";
+import type { BatchSessionsResponse, SessionSummary } from "@lookout/shared";
 
 export interface UseGalleryOptions {
   apiBaseUrl: string;
   tokens: string[];
+  /** Bring your own batch lookup (`POST /api/sessions/batch` for up to 100
+   *  tokens). Hosts that must not speak HTTP from the webview pass one;
+   *  the default uses fetch against `apiBaseUrl`. */
+  fetchSessions?: (tokens: string[]) => Promise<BatchSessionsResponse>;
 }
 
 export interface UseGallery {
@@ -49,7 +53,23 @@ function persistCache(cache: Record<string, CachedSession>): void {
 
 const globalSessionsCache: Record<string, CachedSession> = loadPersistedCache();
 
-export function useGallery({ apiBaseUrl, tokens }: UseGalleryOptions): UseGallery {
+async function fetchSessionsHttp(
+  apiBaseUrl: string,
+  tokens: string[],
+): Promise<BatchSessionsResponse> {
+  const res = await fetch(`${apiBaseUrl}/api/sessions/batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tokens }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText}\n${text.slice(0, 500)}`);
+  }
+  return res.json() as Promise<BatchSessionsResponse>;
+}
+
+export function useGallery({ apiBaseUrl, tokens, fetchSessions }: UseGalleryOptions): UseGallery {
   const validTokens = tokens.filter((t) => /^[a-f0-9]{64}$/i.test(t));
   
   const initialSessions = validTokens
@@ -95,21 +115,8 @@ export function useGallery({ apiBaseUrl, tokens }: UseGalleryOptions): UseGaller
       chunks.push(validTokens.slice(i, i + BATCH_SIZE));
     }
 
-    Promise.all(
-      chunks.map((chunk) =>
-        fetch(`${apiBaseUrl}/api/sessions/batch`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tokens: chunk }),
-        }).then(async (res) => {
-          if (!res.ok) {
-            const text = await res.text().catch(() => "");
-            throw new Error(`HTTP ${res.status} ${res.statusText}\n${text.slice(0, 500)}`);
-          }
-          return res.json() as Promise<{ sessions: SessionSummary[] }>;
-        })
-      )
-    )
+    const lookup = fetchSessions ?? ((chunk: string[]) => fetchSessionsHttp(apiBaseUrl, chunk));
+    Promise.all(chunks.map((chunk) => lookup(chunk)))
       .then((results) => ({ sessions: results.flatMap((r) => r.sessions ?? []) }))
       .then((data: { sessions: SessionSummary[] }) => {
         if (!cancelled) {
@@ -141,7 +148,7 @@ export function useGallery({ apiBaseUrl, tokens }: UseGalleryOptions): UseGaller
     return () => {
       cancelled = true;
     };
-  }, [apiBaseUrl, tokensKey, refreshCounter, hasAllInCache]);
+  }, [apiBaseUrl, fetchSessions, tokensKey, refreshCounter, hasAllInCache]);
 
   // Re-fetch on tab focus
   useEffect(() => {

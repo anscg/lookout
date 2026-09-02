@@ -21,6 +21,7 @@ import {
 import { getVersion } from "@tauri-apps/api/app";
 import { ArrowSquareOutIcon, GearSixIcon, PlusIcon } from "@phosphor-icons/react";
 import { isValidToken, extractToken } from "./utils.js";
+import type { SessionResponse } from "@lookout/shared";
 import {
   StartLinkedError,
   beginPairing,
@@ -52,6 +53,11 @@ import { useAnnouncement } from "./hooks/useAnnouncement.js";
 import { useTip } from "./hooks/useTip.js";
 import { useLinuxUpdate } from "./hooks/useLinuxUpdate.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
+import {
+  createTauriLookoutClient,
+  fetchPrograms as fetchProgramRegistry,
+  fetchSessionsBatch,
+} from "./api/tauriClient.js";
 import { UpdatePill } from "./components/UpdatePill.js";
 import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.js";
 import { ProgramPanel } from "./components/ProgramPanel.js";
@@ -84,6 +90,9 @@ import { useWindowFrameState } from "./components/WindowResizeHandles.js";
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
 
+// Module-level so its identity is stable across renders (it is a hook dep).
+const galleryBatchLookup = (tokens: string[]) => fetchSessionsBatch(API_BASE, tokens);
+
 // How long to keep watching a post-edit cut-compile for `complete` before
 // giving up on firing the redirect hook. The worker's assemble step alone
 // can run up to 30 min (ASSEMBLE_TIMEOUT_MS); add slack for queue wait and
@@ -113,11 +122,16 @@ interface Program {
   startUrl?: string | null;
 }
 
+/** Server API for one session, through the Rust core (never raw fetch). */
+function sessionClient(token: string) {
+  return createTauriLookoutClient({ baseUrl: API_BASE, token });
+}
+
 /** Pause a session by token. Fire-and-forget, logs errors. */
 async function pauseSession(token: string): Promise<void> {
   try {
     console.log(`[app] pausing session ${token.slice(0, 8)}...`);
-    await fetch(`${API_BASE}/api/sessions/${token}/pause`, { method: "POST" });
+    await sessionClient(token).pause();
     console.log(`[app] paused session ${token.slice(0, 8)}`);
   } catch (e) {
     console.error(`[app] failed to pause session ${token.slice(0, 8)}:`, e);
@@ -127,9 +141,7 @@ async function pauseSession(token: string): Promise<void> {
 /** Fetch a session's status. Returns null on error. */
 async function fetchSessionStatus(token: string): Promise<string | null> {
   try {
-    const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
-    if (!res.ok) return null;
-    const data = await res.json();
+    const data = await sessionClient(token).getStatus();
     return data.status ?? null;
   } catch {
     return null;
@@ -143,10 +155,9 @@ async function fetchSessionStatus(token: string): Promise<string | null> {
  */
 async function fetchSessionProgram(token: string): Promise<string | null> {
   try {
-    const res = await fetch(`${API_BASE}/api/sessions/${token}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return typeof data.program === "string" ? data.program : null;
+    const data = await sessionClient(token).getSession();
+    const program = (data as { program?: unknown }).program;
+    return typeof program === "string" ? program : null;
   } catch {
     return null;
   }
@@ -204,6 +215,7 @@ function MainWindowApp() {
   const gallery = useGallery({
     apiBaseUrl: API_BASE,
     tokens: tokenStore.getAllTokenValues(),
+    fetchSessions: galleryBatchLookup,
   });
 
   // While the editor window is up, the main window steps aside entirely —
@@ -394,18 +406,15 @@ function MainWindowApp() {
         const poll = async () => {
           if (cancelled || Date.now() > deadline) return;
           try {
-            const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
-            if (res.ok) {
-              const data = await res.json();
-              if (data.status === "complete") {
-                galleryRefreshRef.current();
-                handleCompleted(token, data.redirectUrl ?? null, data.panelUrl ?? null);
-                return;
-              }
-              if (data.status === "failed") return;
+            const data = await sessionClient(token).getStatus();
+            if (data.status === "complete") {
+              galleryRefreshRef.current();
+              handleCompleted(token, data.redirectUrl ?? null, data.panelUrl ?? null);
+              return;
             }
+            if (data.status === "failed") return;
           } catch {
-            // Transient — the retry below covers it.
+            // Transient (or a non-2xx) — the retry below covers it.
           }
           delay = Math.min(delay * 1.5, 15_000);
           setTimeout(poll, delay);
@@ -495,9 +504,7 @@ function MainWindowApp() {
   const programsRef = React.useRef<Program[]>([]);
   const fetchPrograms = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/programs`);
-      if (!res.ok) return;
-      const data = await res.json();
+      const data = await fetchProgramRegistry(API_BASE);
       if (Array.isArray(data.programs)) {
         programsRef.current = data.programs;
         // Warm the icon cache so the menu never opens with fallback symbols
@@ -1030,9 +1037,13 @@ function MainWindowApp() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/sessions/${token}`);
-        if (!res.ok) return;
-        const data = await res.json();
+        // The session record plus the desktop-only fields the shared type
+        // doesn't declare (they ride along in the same JSON).
+        const data = (await sessionClient(token).getSession()) as SessionResponse & {
+          program?: string | null;
+          editHoldUntil?: string | null;
+          viewUrl?: unknown;
+        };
         if (cancelled) return;
         const rawProgram: string | null = data.program ?? null;
         if (rawProgram) {
@@ -1054,9 +1065,13 @@ function MainWindowApp() {
         const finishedRecording = ["stopped", "compiling", "complete"].includes(data.status);
         const held = Boolean(data.editHoldUntil) && data.status !== "failed";
 
+        const panelUrl = data.panelUrl;
         setPanelPrompt(
-          finishedRecording && !held && shouldOfferPanel(token, data.panelUrl, data.panelResolved)
-            ? { token, url: data.panelUrl, fallbackUrl: data.redirectUrl ?? null }
+          finishedRecording &&
+          !held &&
+          typeof panelUrl === "string" &&
+          shouldOfferPanel(token, panelUrl, data.panelResolved)
+            ? { token, url: panelUrl, fallbackUrl: data.redirectUrl ?? null }
             : null,
         );
         // Only offered when the program actually published a link. The label
@@ -1155,6 +1170,7 @@ function MainWindowApp() {
             key={`${route.token}:${editNonce}`}
             token={route.token}
             apiBaseUrl={API_BASE}
+            client={sessionClient(route.token)}
             onEdit={() => { void openEditorWindow(route.token); }}
             onRecordingFinished={({ redirectUrl, panelUrl, panelResolved }) => {
               // The recording is over, so if the program wants something, ask

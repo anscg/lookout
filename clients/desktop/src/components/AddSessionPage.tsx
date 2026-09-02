@@ -16,6 +16,7 @@ import { emit } from "@tauri-apps/api/event";
 import { PageLayout } from "./PageLayout.js";
 
 import { getApiBase } from "../serverConfig.js";
+import { fetchPrograms } from "../api/tauriClient.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -58,8 +59,7 @@ export function AddSessionPage({ onBack, onStart, onOpenProgram }: AddSessionPag
   // paste-a-link backup always remains available.
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/api/programs`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+    fetchPrograms(API_BASE)
       .then((d) => {
         if (!cancelled) setPrograms(Array.isArray(d.programs) ? d.programs : []);
       })

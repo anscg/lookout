@@ -77,7 +77,7 @@ export { useHashRouter } from "./hooks/useHashRouter.js";
 export type { Route } from "./hooks/useHashRouter.js";
 
 // API client (no React dependency)
-export { createLookoutClient } from "./api/client.js";
+export { createLookoutClient, HttpError } from "./api/client.js";
 export type { LookoutClient, CreateClientOptions } from "./api/client.js";
 
 // Types

@@ -91,6 +91,7 @@ Context provider that configures the API client and settings for all child hooks
 |------|------|---------|-------------|
 | `token` | `TokenProvider` | *required* | Session token — string, sync getter, or async getter |
 | `apiBaseUrl` | `string` | `""` (same origin) | Server API base URL |
+| `client` | `LookoutClient` | fetch client for `apiBaseUrl` + `token` | Bring your own API client. For hosts that must not speak HTTP from the webview — the desktop app routes every server call through its Rust core |
 | `capture` | `CaptureSettings` | See below | Screenshot capture settings |
 | `retry` | `RetrySettings` | See below | Upload retry/buffer settings |
 | `callbacks` | `LookoutCallbacks` | `{}` | Lifecycle event callbacks |
@@ -449,6 +450,7 @@ const { sessions, loading, error, refresh } = useGallery({
 |-------|------|-------------|
 | `apiBaseUrl` | `string` | Server API base URL |
 | `tokens` | `string[]` | Token strings to fetch |
+| `fetchSessions` | `(tokens) => Promise<BatchSessionsResponse>?` | Bring your own `POST /api/sessions/batch` lookup (called per chunk of ≤100 tokens). Defaults to fetch against `apiBaseUrl` |
 
 **Returns (`UseGallery`):**
 
@@ -747,6 +749,7 @@ Full session detail view with video player, stats, and compilation polling. Stan
 |------|------|-------------|
 | `token` | `string` | Session token |
 | `apiBaseUrl` | `string` | Server API base URL |
+| `client` | `LookoutClient?` | Bring your own API client (see `<LookoutProvider>`); defaults to the fetch client |
 | `onBack` | `() => void?` | Back button handler |
 | `onArchive` | `() => void?` | Archive button handler |
 | `onEdit` | `() => void?` | Override the review panel's "Edit & save" — open your own editor surface instead of the inline one |
@@ -814,6 +817,7 @@ baked in (a lossless server-side stream copy) or without them. Standalone
 |------|------|-------------|
 | `token` | `string` | Session token |
 | `apiBaseUrl` | `string` | Server API base URL |
+| `client` | `LookoutClient?` | Bring your own API client (see `<LookoutProvider>`); defaults to the fetch client |
 | `onApplied` | `() => void?` | The timelapse was published — return to your detail view and poll `/status` |
 | `onCancel` | `() => void?` | Dismiss the editor. Only surfaced when it can't load; there is no "leave without deciding" exit |
 | `onCutsChange` | `((cuts, dirty) => void)?` | Fires on every cut-list change, so a host can publish the working edit when the user closes it |

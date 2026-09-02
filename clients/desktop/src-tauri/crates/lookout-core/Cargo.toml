@@ -1,0 +1,68 @@
+[package]
+name = "lookout-core"
+version = "0.4.0"
+edition = "2021"
+description = "Lookout's capture, clip-encoding and upload engine, independent of any UI toolkit"
+publish = false
+
+[lib]
+name = "lookout_core"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+xcap = "0.9"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# SIMD resizing (SSE4/AVX2/NEON) for the capture downscale — ~4x faster than
+# the `image` crate's scalar filters at screen sizes (29ms → 7ms, 5K→1080p).
+fast_image_resize = "5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+base64 = "0.22"
+# Refcounted byte buffers for the upload pipeline — retrying an R2 PUT clones
+# the request body, and `Bytes` makes that clone a refcount bump instead of a
+# full JPEG copy. Already in the dependency tree via tokio/reqwest.
+bytes = "1"
+os_info = "3"
+
+[dev-dependencies]
+# `test-util` enables tokio's paused-clock (`start_paused`) so retry-backoff
+# tests run instantly instead of actually sleeping 2s+4s between attempts.
+tokio = { version = "1", features = ["test-util"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-foundation = { version = "0.3.2", features = ["NSProcessInfo", "NSString", "NSArray", "NSData", "NSDictionary", "NSEnumerator", "NSBundle", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "objc2-core-graphics"] }
+# Clip encoding: hardware H.264 via AVAssetWriter (VideoToolbox under the
+# hood) writing MP4 directly. All already in the tree transitively via xcap.
+objc2-av-foundation = { version = "0.3.2", features = ["AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = { version = "0.3.2", features = ["CMTime"] }
+objc2-core-video = { version = "0.3.2", features = ["CVPixelBuffer", "CVBuffer", "CVReturn", "CVImageBuffer"] }
+block2 = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    # Clip encoding: hardware H.264 via the Media Foundation sink writer.
+    "Win32_Media_MediaFoundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    # GetCurrentProcess, for the GDI-object leak check in test_support.
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target."cfg(target_os = \"linux\")".dependencies]
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+# `StreamExt::next`, to await the screencast portal's `Closed` signal
+# (screencast.rs). Already in the tree via ashpd/zbus — this is a direct dep
+# on an existing build.
+futures-util = "0.3"
+gstreamer = "0.24.5"
+gstreamer-app = "0.24.5"
+gstreamer-video = "0.24.5"

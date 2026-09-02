@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 
 import { getApiBase } from "../serverConfig.js";
+import { fetchTip } from "../api/tauriClient.js";
 import type { Tip } from "../tip.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
@@ -43,15 +44,13 @@ export function useTip(): Tip | null {
 
     const fetchOnce = async () => {
       try {
-        const params = new URLSearchParams({ client: "lookout-desktop" });
+        let version: string | undefined;
         try {
-          params.set("version", await getVersion());
+          version = await getVersion();
         } catch {
           // Unreported version counts as 0 server-side.
         }
-        const res = await fetch(`${API_BASE}/api/tip?${params}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const data = await fetchTip<Tip>(API_BASE, { client: "lookout-desktop", version });
         if (cancelled) return;
         const next = data.tip ?? null;
         setTip(next);

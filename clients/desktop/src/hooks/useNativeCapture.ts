@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "../logger.js";
 import { listen } from "@tauri-apps/api/event";
 import { SCREENSHOT_INTERVAL_MS, MAX_WIDTH, MAX_HEIGHT, JPEG_QUALITY } from "@lookout/shared";
+import { createTauriLookoutClient } from "../api/tauriClient.js";
 
 /** Race a promise against a timeout. Rejects with a clear message if the timeout fires first. */
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -84,6 +85,11 @@ export function useNativeCapture(
   sessionTrackedSeconds = 0,
 ) {
   const [isCapturing, setIsCapturing] = useState(false);
+  // Server API for this session, through the Rust core (sleep/pause recovery).
+  const client = useMemo(
+    () => createTauriLookoutClient({ baseUrl: apiBaseUrl, token }),
+    [apiBaseUrl, token],
+  );
   const [trackedSeconds, setTrackedSeconds] = useState(0);
   const [screenshotCount, setScreenshotCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -178,25 +184,22 @@ export function useNativeCapture(
 
       if (!capturingRef.current) return;
       try {
-        const res = await fetch(`${apiBaseUrl}/api/sessions/${token}/status`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.status === "paused") {
-            if (!capturingRef.current) return;
-            await fetch(`${apiBaseUrl}/api/sessions/${token}/resume`, { method: "POST" });
-            console.log("[capture] session auto-resumed after camera capture failure");
-            setError(null);
-          } else if (data.status !== "active" && data.status !== "pending") {
-            console.warn(`[capture] session is ${data.status}, stopping capture`);
-            setIsCapturing(false);
-            onSessionTerminatedRef.current?.(data.status);
-          }
+        const data = await client.getStatus();
+        if (data.status === "paused") {
+          if (!capturingRef.current) return;
+          await client.resume();
+          console.log("[capture] session auto-resumed after camera capture failure");
+          setError(null);
+        } else if (data.status !== "active" && data.status !== "pending") {
+          console.warn(`[capture] session is ${data.status}, stopping capture`);
+          setIsCapturing(false);
+          onSessionTerminatedRef.current?.(data.status);
         }
       } catch {
         // Best-effort
       }
     }
-  }, [apiBaseUrl, token, updatePreview]);
+  }, [client, updatePreview]);
 
   const captureOnceCameraRef = useRef(captureOnceCamera);
   captureOnceCameraRef.current = captureOnceCamera;
@@ -228,23 +231,20 @@ export function useNativeCapture(
         console.warn(`[capture] detected sleep (gap: ${Math.round(elapsed / 1000)}s), checking session status...`);
         nextTargetTime = now;
         try {
-          const res = await fetch(`${apiBaseUrl}/api/sessions/${token}/status`);
-          if (res.ok) {
-            const data = await res.json();
-            console.log(`[capture] session status after sleep: ${data.status}`);
-            if (typeof data.trackedSeconds === "number") {
-              setTrackedSeconds(data.trackedSeconds);
-            }
-            if (data.status === "paused") {
-              await fetch(`${apiBaseUrl}/api/sessions/${token}/resume`, { method: "POST" });
-              console.log("[capture] session resumed after sleep");
-            } else if (data.status !== "active" && data.status !== "pending") {
-              console.warn(`[capture] session is ${data.status}, stopping capture`);
-              capturingRef.current = false;
-              setIsCapturing(false);
-              onSessionTerminatedRef.current?.(data.status);
-              return;
-            }
+          const data = await client.getStatus();
+          console.log(`[capture] session status after sleep: ${data.status}`);
+          if (typeof data.trackedSeconds === "number") {
+            setTrackedSeconds(data.trackedSeconds);
+          }
+          if (data.status === "paused") {
+            await client.resume();
+            console.log("[capture] session resumed after sleep");
+          } else if (data.status !== "active" && data.status !== "pending") {
+            console.warn(`[capture] session is ${data.status}, stopping capture`);
+            capturingRef.current = false;
+            setIsCapturing(false);
+            onSessionTerminatedRef.current?.(data.status);
+            return;
           }
         } catch (e) {
           console.error("[capture] sleep recovery failed:", e);

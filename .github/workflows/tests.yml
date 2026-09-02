@@ -192,9 +192,11 @@ jobs:
       # project has already been bitten by once (a datatype-misalignment crash
       # that only showed up in a release build). Testing debug binaries proves
       # the wrong artifact.
-      - name: cargo test --lib --release
+      # --workspace: the capture engine lives in crates/lookout-core and has
+      # its own unit tests; without the flag only the Tauri shell would run.
+      - name: cargo test --workspace --lib --release
         working-directory: clients/desktop/src-tauri
-        run: cargo test --lib --release
+        run: cargo test --workspace --lib --release
 
   # ──────────────────────────────────────────────────────────────────
   # Windows type-check: the Media Foundation clip encoder is Windows-only

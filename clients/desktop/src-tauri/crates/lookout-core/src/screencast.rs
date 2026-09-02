@@ -1,4 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use crate::Core;
+#[cfg(target_os = "linux")]
+use crate::CoreEvent;
 
 #[derive(Serialize, Deserialize)]
 pub struct StreamInfo {
@@ -63,7 +68,7 @@ static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// closes it on us.
 #[cfg(target_os = "linux")]
 async fn portal_session_task(
-    app: tauri::AppHandle,
+    core: Arc<Core>,
     id: u64,
     result_tx: tokio::sync::oneshot::Sender<Result<(Vec<StreamInfo>, std::os::fd::RawFd), String>>,
     close_rx: tokio::sync::oneshot::Receiver<()>,
@@ -194,7 +199,7 @@ async fn portal_session_task(
             }
         } => {
             eprintln!("[screencast] session {id} was closed by the compositor");
-            on_session_revoked(&app, id, node_ids);
+            on_session_revoked(&core, id, node_ids);
         }
     }
 }
@@ -202,7 +207,7 @@ async fn portal_session_task(
 /// Run the portal flow in its own task and wait for the outcome.
 #[cfg(target_os = "linux")]
 async fn open_portal_session(
-    app: tauri::AppHandle,
+    core: Arc<Core>,
 ) -> Result<(u64, Vec<StreamInfo>, std::os::fd::OwnedFd, tokio::sync::oneshot::Sender<()>), String>
 {
     use std::os::fd::FromRawFd;
@@ -212,7 +217,7 @@ async fn open_portal_session(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
 
-    tokio::spawn(portal_session_task(app, id, result_tx, close_rx));
+    tokio::spawn(portal_session_task(core, id, result_tx, close_rx));
 
     match result_rx.await {
         Ok(Ok((streams, raw_fd))) => {
@@ -230,7 +235,7 @@ async fn open_portal_session(
 /// list. Nodes whose session is gone drop out, so a capture can never reach
 /// for an fd we've already closed.
 #[cfg(target_os = "linux")]
-fn rebuild_fd_map(state: &crate::AppState) {
+fn rebuild_fd_map(state: &Core) {
     let sessions = match state.screencast_sessions.lock() {
         Ok(s) => s,
         Err(_) => return,
@@ -248,86 +253,96 @@ fn rebuild_fd_map(state: &crate::AppState) {
 /// Drop one session after the compositor closed it, and tell the webview —
 /// the capture loop is streaming from a node that no longer exists.
 #[cfg(target_os = "linux")]
-fn on_session_revoked(app: &tauri::AppHandle, id: u64, node_ids: Vec<u32>) {
-    use tauri::{Emitter, Manager};
-
-    let state = match app.try_state::<crate::AppState>() {
-        Some(s) => s,
-        None => return,
-    };
-    if let Ok(mut sessions) = state.screencast_sessions.lock() {
+fn on_session_revoked(core: &Core, id: u64, node_ids: Vec<u32>) {
+    if let Ok(mut sessions) = core.screencast_sessions.lock() {
         sessions.retain(|s| s.id != id);
     }
-    rebuild_fd_map(&state);
-    let _ = app.emit("screencast-revoked", ScreencastRevoked { node_ids });
+    rebuild_fd_map(core);
+    core.emit(CoreEvent::ScreencastRevoked(ScreencastRevoked { node_ids }));
 }
 
-/// Replace all existing screencast sources with a fresh portal session.
-#[cfg(target_os = "linux")]
-pub async fn request_screencast(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<Vec<StreamInfo>, String> {
-    let (id, streams, fd, close_tx) = open_portal_session(app).await?;
-    let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
-
-    if let Ok(mut sessions) = state.screencast_sessions.lock() {
-        // Replace: dropping the old handles closes their portal sessions and
-        // their fds. Closing only the fds (which is all this used to do) left
-        // the cast itself running, so every trip through the source picker
-        // stacked one more entry in the system's screen-sharing indicator.
-        sessions.clear();
-        sessions.push(ScreencastSession {
-            id,
-            node_ids,
-            fd,
-            close_tx: Some(close_tx),
-        });
-    }
-    rebuild_fd_map(&state);
-
-    Ok(streams)
-}
-
-/// Add sources from a new portal session to the existing set (does not remove
-/// previously selected streams). This lets users incrementally build up their
-/// source list even on DEs where the portal dialog doesn't support multi-select.
-#[cfg(target_os = "linux")]
-pub async fn add_screencast(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<Vec<StreamInfo>, String> {
-    let (id, streams, fd, close_tx) = open_portal_session(app).await?;
-    let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
-
-    // Append — keep existing sessions, add the new one
-    if let Ok(mut sessions) = state.screencast_sessions.lock() {
-        sessions.push(ScreencastSession {
-            id,
-            node_ids,
-            fd,
-            close_tx: Some(close_tx),
-        });
-    }
-    rebuild_fd_map(&state);
-
-    Ok(streams)
-}
-
-/// Close every screencast session and forget its nodes.
-///
-/// Called when a recording session actually ends — deliberately NOT from
-/// `stop_capture_loop`, which pause routes through as well: a pause has to
-/// keep the cast alive or resuming would have to re-prompt for sources.
-#[cfg(target_os = "linux")]
-pub fn release_screencast(state: &crate::AppState) {
-    if let Ok(mut sessions) = state.screencast_sessions.lock() {
-        if !sessions.is_empty() {
-            eprintln!("[screencast] releasing {} session(s)", sessions.len());
+impl Core {
+    /// Replace all existing screencast sources with a fresh portal session.
+    /// Linux only; elsewhere it fails with a fixed message.
+    pub async fn request_screencast(self: &Arc<Self>) -> Result<Vec<StreamInfo>, String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("Screencast portal is only supported on Linux".into())
         }
-        sessions.clear();
+        #[cfg(target_os = "linux")]
+        {
+            let state = self;
+            let (id, streams, fd, close_tx) = open_portal_session(Arc::clone(self)).await?;
+            let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
+
+            if let Ok(mut sessions) = state.screencast_sessions.lock() {
+                // Replace: dropping the old handles closes their portal sessions and
+                // their fds. Closing only the fds (which is all this used to do) left
+                // the cast itself running, so every trip through the source picker
+                // stacked one more entry in the system's screen-sharing indicator.
+                sessions.clear();
+                sessions.push(ScreencastSession {
+                    id,
+                    node_ids,
+                    fd,
+                    close_tx: Some(close_tx),
+                });
+            }
+            rebuild_fd_map(state);
+
+            Ok(streams)
+        }
     }
-    if let Ok(mut fds) = state.pipewire_fds.lock() {
-        fds.clear();
+
+    /// Add sources from a new portal session to the existing set (does not remove
+    /// previously selected streams). This lets users incrementally build up their
+    /// source list even on DEs where the portal dialog doesn't support multi-select.
+    /// Linux only; elsewhere it fails with a fixed message.
+    pub async fn add_screencast(self: &Arc<Self>) -> Result<Vec<StreamInfo>, String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("Screencast portal is only supported on Linux".into())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let state = self;
+            let (id, streams, fd, close_tx) = open_portal_session(Arc::clone(self)).await?;
+            let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
+
+            // Append — keep existing sessions, add the new one
+            if let Ok(mut sessions) = state.screencast_sessions.lock() {
+                sessions.push(ScreencastSession {
+                    id,
+                    node_ids,
+                    fd,
+                    close_tx: Some(close_tx),
+                });
+            }
+            rebuild_fd_map(state);
+
+            Ok(streams)
+        }
+    }
+
+    /// Close every screencast session and forget its nodes.
+    ///
+    /// Called when a recording session actually ends — deliberately NOT from
+    /// `stop_capture_loop`, which pause routes through as well: a pause has to
+    /// keep the cast alive or resuming would have to re-prompt for sources.
+    /// A no-op off Linux.
+    pub fn release_screencast(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            let state = self;
+            if let Ok(mut sessions) = state.screencast_sessions.lock() {
+                if !sessions.is_empty() {
+                    eprintln!("[screencast] releasing {} session(s)", sessions.len());
+                }
+                sessions.clear();
+            }
+            if let Ok(mut fds) = state.pipewire_fds.lock() {
+                fds.clear();
+            }
+        }
     }
 }

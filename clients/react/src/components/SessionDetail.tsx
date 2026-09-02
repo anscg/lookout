@@ -8,7 +8,7 @@ import { Overlay } from "../ui/Overlay.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
 import { ProcessingState } from "./ProcessingState.js";
 import { TimelapseEditor } from "./TimelapseEditor.js";
-import { createLookoutClient, type LookoutClient } from "../api/client.js";
+import { createLookoutClient, HttpError, type LookoutClient } from "../api/client.js";
 import { useEditLease } from "../hooks/useEditLease.js";
 import { estimateBuildProgress } from "../hooks/buildProgress.js";
 import { SessionDetailSkeleton } from "../ui/Skeleton.js";
@@ -181,6 +181,9 @@ export interface SessionDetailProps {
    *  instead of opening the inline editor — e.g. the desktop app opens a
    *  dedicated resizable editor window (the main window is a fixed 480px). */
   onEdit?: () => void;
+  /** Bring your own API client (see `LookoutProviderProps.client`).
+   *  Defaults to the fetch client for `apiBaseUrl` + `token`. */
+  client?: LookoutClient;
 }
 
 export function SessionDetail({
@@ -194,6 +197,7 @@ export function SessionDetail({
   onEdit,
   belowVideo,
   titleAction,
+  client: clientProp,
 }: SessionDetailProps) {
   const [sessionInfo, setSessionInfo] = useState<{ name: string; createdAt: string } | null>(null);
   const [isRenaming, setIsRenaming] = useState(false);
@@ -219,8 +223,8 @@ export function SessionDetail({
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const client = useMemo(
-    () => createLookoutClient({ baseUrl: apiBaseUrl, token }),
-    [apiBaseUrl, token],
+    () => clientProp ?? createLookoutClient({ baseUrl: apiBaseUrl, token }),
+    [clientProp, apiBaseUrl, token],
   );
 
   // Completion detection for the redirect hook: only a live transition from
@@ -238,25 +242,17 @@ export function SessionDetail({
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(`${apiBaseUrl}/api/sessions/${token}`);
-        if (res.ok) {
-          const data: SessionResponse = await res.json();
-          setSessionInfo({ name: data.name, createdAt: data.createdAt });
-        }
+        const data: SessionResponse = await client.getSession();
+        setSessionInfo({ name: data.name, createdAt: data.createdAt });
       } catch {
         // Non-fatal — name display is optional
       }
     })();
-  }, [token, apiBaseUrl]);
+  }, [client]);
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${apiBaseUrl}/api/sessions/${token}/status`);
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status} from /api/sessions/${token}/status\n${body.slice(0, 500)}`);
-      }
-      const data: StatusResponse = await res.json();
+      const data: StatusResponse = await client.getStatus();
       setStatus(data);
 
       const prevStatus = prevStatusRef.current;
@@ -295,11 +291,8 @@ export function SessionDetail({
       // Fetch video URL when complete
       if (data.status === "complete" && !videoUrl) {
         try {
-          const vRes = await fetch(`${apiBaseUrl}/api/sessions/${token}/video`);
-          if (vRes.ok) {
-            const v: VideoResponse = await vRes.json();
-            setVideoUrl(v.videoUrl);
-          }
+          const v: VideoResponse = await client.getVideo();
+          setVideoUrl(v.videoUrl);
         } catch {
           // Non-fatal
         }
@@ -307,7 +300,7 @@ export function SessionDetail({
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [token, apiBaseUrl, videoUrl]);
+  }, [client, videoUrl]);
 
   useEffect(() => {
     fetchStatus();
@@ -363,6 +356,7 @@ export function SessionDetail({
           <TimelapseEditor
             token={token}
             apiBaseUrl={apiBaseUrl}
+            client={client}
             onCancel={() => setEditing(false)}
             onApplied={() => {
               // Publishing flips the session compiling → complete (or
@@ -388,9 +382,7 @@ export function SessionDetail({
           onEdit={() => (onEdit ? onEdit() : setEditing(true))}
           onPublish={async () => {
             try {
-              await fetch(`${apiBaseUrl}/api/sessions/${token}/compile`, {
-                method: "POST",
-              });
+              await client.applyCuts();
             } catch {
               // Non-fatal: the hold publishes on its own if this fails.
             }
@@ -426,18 +418,14 @@ export function SessionDetail({
                     const newName = editName.trim();
                     if (newName && newName !== sessionInfo.name) {
                       try {
-                        const res = await fetch(`${apiBaseUrl}/api/sessions/${token}/name`, {
-                          method: "PATCH",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ name: newName })
-                        });
-                        if (res.ok) {
-                          setSessionInfo(prev => prev ? { ...prev, name: newName } : prev);
-                        } else {
-                          alert("Failed to rename session.");
-                        }
+                        await client.rename(newName);
+                        setSessionInfo(prev => prev ? { ...prev, name: newName } : prev);
                       } catch (err) {
-                        alert("Error renaming session.");
+                        alert(
+                          err instanceof HttpError
+                            ? "Failed to rename session."
+                            : "Error renaming session.",
+                        );
                       }
                     }
                     setIsRenaming(false);

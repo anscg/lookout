@@ -31,6 +31,11 @@ export function useLookoutContext(): LookoutContextValue {
 
 export interface LookoutProviderProps extends LookoutConfig {
   children: ReactNode;
+  /** Bring your own API client. Hosts that must not speak HTTP from the
+   *  webview (the desktop app routes every server call through its Rust
+   *  core) pass one here; everything else gets the built-in fetch client
+   *  for `apiBaseUrl` + `token`. */
+  client?: LookoutClient;
   /** Replace Lookout's blue accent with your own brand colour. Applies to
    *  primary buttons, focus rings, and progress — everywhere the UI is
    *  saying "this is the main action". Any CSS colour. */
@@ -44,6 +49,7 @@ export function LookoutProvider({
   children,
   accentColor,
   accentTextColor,
+  client: clientProp,
   ...config
 }: LookoutProviderProps) {
   const resolved = useMemo(() => resolveConfig(config), [config]);
@@ -71,12 +77,13 @@ export function LookoutProvider({
 
   const client = useMemo(
     () =>
+      clientProp ??
       createLookoutClient({
         baseUrl: resolved.apiBaseUrl,
         token: resolved.token,
         clientInfo,
       }),
-    [resolved.apiBaseUrl, resolved.token, clientInfo],
+    [clientProp, resolved.apiBaseUrl, resolved.token, clientInfo],
   );
 
   const value = useMemo(() => ({ config: resolved, client }), [resolved, client]);

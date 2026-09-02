@@ -219,7 +219,6 @@ async fn collect() -> CaptureEnvironment {
 /// Everything we know about why capture might be failing on this machine.
 /// Only called when something has already gone wrong, so the D-Bus round
 /// trips cost nothing on the happy path.
-#[tauri::command]
 pub async fn capture_environment() -> CaptureEnvironment {
     collect().await
 }

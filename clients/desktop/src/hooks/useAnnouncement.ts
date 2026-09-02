@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 
 import { getApiBase } from "../serverConfig.js";
+import { fetchAnnouncement } from "../api/tauriClient.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -32,15 +33,13 @@ export function useAnnouncement(): Announcement | null {
         // "please update" only to versions ≤ X). Best-effort: with no
         // version the server treats us as version 0, exactly like the old
         // builds that never sent one.
-        const params = new URLSearchParams({ client: "lookout-desktop" });
+        let version: string | undefined;
         try {
-          params.set("version", await getVersion());
+          version = await getVersion();
         } catch {
           // version stays unreported
         }
-        const res = await fetch(`${API_BASE}/api/announcement?${params}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const data = await fetchAnnouncement(API_BASE, { client: "lookout-desktop", version });
         if (!cancelled) setAnnouncement(data.announcement ?? null);
       } catch (e) {
         // Non-fatal — keep whatever we last had (or null) and try again later.

@@ -16,11 +16,13 @@ import {
   fontSize,
   fontWeight,
   radii,
+  HttpError,
 } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { cardButtonStyle } from "./PageLayout.js";
 import { isLinux } from "../platform.js";
 import { usePublishHeaderNav } from "../headerNav.js";
+import { fetchPrograms } from "../api/tauriClient.js";
 import { useBlacklistedApps } from "../hooks/useBlacklistedApps.js";
 import {
   DEFAULT_API_BASE,
@@ -448,8 +450,7 @@ function LinkedProgramsSettings({
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${getApiBase()}/api/programs`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+    fetchPrograms(getApiBase())
       .then((d) => {
         if (cancelled || !Array.isArray(d.programs)) return;
         const byName: Record<string, { displayName?: string; iconUrl?: string | null }> = {};
@@ -582,18 +583,15 @@ function AdvancedSettings({ onBack }: { onBack: () => void }) {
     try {
       if (target !== null) {
         // Probe a cheap public endpoint so a typo'd host fails here, not
-        // silently during the next recording.
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 6_000);
+        // silently during the next recording. Through the Rust core with a
+        // short deadline; its timeout error mentions "Timed out".
         try {
-          const res = await fetch(`${target}/api/programs`, {
-            signal: controller.signal,
-          });
-          if (!res.ok) {
-            throw new Error(`server responded ${res.status}`);
-          }
-        } finally {
-          clearTimeout(timer);
+          await fetchPrograms(target, 6_000);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/timed out/i.test(msg)) throw new Error("aborted: timed out");
+          if (e instanceof HttpError) throw new Error(`server responded ${e.status}`);
+          throw e;
         }
       }
       setApiBase(target);

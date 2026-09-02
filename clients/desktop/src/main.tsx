@@ -31,6 +31,9 @@ Sentry.init({
 
 // Wrap fetch so only cross-origin requests go through Tauri's HTTP plugin.
 // Keeping native fetch for same-origin/local requests avoids breaking React internals.
+// Lookout server API calls do NOT come through here any more: they go through
+// the Rust core via Tauri commands (see api/tauriClient.ts). What's left is
+// media — R2 video/thumbnail URLs and program icons.
 const originalFetch = window.fetch;
 window.fetch = function (input, init) {
   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;

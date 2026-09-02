@@ -3,10 +3,11 @@ import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { createLookoutClient, type CutInterval } from "@lookout/react";
+import type { CutInterval } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
+import { createTauriLookoutClient } from "../api/tauriClient.js";
 import { useBackdropState, useBackgroundBlur, useDesktopAppearance, SHELL_DRAWS_FRAME, WINDOW_MARGIN } from "../linuxChrome.js";
 import { HeaderBar } from "./HeaderBar.js";
 import { WindowResizeHandles, useWindowFrameState } from "./WindowResizeHandles.js";
@@ -284,11 +285,16 @@ export function EditorWindow({ token }: { token: string }) {
     };
   }, []);
 
+  // Server API for this session, through the Rust core.
+  const client = useRef(
+    createTauriLookoutClient({ baseUrl: getApiBase(), token }),
+  ).current;
+
   // The window title carries the session name on the native title bar;
   // the in-window strip shows it too, since the title is hidden on macOS.
   useEffect(() => {
-    fetch(`${getApiBase()}/api/sessions/${token}`)
-      .then((r) => (r.ok ? r.json() : null))
+    client
+      .getSession()
       .then((d) => {
         if (d?.name) {
           setSessionName(d.name);
@@ -298,7 +304,7 @@ export function EditorWindow({ token }: { token: string }) {
       .catch(() => {
         // Name is decoration — the editor works without it.
       });
-  }, [token]);
+  }, [client]);
 
   // Closing the window IS the decision to finish: the timelapse publishes
   // with whatever cuts are on screen. There's no "leave it hanging" exit —
@@ -308,9 +314,6 @@ export function EditorWindow({ token }: { token: string }) {
   const cutsRef = useRef<CutInterval[]>([]);
   const dirtyRef = useRef(false);
   const finishedRef = useRef(false);
-  const client = useRef(
-    createLookoutClient({ baseUrl: getApiBase(), token }),
-  ).current;
 
   const finishAndClose = useCallback(async () => {
     finishedRef.current = true;
@@ -418,6 +421,7 @@ export function EditorWindow({ token }: { token: string }) {
         <TimelapseEditor
           token={token}
           apiBaseUrl={getApiBase()}
+          client={client}
           onCutsChange={(cuts, dirty) => {
             cutsRef.current = cuts;
             dirtyRef.current = dirty;

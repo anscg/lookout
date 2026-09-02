@@ -33,7 +33,7 @@ fn redact_blacklisted_regions(
         return;
     }
 
-    let on_screen = crate::list_onscreen_window_rects();
+    let on_screen = crate::sources::list_onscreen_window_rects();
     let (mon_x, mon_y, mon_w, mon_h) = monitor_bounds;
     let scale_x = capture_w as f64 / mon_w;
     let scale_y = capture_h as f64 / mon_h;

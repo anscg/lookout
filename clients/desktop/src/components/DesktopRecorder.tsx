@@ -41,6 +41,7 @@ interface DesktopRecorderProps {
 }
 
 import { getApiBase } from "../serverConfig.js";
+import { createTauriLookoutClient } from "../api/tauriClient.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -306,11 +307,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
     console.log(`[session] stopping, name: ${name?.trim() || "(none)"}, edit: ${edit}`);
     if (name && name.trim()) {
       try {
-        await fetch(`${API_BASE}/api/sessions/${token}/name`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: name.trim() }),
-        });
+        await createTauriLookoutClient({ baseUrl: API_BASE, token }).rename(name.trim());
       } catch (e) {
         console.warn("[session] rename failed (non-fatal):", e);
       }

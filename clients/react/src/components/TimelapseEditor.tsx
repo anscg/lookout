@@ -50,6 +50,9 @@ import { colors, fontSize, fontWeight, radii, spacing } from "../ui/theme.js";
 export interface TimelapseEditorProps {
   token: string;
   apiBaseUrl: string;
+  /** Bring your own API client (see `LookoutProviderProps.client`).
+   *  Defaults to the fetch client for `apiBaseUrl` + `token`. */
+  client?: LookoutClient;
   /** The timelapse was published — with cuts baked in, or without them.
    *  The caller should return to its detail view and poll status. The
    *  publish response is passed through: `instant`/`complete` means it's
@@ -125,13 +128,14 @@ type DragState =
 export function TimelapseEditor({
   token,
   apiBaseUrl,
+  client: clientProp,
   onApplied,
   onCancel,
   onCutsChange,
 }: TimelapseEditorProps) {
   const client = useMemo<LookoutClient>(
-    () => createLookoutClient({ baseUrl: apiBaseUrl, token }),
-    [apiBaseUrl, token],
+    () => clientProp ?? createLookoutClient({ baseUrl: apiBaseUrl, token }),
+    [clientProp, apiBaseUrl, token],
   );
 
   useEffect(() => injectEditorStyles(), []);

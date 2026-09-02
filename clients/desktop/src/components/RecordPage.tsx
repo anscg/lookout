@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { invoke } from "../logger.js";
 import {
@@ -20,6 +20,7 @@ import { openEditorWindow } from "./EditorWindow.js";
 import { PageLayout, cardButtonStyle } from "./PageLayout.js";
 
 import { getApiBase } from "../serverConfig.js";
+import { createTauriLookoutClient } from "../api/tauriClient.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -42,6 +43,11 @@ export function RecordPage({ token, onBack, onViewSession, onSourcePicker }: Rec
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [isPrompting, setIsPrompting] = useState(false);
+  // Server API for this session, through the Rust core.
+  const client = useMemo(
+    () => createTauriLookoutClient({ baseUrl: API_BASE, token }),
+    [token],
+  );
 
   // Check if the session is still recordable before showing source picker.
   // Also re-run whenever we come back to the picker mid-session (see
@@ -53,15 +59,7 @@ export function RecordPage({ token, onBack, onViewSession, onSourcePicker }: Rec
   const refreshSessionStatus = useCallback(async () => {
     console.log(`[record] checking session status for token: ${token.slice(0, 8)}...`);
     try {
-      const res = await fetch(`${API_BASE}/api/sessions/${token}/status`);
-      if (!res.ok) {
-        const errText = `HTTP ${res.status} ${await res.text().catch(() => "")}`;
-        console.error(`[record] session check failed: ${errText}`);
-        setCheckError(errText);
-        setSessionCheck("error");
-        return;
-      }
-      const data = await res.json();
+      const data = await client.getStatus();
       console.log(`[record] session status: ${data.status}`);
       setSessionStatus(data.status);
       if (["stopped", "compiling", "complete", "failed"].includes(data.status)) {
@@ -74,7 +72,7 @@ export function RecordPage({ token, onBack, onViewSession, onSourcePicker }: Rec
       setCheckError(err.message || String(err));
       setSessionCheck("error");
     }
-  }, [token]);
+  }, [token, client]);
 
   useEffect(() => {
     void refreshSessionStatus();
@@ -108,11 +106,7 @@ export function RecordPage({ token, onBack, onViewSession, onSourcePicker }: Rec
     );
     if (name && name.trim()) {
       try {
-        await fetch(`${API_BASE}/api/sessions/${token}/name`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: name.trim() }),
-        });
+        await client.rename(name.trim());
       } catch (e) {
         console.warn("[record] rename failed:", e);
       }
@@ -120,15 +114,7 @@ export function RecordPage({ token, onBack, onViewSession, onSourcePicker }: Rec
     try {
       // `edit: true` holds the timelapse unpublished after it compiles so
       // the user can cut it first — programs only ever see it finished.
-      await fetch(`${API_BASE}/api/sessions/${token}/stop`, {
-        method: "POST",
-        ...(edit
-          ? {
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ edit: true }),
-            }
-          : {}),
-      });
+      await client.stop(edit ? { edit: true } : undefined);
       console.log("[record] session stopped");
     } catch (e) {
       console.error("[record] stop failed:", e);
@@ -334,7 +320,7 @@ export function RecordPage({ token, onBack, onViewSession, onSourcePicker }: Rec
             }}
             style={{ position: "absolute", inset: 0, height: "100%" }}
           >
-            <LookoutProvider token={token} apiBaseUrl={API_BASE}>
+            <LookoutProvider token={token} apiBaseUrl={API_BASE} client={client}>
               <DesktopRecorder
                 token={token}
                 source={captureSource}
